@@ -15,13 +15,6 @@ Add to your `Cargo.toml`:
 logos-rust-sdk = { path = "../logos-rust-sdk" }
 ```
 
-Or if using the workspace:
-
-```toml
-[dependencies]
-logos-rust-sdk = { path = "../logos-rust-sdk" }
-```
-
 ## Quick Start
 
 ```rust
