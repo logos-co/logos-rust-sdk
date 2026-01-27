@@ -1,9 +1,9 @@
 [package]
 name = "logos-rust-sdk"
 version = "0.1.0"
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
+edition = "2021"
+license = "MIT"
+authors = ["Logos Team"]
 description = "Rust SDK for Logos Core - provides high-level API for interacting with Logos modules"
 repository = "https://github.com/logos-co/logos-chat-ui"
 keywords = ["logos", "sdk", "ffi", "waku", "chat"]
@@ -14,9 +14,9 @@ name = "logos_rust_sdk"
 path = "src/lib.rs"
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-libc.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
 
 [build-dependencies]
 pkg-config = "0.3"
