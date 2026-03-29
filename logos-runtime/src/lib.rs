@@ -12,7 +12,7 @@ mod server;
 mod dispatch;
 
 pub use value::{Value, LogosResult};
-pub use dispatch::CborDispatch;
+pub use dispatch::{CborDispatch, EventEmitter, EventBroadcast};
 pub use server::CborServer;
 
 use std::env;
