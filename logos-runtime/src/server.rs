@@ -1,22 +1,80 @@
 /// Qt-free CBOR socket server for Rust modules.
 ///
 /// Implements the same wire protocol as the C++ CborServer/CborTransportHost:
-/// 4-byte big-endian length prefix + CBOR payload over Unix domain sockets.
+/// 4-byte big-endian length prefix + CBOR payload over Unix domain sockets or TCP.
+///
+/// Endpoint URLs:
+///   "unix:///path" or "/path"  — Unix domain socket
+///   "tcp://host:port"          — TCP socket
 
 use crate::cbor;
 use crate::dispatch::{CborDispatch, EventBroadcast, EventEmitter};
 use crate::value::Value;
 
 use std::io::{self, Read, Write};
-use std::net::Shutdown;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+// ── Endpoint parsing ────────────────────────────────────────────────────────
+
+/// Parsed endpoint URL for the CBOR server.
+#[derive(Debug, Clone)]
+pub enum CborEndpoint {
+    Unix(String),
+    Tcp { host: String, port: u16 },
+}
+
+impl CborEndpoint {
+    /// Parse an endpoint URL string.
+    ///
+    /// - "tcp://host:port" → Tcp
+    /// - "unix:///path" → Unix
+    /// - "/path" (raw) → Unix
+    pub fn parse(url: &str) -> Self {
+        if let Some(rest) = url.strip_prefix("tcp://") {
+            if let Some(colon) = rest.rfind(':') {
+                let host = &rest[..colon];
+                if let Ok(port) = rest[colon + 1..].parse::<u16>() {
+                    if port > 0 && !host.is_empty() {
+                        return CborEndpoint::Tcp {
+                            host: host.to_string(),
+                            port,
+                        };
+                    }
+                }
+            }
+            // Invalid TCP URL, fall back to Unix with empty path
+            return CborEndpoint::Unix(String::new());
+        }
+
+        if let Some(path) = url.strip_prefix("unix://") {
+            return CborEndpoint::Unix(path.to_string());
+        }
+
+        // Raw path
+        CborEndpoint::Unix(url.to_string())
+    }
+
+    /// Human-readable representation.
+    pub fn to_string(&self) -> String {
+        match self {
+            CborEndpoint::Unix(path) => format!("unix://{}", path),
+            CborEndpoint::Tcp { host, port } => format!("tcp://{}:{}", host, port),
+        }
+    }
+}
+
+// ── Type-erased stream writer for client tracking ───────────────────────────
+
+/// A type-erased write handle for broadcasting events.
+type ClientWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
 /// Holds the shared client list and broadcasts events to all connected clients.
 struct ClientBroadcaster {
-    clients: Arc<Mutex<Vec<Arc<Mutex<UnixStream>>>>>,
+    clients: Arc<Mutex<Vec<ClientWriter>>>,
 }
 
 impl EventBroadcast for ClientBroadcaster {
@@ -31,20 +89,23 @@ impl EventBroadcast for ClientBroadcaster {
         let mut clients = self.clients.lock().unwrap();
         clients.retain(|client| {
             let mut stream = client.lock().unwrap();
-            write_frame(&mut *stream, &bytes).is_ok()
+            write_frame_dyn(&mut **stream, &bytes).is_ok()
         });
     }
 }
 
+// ── CborServer ──────────────────────────────────────────────────────────────
+
 pub struct CborServer {
-    socket_path: String,
+    endpoint: CborEndpoint,
     dispatch: Arc<dyn CborDispatch>,
     running: Arc<AtomicBool>,
-    clients: Arc<Mutex<Vec<Arc<Mutex<UnixStream>>>>>,
+    clients: Arc<Mutex<Vec<ClientWriter>>>,
 }
 
 impl CborServer {
-    pub fn new(socket_path: &str, mut dispatch: Box<dyn CborDispatch>) -> Self {
+    /// Create a new server from a socket path or endpoint URL.
+    pub fn new(endpoint_url: &str, mut dispatch: Box<dyn CborDispatch>) -> Self {
         let clients = Arc::new(Mutex::new(Vec::new()));
         let broadcaster = Arc::new(ClientBroadcaster {
             clients: clients.clone(),
@@ -52,7 +113,7 @@ impl CborServer {
         dispatch.set_event_emitter(EventEmitter::new(broadcaster));
 
         CborServer {
-            socket_path: socket_path.to_string(),
+            endpoint: CborEndpoint::parse(endpoint_url),
             dispatch: Arc::from(dispatch),
             running: Arc::new(AtomicBool::new(false)),
             clients,
@@ -75,17 +136,25 @@ impl CborServer {
         let mut clients = self.clients.lock().unwrap();
         clients.retain(|client| {
             let mut stream = client.lock().unwrap();
-            write_frame(&mut *stream, &bytes).is_ok()
+            write_frame_dyn(&mut **stream, &bytes).is_ok()
         });
     }
 
-    /// Run the server, blocking until an error occurs or the socket is closed.
+    /// Run the server, blocking until an error occurs or stopped.
     pub fn run(&self) -> io::Result<()> {
-        // Remove stale socket
-        let _ = std::fs::remove_file(&self.socket_path);
-
-        let listener = UnixListener::bind(&self.socket_path)?;
         self.running.store(true, Ordering::SeqCst);
+
+        match &self.endpoint {
+            CborEndpoint::Unix(path) => self.run_unix(path),
+            CborEndpoint::Tcp { host, port } => self.run_tcp(host, *port),
+        }
+    }
+
+    fn run_unix(&self, path: &str) -> io::Result<()> {
+        // Remove stale socket
+        let _ = std::fs::remove_file(path);
+
+        let listener = UnixListener::bind(path)?;
 
         for stream in listener.incoming() {
             if !self.running.load(Ordering::SeqCst) {
@@ -94,20 +163,7 @@ impl CborServer {
 
             match stream {
                 Ok(stream) => {
-                    let client_stream = match stream.try_clone() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    let client = Arc::new(Mutex::new(client_stream));
-                    self.clients.lock().unwrap().push(client.clone());
-
-                    let dispatch = self.dispatch.clone();
-                    let running = self.running.clone();
-                    let clients = self.clients.clone();
-
-                    thread::spawn(move || {
-                        Self::handle_connection_threaded(stream, dispatch, running, clients);
-                    });
+                    self.accept_unix_stream(stream);
                 }
                 Err(e) => {
                     if !self.running.load(Ordering::SeqCst) {
@@ -118,8 +174,65 @@ impl CborServer {
             }
         }
 
-        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(path);
         Ok(())
+    }
+
+    fn run_tcp(&self, host: &str, port: u16) -> io::Result<()> {
+        let addr = format!("{}:{}", host, port);
+        let listener = TcpListener::bind(&addr)?;
+
+        // Disable Nagle on accepted connections for lower latency
+        for stream in listener.incoming() {
+            if !self.running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            match stream {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    self.accept_tcp_stream(stream);
+                }
+                Err(e) => {
+                    if !self.running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    eprintln!("Accept error: {}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn accept_unix_stream(&self, stream: UnixStream) {
+        let client_stream: Box<dyn Write + Send> = match stream.try_clone() {
+            Ok(s) => Box::new(s),
+            Err(_) => return,
+        };
+        let client: ClientWriter = Arc::new(Mutex::new(client_stream));
+        self.clients.lock().unwrap().push(client);
+
+        let dispatch = self.dispatch.clone();
+        let running = self.running.clone();
+        thread::spawn(move || {
+            Self::handle_connection(stream, dispatch, running);
+        });
+    }
+
+    fn accept_tcp_stream(&self, stream: TcpStream) {
+        let client_stream: Box<dyn Write + Send> = match stream.try_clone() {
+            Ok(s) => Box::new(s),
+            Err(_) => return,
+        };
+        let client: ClientWriter = Arc::new(Mutex::new(client_stream));
+        self.clients.lock().unwrap().push(client);
+
+        let dispatch = self.dispatch.clone();
+        let running = self.running.clone();
+        thread::spawn(move || {
+            Self::handle_connection(stream, dispatch, running);
+        });
     }
 
     /// Stop the server.
@@ -127,11 +240,11 @@ impl CborServer {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    fn handle_connection_threaded(
-        mut stream: UnixStream,
+    /// Handle a single connection (works with both Unix and TCP streams).
+    fn handle_connection<S: Read + Write>(
+        mut stream: S,
         dispatch: Arc<dyn CborDispatch>,
         running: Arc<AtomicBool>,
-        clients: Arc<Mutex<Vec<Arc<Mutex<UnixStream>>>>>,
     ) {
         // Step 1: Read bind handshake
         let bind_frame = match read_value(&mut stream) {
@@ -228,22 +341,14 @@ impl CborServer {
             }
         }
 
-        // Unregister client — remove all entries whose underlying fd matches
-        // We can't easily compare fds, so just remove closed/errored streams
-        // by attempting a zero-length peek. Instead, remove by Arc pointer identity.
-        {
-            let mut client_list = clients.lock().unwrap();
-            // We don't have a reference to the Arc we registered, so prune
-            // dead connections — the stream we're closing will fail writes.
-        }
-
-        let _ = stream.shutdown(Shutdown::Both);
+        // Stream is closed when dropped
+        drop(stream);
     }
 }
 
-// ── Frame I/O ────────────────────────────────────────────────────────────────
+// ── Frame I/O (generic over Read/Write) ─────────────────────────────────────
 
-fn write_frame(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
+fn write_frame_dyn(stream: &mut dyn Write, data: &[u8]) -> io::Result<()> {
     let len = data.len() as u32;
     let header = len.to_be_bytes();
     stream.write_all(&header)?;
@@ -251,7 +356,7 @@ fn write_frame(stream: &mut UnixStream, data: &[u8]) -> io::Result<()> {
     stream.flush()
 }
 
-fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+fn read_frame(stream: &mut dyn Read) -> io::Result<Vec<u8>> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header)?;
     let len = u32::from_be_bytes(header) as usize;
@@ -262,12 +367,12 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_value(stream: &mut UnixStream, value: &Value) -> io::Result<()> {
+fn write_value(stream: &mut dyn Write, value: &Value) -> io::Result<()> {
     let bytes = cbor::encode(value);
-    write_frame(stream, &bytes)
+    write_frame_dyn(stream, &bytes)
 }
 
-fn read_value(stream: &mut UnixStream) -> Option<Value> {
+fn read_value(stream: &mut dyn Read) -> Option<Value> {
     let bytes = read_frame(stream).ok()?;
     cbor::decode(&bytes).ok()
 }
@@ -307,17 +412,17 @@ mod tests {
         let (server_stream, _) = listener.accept().unwrap();
 
         // Set up the server's client tracking
-        let clients: Arc<Mutex<Vec<Arc<Mutex<UnixStream>>>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let clients: Arc<Mutex<Vec<ClientWriter>>> = Arc::new(Mutex::new(Vec::new()));
         let client_copy = server_stream.try_clone().unwrap();
+        let writer: Box<dyn Write + Send> = Box::new(client_copy);
         clients
             .lock()
             .unwrap()
-            .push(Arc::new(Mutex::new(client_copy)));
+            .push(Arc::new(Mutex::new(writer)));
 
         // Build the server struct manually for testing emit_event
         let server = CborServer {
-            socket_path: sock_path.to_string_lossy().to_string(),
+            endpoint: CborEndpoint::Unix(sock_path.to_string_lossy().to_string()),
             dispatch: Arc::new(MockDispatch),
             running: Arc::new(AtomicBool::new(true)),
             clients,
@@ -349,5 +454,93 @@ mod tests {
         assert_eq!(data.len(), 2);
         assert_eq!(data[0].as_string(), Some("hello"));
         assert_eq!(data[1].as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_emit_event_over_tcp() {
+        // Create a TCP listener on an ephemeral port
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Connect a client
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+
+        // Set up the server's client tracking
+        let clients: Arc<Mutex<Vec<ClientWriter>>> = Arc::new(Mutex::new(Vec::new()));
+        let client_copy = server_stream.try_clone().unwrap();
+        let writer: Box<dyn Write + Send> = Box::new(client_copy);
+        clients
+            .lock()
+            .unwrap()
+            .push(Arc::new(Mutex::new(writer)));
+
+        let server = CborServer {
+            endpoint: CborEndpoint::Tcp {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+            },
+            dispatch: Arc::new(MockDispatch),
+            running: Arc::new(AtomicBool::new(true)),
+            clients,
+        };
+
+        // Emit an event
+        server.emit_event("tcpEvent", &[Value::String("tcp_hello".into())]);
+
+        // Read from client
+        let mut header = [0u8; 4];
+        client.read_exact(&mut header).unwrap();
+        let len = u32::from_be_bytes(header) as usize;
+        let mut buf = vec![0u8; len];
+        client.read_exact(&mut buf).unwrap();
+
+        let value = cbor::decode(&buf).unwrap();
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_string()),
+            Some("event")
+        );
+        assert_eq!(
+            value.get("name").and_then(|v| v.as_string()),
+            Some("tcpEvent")
+        );
+    }
+
+    #[test]
+    fn test_endpoint_parse_unix() {
+        match CborEndpoint::parse("unix:///tmp/test.sock") {
+            CborEndpoint::Unix(path) => assert_eq!(path, "/tmp/test.sock"),
+            _ => panic!("expected Unix"),
+        }
+    }
+
+    #[test]
+    fn test_endpoint_parse_raw_path() {
+        match CborEndpoint::parse("/tmp/test.sock") {
+            CborEndpoint::Unix(path) => assert_eq!(path, "/tmp/test.sock"),
+            _ => panic!("expected Unix"),
+        }
+    }
+
+    #[test]
+    fn test_endpoint_parse_tcp() {
+        match CborEndpoint::parse("tcp://localhost:9100") {
+            CborEndpoint::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(port, 9100);
+            }
+            _ => panic!("expected Tcp"),
+        }
+    }
+
+    #[test]
+    fn test_endpoint_parse_tcp_with_ip() {
+        match CborEndpoint::parse("tcp://192.168.1.100:8080") {
+            CborEndpoint::Tcp { host, port } => {
+                assert_eq!(host, "192.168.1.100");
+                assert_eq!(port, 8080);
+            }
+            _ => panic!("expected Tcp"),
+        }
     }
 }
