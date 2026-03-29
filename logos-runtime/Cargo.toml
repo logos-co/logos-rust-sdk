@@ -1,0 +1,12 @@
+[package]
+name = "logos_runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Logos Team"]
+description = "Rust runtime for Logos CBOR modules - provides Value type, CBOR codec, and Unix socket server"
+keywords = ["logos", "cbor", "runtime", "module"]
+categories = ["network-programming"]
+
+[dependencies]
+ciborium = "0.2"

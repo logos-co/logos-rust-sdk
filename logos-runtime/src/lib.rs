@@ -1,0 +1,57 @@
+//! Logos Runtime — Rust CBOR module runtime
+//!
+//! Provides the building blocks for Rust-based Logos modules:
+//! - [`Value`] — neutral type system mirroring `logos::Value` in C++
+//! - [`CborDispatch`] — trait for generated dispatch code
+//! - [`CborServer`] — Unix socket server speaking the Logos CBOR wire protocol
+//! - [`serve_cbor()`] — convenience entry point for module executables
+
+mod value;
+mod cbor;
+mod server;
+mod dispatch;
+
+pub use value::{Value, LogosResult};
+pub use dispatch::CborDispatch;
+pub use server::CborServer;
+
+use std::env;
+
+/// Convenience entry point for CBOR module executables.
+///
+/// Reads `--socket <path>` from argv or `LOGOS_SOCKET_PATH` from environment,
+/// creates a [`CborServer`], and blocks until stopped.
+pub fn serve_cbor(dispatch: Box<dyn CborDispatch>) {
+    let args: Vec<String> = env::args().collect();
+    let mut socket_path = String::new();
+
+    // Parse --socket argument
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--socket" && i + 1 < args.len() {
+            socket_path = args[i + 1].clone();
+            break;
+        }
+        i += 1;
+    }
+
+    // Fall back to environment variable
+    if socket_path.is_empty() {
+        if let Ok(env_path) = env::var("LOGOS_SOCKET_PATH") {
+            socket_path = env_path;
+        }
+    }
+
+    // Default
+    if socket_path.is_empty() {
+        socket_path = format!("/tmp/logos_{}.sock", dispatch.module_name());
+    }
+
+    let server = CborServer::new(&socket_path, dispatch);
+    eprintln!("{} listening on {}", server.module_name(), socket_path);
+
+    if let Err(e) = server.run() {
+        eprintln!("Server error: {}", e);
+        std::process::exit(1);
+    }
+}
