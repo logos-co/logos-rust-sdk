@@ -5,15 +5,7 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum LogosError {
-    NotInitialized,
-    AlreadyInitialized,
-    AlreadyStarted,
-    SetPluginsDirFailed(String),
-    StartFailed(String),
-    PluginLoadFailed(String),
-    PluginUnloadFailed(String),
-    PluginProcessFailed(String),
-    MethodCallFailed {
+    PluginCallFailed {
         plugin: String,
         method: String,
         message: String,
@@ -26,38 +18,13 @@ pub enum LogosError {
     InvalidString(NulError),
     JsonError(String),
     ChannelClosed,
-    Timeout,
     Other(String),
 }
 
 impl fmt::Display for LogosError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LogosError::NotInitialized => {
-                write!(f, "Logos SDK has not been initialized")
-            }
-            LogosError::AlreadyInitialized => {
-                write!(f, "Logos SDK has already been initialized")
-            }
-            LogosError::AlreadyStarted => {
-                write!(f, "Logos SDK has already been started")
-            }
-            LogosError::SetPluginsDirFailed(path) => {
-                write!(f, "Failed to set plugins directory: {}", path)
-            }
-            LogosError::StartFailed(msg) => {
-                write!(f, "Failed to start Logos Core: {}", msg)
-            }
-            LogosError::PluginLoadFailed(name) => {
-                write!(f, "Failed to load plugin: {}", name)
-            }
-            LogosError::PluginUnloadFailed(name) => {
-                write!(f, "Failed to unload plugin: {}", name)
-            }
-            LogosError::PluginProcessFailed(path) => {
-                write!(f, "Failed to process plugin file: {}", path)
-            }
-            LogosError::MethodCallFailed { plugin, method, message } => {
+            LogosError::PluginCallFailed { plugin, method, message } => {
                 write!(f, "Method call {}.{}() failed: {}", plugin, method, message)
             }
             LogosError::EventListenerFailed { plugin, event, message } => {
@@ -71,9 +38,6 @@ impl fmt::Display for LogosError {
             }
             LogosError::ChannelClosed => {
                 write!(f, "Callback channel was closed unexpectedly")
-            }
-            LogosError::Timeout => {
-                write!(f, "Operation timed out")
             }
             LogosError::Other(msg) => {
                 write!(f, "{}", msg)
@@ -100,12 +64,6 @@ impl From<NulError> for LogosError {
 impl From<serde_json::Error> for LogosError {
     fn from(e: serde_json::Error) -> Self {
         LogosError::JsonError(e.to_string())
-    }
-}
-
-impl<T> From<std::sync::mpsc::SendError<T>> for LogosError {
-    fn from(_: std::sync::mpsc::SendError<T>) -> Self {
-        LogosError::ChannelClosed
     }
 }
 
