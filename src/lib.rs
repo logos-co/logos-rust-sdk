@@ -1,43 +1,36 @@
 //! # Logos Rust SDK
 //!
-//! A Rust SDK for interacting with Logos Core modules.
+//! A Rust SDK for calling other Logos modules from within a module.
 //!
-//! This SDK provides a high-level API for:
-//! - Initializing and managing the Logos Core lifecycle
-//! - Loading and unloading plugins/modules
-//! - Calling methods on plugins asynchronously
-//! - Subscribing to events from plugins
+//! This SDK wraps the `logos-module-client` C API (`logos_sdk_*`), which in turn
+//! uses `LogosAPI` / `LogosAPIClient` over Qt Remote Objects IPC. No lifecycle
+//! management is needed — connections are established lazily on first call.
 //!
-//! ## Example
+//! ## Example (inside a Logos module)
 //!
 //! ```rust,no_run
-//! use logos_rust_sdk::{LogosAPI, LogosError};
+//! use logos_rust_sdk::{LogosModuleSDK, LogosError};
 //!
-//! fn main() -> Result<(), LogosError> {
-//!     // Initialize the SDK
-//!     let logos = LogosAPI::new()?;
-//!     logos.set_plugins_dir("/path/to/modules")?;
-//!     logos.start()?;
-//!
-//!     // Load plugins
-//!     logos.load_plugin("waku_module")?;
-//!     logos.load_plugin("chat")?;
-//!
-//!     // Get a plugin proxy and call methods
-//!     let chat = logos.plugin("chat");
-//!     chat.call("initialize", &[])?;
-//!     chat.call("joinChannel", &["my-channel"])?;
-//!
-//!     // Subscribe to events
-//!     let messages_rx = chat.on("chatMessage")?;
-//!
-//!     // Main loop
-//!     loop {
-//!         logos.process_events();
-//!         while let Ok(event) = messages_rx.try_recv() {
-//!             println!("Got event: {:?}", event);
-//!         }
+//! // Call another module synchronously (suitable for use in Q_INVOKABLE-generated functions)
+//! fn call_provider_add(a: i64, b: i64) -> i64 {
+//!     let sdk = LogosModuleSDK::new();
+//!     let provider = sdk.plugin("rust_provider_module");
+//!     match provider.call_sync("add", &[a, b]) {
+//!         Ok(result) if result.success => result.message.parse().unwrap_or(-1),
+//!         _ => -1,
 //!     }
+//! }
+//!
+//! // Async call with channel-based result
+//! fn call_provider_greet(name: &str) -> Result<(), LogosError> {
+//!     let sdk = LogosModuleSDK::new();
+//!     let provider = sdk.plugin("rust_provider_module");
+//!     let rx = provider.call("greet", &[name])?;
+//!     // Check later (non-blocking):
+//!     if let Ok(result) = rx.try_recv() {
+//!         println!("Greeting: {}", result.message);
+//!     }
+//!     Ok(())
 //! }
 //! ```
 
@@ -53,4 +46,4 @@ pub use error::LogosError;
 pub use params::{Param, ToParam};
 pub use callback::{CallResult, EventData};
 pub use plugin::PluginProxy;
-pub use api::LogosAPI;
+pub use api::LogosModuleSDK;

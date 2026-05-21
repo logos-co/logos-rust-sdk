@@ -1,47 +1,47 @@
-//! FFI bindings to liblogos_core.
+//! FFI bindings to liblogos_module_client (logos-module-client).
 
 use std::ffi::{c_char, c_int, c_void};
 
-pub type LogosAsyncCallback = extern "C" fn(
+/// C callback type matching LogosSdkCallback in logos_sdk_c.h.
+pub type LogosSdkCallback = extern "C" fn(
     result: c_int,
     message: *const c_char,
     user_data: *mut c_void,
 );
 
 extern "C" {
-    pub fn logos_core_init(argc: c_int, argv: *mut *mut c_char);
-    pub fn logos_core_set_plugins_dir(plugins_dir: *const c_char);
-    pub fn logos_core_start();
-    pub fn logos_core_exec() -> c_int;
-    pub fn logos_core_cleanup();
-    pub fn logos_core_process_events();
-}
-
-extern "C" {
-    pub fn logos_core_process_plugin(plugin_path: *const c_char) -> *const c_char;
-    pub fn logos_core_load_plugin(plugin_name: *const c_char) -> c_int;
-    pub fn logos_core_unload_plugin(plugin_name: *const c_char) -> c_int;
-    pub fn logos_core_get_loaded_plugins() -> *mut *mut c_char;
-    pub fn logos_core_get_known_plugins() -> *mut *mut c_char;
-}
-
-extern "C" {
-    pub fn logos_core_call_plugin_method_async(
+    /// Call a plugin method synchronously.
+    /// Returns a heap-allocated UTF-8 string that must be freed with logos_sdk_free_string.
+    /// Returns NULL on failure.
+    pub fn logos_sdk_call_method_sync(
         plugin_name: *const c_char,
         method_name: *const c_char,
         params_json: *const c_char,
-        callback: LogosAsyncCallback,
+    ) -> *mut c_char;
+
+    /// Free a string returned by logos_sdk_call_method_sync.
+    pub fn logos_sdk_free_string(str: *mut c_char);
+
+    /// Call a plugin method asynchronously.
+    /// callback receives (1=success/0=failure, message, user_data) on completion.
+    pub fn logos_sdk_call_method_async(
+        plugin_name: *const c_char,
+        method_name: *const c_char,
+        params_json: *const c_char,
+        callback: LogosSdkCallback,
         user_data: *mut c_void,
     );
 
-    pub fn logos_core_register_event_listener(
+    /// Register an event listener for a specific event from a plugin.
+    /// callback fires each time the event is emitted with (1, json_event_data, user_data).
+    pub fn logos_sdk_register_event(
         plugin_name: *const c_char,
         event_name: *const c_char,
-        callback: LogosAsyncCallback,
+        callback: LogosSdkCallback,
         user_data: *mut c_void,
     );
-}
 
-extern "C" {
-    pub fn logos_core_get_token(module_name: *const c_char) -> *const c_char;
+    /// Shut down the SDK's internal core client, releasing connections.
+    /// Safe to call multiple times.
+    pub fn logos_sdk_shutdown();
 }

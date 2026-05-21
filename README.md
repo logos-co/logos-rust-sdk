@@ -1,10 +1,12 @@
-# Logos Rust SDK (Experimental)
+# logos-rust-sdk
 
-A Rust SDK for interacting with Logos Core modules. This SDK provides a high-level API for initializing the core, loading plugins/modules, calling methods, and subscribing to events.
+A Rust SDK for calling other Logos modules from within a Logos module. Wraps the [`logos-module-client`](https://github.com/logos-co/logos-module-client) C API to provide an ergonomic Rust interface for synchronous and asynchronous inter-module communication.
 
 ## Overview
 
-The Logos Rust SDK wraps the `liblogos_core` C API, similar to how the [logos-js-sdk](https://github.com/logos-co/logos-js-sdk) and [logos-nim-sdk](https://github.com/logos-co/logos-core-poc/tree/main/logos-nim-sdk) work.
+When writing a Logos module in Rust, you need a way to call methods on other loaded modules and subscribe to their events. This SDK provides that — it sits on top of `logos-module-client`'s `logos_sdk_*` C API and handles parameter serialization, callback trampolines, and channel-based result delivery.
+
+The SDK is a **pure Rust rlib** with no build-time C library dependency. The `logos_sdk_*` symbols it references are resolved at final link time when CMake links your module plugin (`.so`/`.dylib`) against `liblogos_module_client`.
 
 ## Installation
 
@@ -12,131 +14,191 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-logos-rust-sdk = { path = "../logos-rust-sdk" }
+logos-rust-sdk = { path = "../../logos-rust-sdk" }
+```
+
+In your module's `CMakeLists.txt`, ensure `liblogos_module_client` is linked so the FFI symbols resolve:
+
+```cmake
+find_library(LOGOS_MODULE_CLIENT_LIB logos_module_client
+    HINTS $ENV{LOGOS_MODULE_CLIENT_ROOT}/lib)
+target_link_libraries(${MODULE_NAME} PRIVATE ${LOGOS_MODULE_CLIENT_LIB})
 ```
 
 ## Quick Start
 
 ```rust
-use logos_rust_sdk::{LogosAPI, LogosError};
+use logos_rust_sdk::LogosModuleSDK;
 
-fn main() -> Result<(), LogosError> {
-    // Initialize the SDK
-    let mut logos = LogosAPI::new()?;
-    logos.set_plugins_dir("/path/to/modules")?;
-    logos.start()?;
+let sdk = LogosModuleSDK::new();
+let provider = sdk.plugin("rust_provider_module");
 
-    // Load plugins
-    logos.load_plugins(&["capability_module", "waku_module", "chat"])?;
+// Synchronous call — use this inside Q_INVOKABLE-generated functions
+let result = provider.call_sync("add", &[5i64, 3i64])?;
+println!("5 + 3 = {}", result.message);  // "8"
 
-    // Get a plugin proxy
-    let mut chat = logos.plugin("chat");
-
-    // Call methods
-    chat.call("initialize", &[])?;
-    chat.call("joinChannel", &["baixa-chiado"])?;
-
-    // Subscribe to events
-    let messages_rx = chat.on("chatMessage")?;
-
-    // Main event loop
-    loop {
-        // Process Qt events (required for callbacks to work)
-        logos.process_events();
-
-        // Check for incoming messages
-        while let Ok(event) = messages_rx.try_recv() {
-            // event.data is a JSON value with the event payload
-            // For chatMessage: [timestamp, sender, message]
-            if let Some(sender) = event.get_str(1) {
-                if let Some(message) = event.get_str(2) {
-                    println!("{}: {}", sender, message);
-                }
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+// Asynchronous call — returns a channel receiver
+let rx = provider.call("greet", &["World"])?;
+if let Ok(result) = rx.try_recv() {
+    println!("{}", result.message);  // "Hello, World! (from Rust provider)"
 }
 ```
 
 ## API Reference
 
-### LogosAPI
+### `LogosModuleSDK`
 
-The main entry point for interacting with Logos Core.
+The main entry point. No initialization is needed — `logos-module-client` manages connections lazily.
 
 ```rust
-// Create a new instance (initializes Qt and the core)
-let mut logos = LogosAPI::new()?;
+use logos_rust_sdk::LogosModuleSDK;
 
-// Set the plugins directory (must be called before start)
-logos.set_plugins_dir("/path/to/modules")?;
-
-// Start the core (scans plugins, starts registry)
-logos.start()?;
-
-// Load a plugin
-logos.load_plugin("chat")?;
-
-// Load multiple plugins
-logos.load_plugins(&["waku_module", "chat"])?;
-
-// Get loaded plugins
-let plugins = logos.get_loaded_plugins();
-
-// Process Qt events (call periodically in your main loop)
-logos.process_events();
-
-// Get a plugin proxy
-let chat = logos.plugin("chat");
+let sdk = LogosModuleSDK::new();           // no-op, no lifecycle management
+let proxy = sdk.plugin("some_module");     // get a proxy for any loaded module
+sdk.shutdown();                            // optional: release internal connections
 ```
 
-### PluginProxy
+### `PluginProxy`
 
-A proxy for interacting with a specific plugin.
+A proxy for calling methods and subscribing to events on a specific module.
 
 ```rust
-let mut chat = logos.plugin("chat");
+let mut proxy = sdk.plugin("other_module");
 
-// Call a method with string parameters
-let rx = chat.call("joinChannel", &["my-channel"])?;
+// Synchronous call (blocks until result arrives via Qt Remote Objects IPC)
+// Use this inside Rust functions that are called by Q_INVOKABLE-generated glue
+let result = proxy.call_sync("method_name", &[arg1, arg2])?;
+if result.success {
+    println!("Result: {}", result.message);
+}
 
-// Call a method with no parameters
-let rx = chat.call("initialize", &[] as &[&str])?;
+// Synchronous call with no parameters
+let result = proxy.call_sync_no_params("version")?;
+
+// Asynchronous call (returns immediately, result arrives via channel)
+let rx = proxy.call("method_name", &["arg1", "arg2"])?;
+if let Ok(result) = rx.try_recv() {
+    println!("Result: {}", result.message);
+}
+
+// Asynchronous call with no parameters
+let rx = proxy.call_no_params("initialize")?;
+
+// Asynchronous call with explicit Param types (for mixed-type parameters)
+use logos_rust_sdk::params::Param;
+let rx = proxy.call_with_params("setValues", &[
+    Param::string("name", "Alice"),
+    Param::int("age", 30),
+    Param::bool("active", true),
+])?;
 
 // Subscribe to events
-let messages = chat.on("chatMessage")?;
+let events = proxy.on("dataChanged")?;
+while let Ok(event) = events.try_recv() {
+    println!("Event: {} — {:?}", event.event, event.data);
+}
+```
 
-// Check for results (non-blocking)
-if let Ok(result) = rx.try_recv() {
-    if result.success {
-        println!("Method succeeded: {}", result.message);
-    } else {
-        println!("Method failed: {}", result.message);
+### `CallResult`
+
+Returned by all `call_*` methods.
+
+```rust
+pub struct CallResult {
+    pub success: bool,
+    pub message: String,  // return value as a string, or error message
+}
+```
+
+### `EventData`
+
+Delivered through channels returned by `on()`.
+
+```rust
+pub struct EventData {
+    pub event: String,            // event name
+    pub data: serde_json::Value,  // event payload as JSON
+}
+```
+
+### `ToParam` trait
+
+The `call` and `call_sync` methods accept any slice of values that implement `ToParam`. Built-in implementations:
+
+| Rust type | Logos param type |
+|-----------|-----------------|
+| `&str`, `String`, `&String` | `"string"` |
+| `i32`, `i64`, `u32`, `u64`, `usize` | `"int"` |
+| `f32`, `f64` | `"double"` |
+| `bool` | `"bool"` |
+
+Parameters are auto-named `arg0`, `arg1`, … matching the order expected by the callee module.
+
+### `LogosError`
+
+All fallible methods return `Result<_, LogosError>`:
+
+| Variant | Cause |
+|---------|-------|
+| `PluginCallFailed` | Method call returned an error from the remote module |
+| `EventListenerFailed` | Event registration failed |
+| `InvalidString` | A string argument contained a null byte |
+| `JsonError` | Parameter serialization failed |
+| `ChannelClosed` | The callback channel was dropped unexpectedly |
+| `Other` | Miscellaneous error with a descriptive message |
+
+## How symbols resolve
+
+`logos-rust-sdk` declares `extern "C"` bindings to `logos_sdk_*` functions but does **not** link against `liblogos_module_client` at Rust compilation time. The Rust crate compiles to an `rlib` (or `staticlib` when used by a module). The unresolved `logos_sdk_*` symbols are satisfied when CMake links the final module plugin:
+
+```
+librust_caller.a          (your Rust staticlib, contains unresolved logos_sdk_* refs)
+        ↓
+CMake links plugin .dylib
+  + liblogos_module_client.dylib   ← logos_sdk_* symbols resolved here
+        ↓
+rust_caller_module_plugin.dylib    (complete, loadable Logos module)
+```
+
+## Example: using the SDK inside a Logos module
+
+See [`logos-rust-example-module`](https://github.com/logos-co/logos-rust-example-module) for a complete working example with two modules communicating through IPC.
+
+The caller module's `lib.rs` pattern:
+
+```rust
+use logos_rust_sdk::LogosModuleSDK;
+
+const PROVIDER: &str = "rust_provider_module";
+
+#[no_mangle]
+pub extern "C" fn rust_caller_call_add(a: i64, b: i64) -> i64 {
+    let sdk = LogosModuleSDK::new();
+    let provider = sdk.plugin(PROVIDER);
+    match provider.call_sync("add", &[a, b]) {
+        Ok(result) => result.message.parse::<i64>().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("IPC call failed: {}", e);
+            -1
+        }
     }
 }
+```
 
-// Check for events (non-blocking)
-while let Ok(event) = messages.try_recv() {
-    println!("Event: {} - {:?}", event.event, event.data);
-}
+The corresponding C header declared for `c-ffi` codegen:
+
+```c
+int64_t rust_caller_call_add(int64_t a, int64_t b);
 ```
 
 ## Building
 
-### With Nix
+The SDK itself has no standalone Nix build artifact — it is a library crate consumed by module builds. To work on it:
 
 ```bash
-nix build .#logos-rust-sdk
-```
+# Enter a dev shell with Rust toolchain
+nix develop
 
-### With Cargo
-
-Ensure you have the required environment variables set:
-
-```bash
-export LOGOS_LIBLOGOS_ROOT=/path/to/logos-liblogos/build
-export QT_FRAMEWORK_PATH=/opt/homebrew/opt/qt@6/lib  # macOS
-cargo build -p logos-rust-sdk
+# Run unit tests (params serialization, etc.)
+cargo test
 ```

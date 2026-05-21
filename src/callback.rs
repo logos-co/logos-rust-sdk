@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ffi::LogosAsyncCallback;
+use crate::ffi::LogosSdkCallback;
 
 #[derive(Debug, Clone)]
 pub struct CallResult {
@@ -149,7 +149,7 @@ pub(crate) extern "C" fn event_callback_trampoline(
     let _ = callback_data.tx.send(event_data);
 }
 
-pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, LogosAsyncCallback) {
+pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, LogosSdkCallback) {
     let (tx, rx) = mpsc::channel();
     let callback_data = Box::new(CallbackData { tx });
     let user_data = Box::into_raw(callback_data) as *mut c_void;
@@ -158,7 +158,7 @@ pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, Lo
 
 pub(crate) fn create_event_callback(
     event_name: &str,
-) -> (Receiver<EventData>, Box<EventCallbackData>, LogosAsyncCallback) {
+) -> (Receiver<EventData>, Box<EventCallbackData>, LogosSdkCallback) {
     let (tx, rx) = mpsc::channel();
     let callback_data = Box::new(EventCallbackData {
         tx,
