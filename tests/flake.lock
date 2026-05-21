@@ -4504,36 +4504,6 @@
         "type": "github"
       }
     },
-    "logos-module-client_4": {
-      "inputs": {
-        "logos-cpp-sdk": [
-          "logos-module-builder",
-          "logos-cpp-sdk"
-        ],
-        "logos-nix": [
-          "logos-nix"
-        ],
-        "nixpkgs": [
-          "logos-module-client",
-          "logos-nix",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1776888246,
-        "narHash": "sha256-8Hb3LQsuXj2XBaCGKHBCArfcwmCmzBuRXxadtkLFudk=",
-        "owner": "logos-co",
-        "repo": "logos-module-client",
-        "rev": "31d2ab6ad7b5f83b1308a6ab98b057fd6e4fba56",
-        "type": "github"
-      },
-      "original": {
-        "owner": "logos-co",
-        "ref": "new_api_test",
-        "repo": "logos-module-client",
-        "type": "github"
-      }
-    },
     "logos-module_10": {
       "inputs": {
         "logos-nix": "logos-nix_51",
@@ -22844,6 +22814,29 @@
       "original": {
         "owner": "logos-co",
         "repo": "logos-qt-mcp",
+        "type": "github"
+      }
+    },
+    "logos-rust-sdk": {
+      "inputs": {
+        "logos-nix": "logos-nix_637",
+        "nixpkgs": [
+          "logos-rust-sdk",
+          "logos-nix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1779370959,
+        "narHash": "sha256-iX2aOiuZ9mpjaFBWAx0B/B/108GWPmFu6vwkw/D6vLA=",
+        "owner": "logos-co",
+        "repo": "logos-rust-sdk",
+        "rev": "e9e1a15c1dedec5d0c30abfb447c3a49498c3584",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-rust-sdk",
         "type": "github"
       }
     },
@@ -41332,10 +41325,9 @@
       "inputs": {
         "logos-logoscore-cli": "logos-logoscore-cli",
         "logos-module-builder": "logos-module-builder_13",
-        "logos-module-client": "logos-module-client_4",
-        "logos-nix": "logos-nix_637",
+        "logos-rust-sdk": "logos-rust-sdk",
         "nixpkgs": [
-          "logos-nix",
+          "logos-module-builder",
           "nixpkgs"
         ]
       }
