@@ -1,0 +1,29 @@
+{
+  "name": "sdk_test_provider_module",
+  "version": "0.1.0",
+  "description": "Minimal provider module for logos-rust-sdk integration tests",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "c-ffi",
+  "category": "general",
+  "main": "sdk_test_provider_module_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+
+  "codegen": {
+    "c_header": "lib/sdk_test_provider.h"
+  },
+
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": ["cargo", "rustc"],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": ["lib"]
+    }
+  }
+}

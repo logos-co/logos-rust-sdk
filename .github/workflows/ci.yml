@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, new_api_test]
+  pull_request:
+    branches: [master, main, new_api_test]
+
+jobs:
+  ipc-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Run IPC integration test
+        run: |
+          nix build 'path:./tests#checks.x86_64-linux.ipc-test' \
+            --override-input logos-rust-sdk path:. \
+            --print-build-logs
