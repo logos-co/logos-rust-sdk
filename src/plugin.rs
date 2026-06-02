@@ -126,6 +126,51 @@ impl PluginProxy {
         })
     }
 
+    /// Call a plugin method synchronously with explicitly typed `Param`
+    /// parameters (e.g. mixing a string and a `Param::bytes`).
+    /// See [`call_sync`](Self::call_sync) for the synchronous-call contract.
+    pub fn call_sync_with_params(
+        &self,
+        method: &str,
+        params: &[Param],
+    ) -> Result<CallResult, LogosError> {
+        let plugin_name_c = CString::new(self.plugin_name.as_str())?;
+        let method_c = CString::new(method)?;
+        let params_json = serde_json::to_string(params)?;
+        let params_json_c = CString::new(params_json)?;
+
+        let raw = unsafe {
+            ffi::logos_sdk_call_method_sync(
+                plugin_name_c.as_ptr(),
+                method_c.as_ptr(),
+                params_json_c.as_ptr(),
+            )
+        };
+
+        if raw.is_null() {
+            return Ok(CallResult {
+                success: false,
+                message: format!(
+                    "Synchronous call to {}.{}() returned null",
+                    self.plugin_name, method
+                ),
+            });
+        }
+
+        let message = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+
+        unsafe {
+            ffi::logos_sdk_free_string(raw);
+        }
+
+        Ok(CallResult {
+            success: true,
+            message,
+        })
+    }
+
     /// Call a plugin method with no parameters, synchronously.
     pub fn call_sync_no_params(&self, method: &str) -> Result<CallResult, LogosError> {
         let empty: &[&str] = &[];

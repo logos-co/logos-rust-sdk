@@ -3,6 +3,8 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::ffi::LogosSdkCallback;
@@ -73,6 +75,13 @@ impl EventData {
 
     pub fn get_str(&self, index: usize) -> Option<&str> {
         self.get(index).and_then(|v| v.as_str())
+    }
+
+    /// Get the base64-decoded bytes of the string element at `index`.
+    /// Returns `None` if absent, not a string, or not valid base64. Pairs with
+    /// [`Param::bytes`](crate::Param::bytes) on the sending side.
+    pub fn get_bytes(&self, index: usize) -> Option<Vec<u8>> {
+        self.get_str(index).and_then(|s| BASE64.decode(s).ok())
     }
 }
 
@@ -169,4 +178,26 @@ pub(crate) fn create_event_callback(
 
 pub(crate) fn event_callback_ptr(callback_data: &EventCallbackData) -> *mut c_void {
     callback_data as *const EventCallbackData as *mut c_void
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_bytes_decodes_base64() {
+        let ev = EventData::new(
+            "messageReceived",
+            serde_json::json!(["hash", "/logos-chat/1/x/proto", "AAEC/w=="]),
+        );
+        assert_eq!(ev.get_bytes(2), Some(vec![0u8, 1, 2, 255]));
+    }
+
+    #[test]
+    fn get_bytes_none_when_absent_non_string_or_invalid() {
+        let ev = EventData::new("e", serde_json::json!(["not base64!!", 5]));
+        assert_eq!(ev.get_bytes(0), None); // invalid base64
+        assert_eq!(ev.get_bytes(1), None); // not a string
+        assert_eq!(ev.get_bytes(9), None); // out of range
+    }
 }

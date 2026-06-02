@@ -1,5 +1,7 @@
 //! Parameter serialization to JSON format for logos_core.
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,15 @@ impl Param {
 
     pub fn bool(name: impl Into<String>, value: bool) -> Self {
         Param::new(name, value.to_string(), "bool")
+    }
+
+    /// A binary parameter, base64-encoded for transport.
+    ///
+    /// The IPC parameter channel carries UTF-8 text only, so raw bytes are
+    /// base64-encoded here and decoded back to bytes on the receiving side.
+    /// Use for arguments that expect binary data rather than a string.
+    pub fn bytes(name: impl Into<String>, value: &[u8]) -> Self {
+        Param::new(name, BASE64.encode(value), "bytes")
     }
 }
 
@@ -147,6 +158,14 @@ mod tests {
         assert_eq!(p.name, "enabled");
         assert_eq!(p.value, "true");
         assert_eq!(p.param_type, "bool");
+    }
+
+    #[test]
+    fn test_bytes_param() {
+        let p = Param::bytes("arg0", &[0u8, 1, 2, 255]);
+        assert_eq!(p.name, "arg0");
+        assert_eq!(p.value, "AAEC/w==");
+        assert_eq!(p.param_type, "bytes");
     }
 
     #[test]
