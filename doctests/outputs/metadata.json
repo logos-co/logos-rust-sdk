@@ -1,0 +1,29 @@
+{
+  "name": "rust_provider_module",
+  "version": "1.0.0",
+  "description": "Example Logos module with logic implemented in pure Rust — provides math operations callable by other modules",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "c-ffi",
+  "category": "general",
+  "main": "rust_provider_module_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+
+  "codegen": {
+    "c_header": "lib/rust_provider.h"
+  },
+
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": ["cargo", "rustc"],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": ["lib"]
+    }
+  }
+}

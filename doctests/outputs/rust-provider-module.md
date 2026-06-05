@@ -1,0 +1,712 @@
+# Writing a Rust Logos Module and Running It Against logoscore
+
+This doc-test builds a **pure-Rust Logos module** from scratch and runs it
+end-to-end through the headless `logoscore` runtime. The module —
+`rust_provider_module` — implements its logic entirely in Rust (`add`,
+`multiply`, `factorial`, `fibonacci`, `is_prime`, `greet`, `libVersion`) with **no
+hand-written C++**: the Qt plugin glue is auto-generated from a C header by the
+`c-ffi` interface of [`logos-module-builder`](https://github.com/logos-co/logos-module-builder).
+
+This is the `provider` half of the [`logos-rust-example-module`](https://github.com/logos-co/logos-rust-example-module)
+pair, and it mirrors the provider used in this repo's own `tests/` integration
+suite. It proves that a Rust crate compiled to a static archive can be wrapped
+as a Logos module and called over IPC, which is the foundation
+[`logos-rust-sdk`](https://github.com/logos-co/logos-rust-sdk) builds on: the SDK
+lets one such Rust module *call* another. Here we verify the callee side — the
+module that exposes Rust functions as IPC methods.
+
+The steps are:
+
+1. Build the `logoscore` CLI and the `lgpm` local package manager from their
+   published flakes.
+2. Write the module from scratch: a Rust `staticlib` crate, a C header
+   describing its exported functions, and the three Logos config files
+   (`metadata.json`, `CMakeLists.txt`, `flake.nix`).
+3. Build it into an installable `.lgx` package via the flake's `#lgx` output,
+   and install it into a `./modules` directory with `lgpm`.
+4. Start `logoscore` in daemon mode, load `rust_provider_module`, introspect it
+   with `module-info`, and call its methods — verifying real values round-trip
+   out of the Rust code over liblogos' IPC.
+
+A green run is real evidence that the Rust-module build pipeline (cargo →
+static archive → `c-ffi` codegen → Qt plugin → loadable module) works and that
+the module is callable through a real `logoscore` daemon.
+
+**What you'll build:** A `rust_provider_module` whose logic is pure Rust, packaged as `.lgx`, installed with `lgpm`, and called through a `logoscore` daemon.
+
+**What you'll learn:**
+
+- How to write a Logos module whose implementation is pure Rust (no C++)
+- How the `c-ffi` interface generates the Qt plugin glue from a C header
+- How a module's flake compiles the Rust `staticlib` in `preConfigure` and exposes a ready-to-install `.lgx`
+- How to install an `.lgx` into a modules directory with `lgpm`
+- How to start the `logoscore` daemon, load the module, introspect it, and call its methods
+
+## Prerequisites
+
+- **Nix** with flakes enabled. Install from [nixos.org](https://nixos.org/download.html), then enable flakes:
+
+```bash
+mkdir -p ~/.config/nix
+echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
+```
+
+Verify: `nix flake --help >/dev/null 2>&1 && echo "Flakes enabled"`
+
+- **A Linux or macOS machine.** Nix provides the Rust toolchain (cargo, rustc) during the build, so you don't need a separate Rust install.
+
+---
+
+## Step 1: Build logoscore
+
+Build the `logoscore` CLI from its published flake. The result is symlinked
+to `./logos/`. `logoscore` is the headless frontend for `logos-liblogos`, so
+this one build brings in the whole module-runtime stack the daemon needs.
+
+### 1.1 Build the CLI
+
+```bash
+nix build 'github:logos-co/logos-logoscore-cli' --out-link ./logos
+```
+
+The build produces `logos/bin/logoscore` plus bundled runtime libraries
+and a `logos/modules/` directory containing the built-in
+`capability_module` (required for the auth handshake when loading
+modules in daemon mode).
+
+---
+
+## Step 2: Build the lgpm package manager
+
+`lgpm` installs `.lgx` packages into a modules directory and scans what is
+installed. Build it from the `logos-package-manager` flake and link it as
+`./lgpm`.
+
+### 2.1 Build lgpm
+
+```bash
+nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
+```
+
+The executable is at `./lgpm/bin/lgpm`.
+
+---
+
+## Step 3: Write the Rust library
+
+The module's logic lives in a small Rust crate compiled to a **static
+archive** (`crate-type = ["staticlib"]`). Each public function is declared
+`#[no_mangle] pub extern "C"` so it is exported with a stable C symbol the
+Logos build can link against and generate glue for.
+
+Lay the crate out under `rust-lib/`:
+
+```
+rust-provider-module/
+├── flake.nix                 # Nix build (compiles the crate, wraps it as a module)
+├── metadata.json             # Module metadata + c-ffi codegen config
+├── CMakeLists.txt            # Links the static archive into the plugin
+└── rust-lib/
+    ├── Cargo.toml            # crate-type = ["staticlib"]
+    ├── src/lib.rs            # the Rust functions
+    └── include/
+        └── rust_provider.h   # C header the codegen reads
+```
+
+### 3.1 Create the crate manifest
+
+Create `rust-lib/Cargo.toml`. The crate compiles to a static archive with no dependencies:
+
+```toml
+[package]
+name = "rust_provider"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+```
+
+### 3.2 Write the Rust functions
+
+Create `rust-lib/src/lib.rs`. Every exported function uses
+`#[no_mangle] pub extern "C"` so it lands in the static archive with a
+predictable C symbol. Integers are `i64` (the type the codegen maps onto
+the wire), and the one string-returning function (`greet`) hands back a
+heap C string with a matching free function:
+
+```rust
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+/// Add two integers.
+#[no_mangle]
+pub extern "C" fn rust_provider_add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// Multiply two integers (saturating on overflow).
+#[no_mangle]
+pub extern "C" fn rust_provider_multiply(a: i64, b: i64) -> i64 {
+    a.saturating_mul(b)
+}
+
+/// Compute n! (factorial). Returns -1 on overflow or negative input.
+#[no_mangle]
+pub extern "C" fn rust_provider_factorial(n: i64) -> i64 {
+    if n < 0 {
+        return -1;
+    }
+    if n <= 1 {
+        return 1;
+    }
+    let mut result: i64 = 1;
+    for i in 2..=n {
+        result = match result.checked_mul(i) {
+            Some(v) => v,
+            None => return -1,
+        };
+    }
+    result
+}
+
+/// Compute the nth Fibonacci number. Returns -1 on overflow or negative input.
+#[no_mangle]
+pub extern "C" fn rust_provider_fibonacci(n: i64) -> i64 {
+    if n < 0 {
+        return -1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    if n == 1 {
+        return 1;
+    }
+    let (mut a, mut b) = (0i64, 1i64);
+    for _ in 2..=n {
+        let next = match a.checked_add(b) {
+            Some(v) => v,
+            None => return -1,
+        };
+        a = b;
+        b = next;
+    }
+    b
+}
+
+/// Return 1 if n is prime, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn rust_provider_is_prime(n: i64) -> i64 {
+    if n < 2 {
+        return 0;
+    }
+    if n == 2 {
+        return 1;
+    }
+    if n % 2 == 0 {
+        return 0;
+    }
+    let mut i = 3i64;
+    while i * i <= n {
+        if n % i == 0 {
+            return 0;
+        }
+        i += 2;
+    }
+    1
+}
+
+/// Greet the given name. Returns a heap-allocated C string.
+/// The caller must free the returned pointer with rust_provider_free_string().
+#[no_mangle]
+pub extern "C" fn rust_provider_greet(name: *const c_char) -> *mut c_char {
+    let name_str = if name.is_null() {
+        "World".to_string()
+    } else {
+        unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .unwrap_or("World")
+            .to_string()
+    };
+    let greeting = format!("Hello, {}! (from Rust provider)", name_str);
+    CString::new(greeting)
+        .unwrap_or_else(|_| CString::new("Hello! (from Rust provider)").unwrap())
+        .into_raw()
+}
+
+/// Free a string previously returned by rust_provider_greet().
+#[no_mangle]
+pub extern "C" fn rust_provider_free_string(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(CString::from_raw(ptr));
+    }
+}
+
+/// Return the provider library version string. Static — do NOT free.
+#[no_mangle]
+pub extern "C" fn rust_provider_version() -> *const c_char {
+    b"1.0.0\0".as_ptr() as *const c_char
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add() {
+        assert_eq!(rust_provider_add(2, 3), 5);
+    }
+
+    #[test]
+    fn test_factorial() {
+        assert_eq!(rust_provider_factorial(5), 120);
+    }
+
+    #[test]
+    fn test_is_prime() {
+        assert_eq!(rust_provider_is_prime(7), 1);
+        assert_eq!(rust_provider_is_prime(4), 0);
+    }
+}
+```
+
+### 3.3 Write the C header
+
+Create `rust-lib/include/rust_provider.h`. This is the **source of truth
+for the module's IPC API**: the `c-ffi` codegen reads it to discover the
+exported functions and their signatures, then generates a Qt plugin that
+dispatches IPC calls to them. The signatures must match the Rust
+`extern "C"` functions exactly.
+
+```c
+#ifndef RUST_PROVIDER_H
+#define RUST_PROVIDER_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Add two integers. */
+int64_t rust_provider_add(int64_t a, int64_t b);
+
+/** Multiply two integers (saturating on overflow). */
+int64_t rust_provider_multiply(int64_t a, int64_t b);
+
+/** Compute n! (factorial). Returns -1 on overflow or negative input. */
+int64_t rust_provider_factorial(int64_t n);
+
+/** Compute the nth Fibonacci number. Returns -1 on overflow or negative input. */
+int64_t rust_provider_fibonacci(int64_t n);
+
+/** Return 1 if n is prime, 0 otherwise. */
+int64_t rust_provider_is_prime(int64_t n);
+
+/**
+ * Greet the given name.
+ * Returns a heap-allocated C string that must be freed with rust_provider_free_string().
+ * Passing NULL uses "World" as the name.
+ */
+char* rust_provider_greet(const char* name);
+
+/** Free a string returned by rust_provider_greet(). */
+void rust_provider_free_string(char* ptr);
+
+/** Return the Rust library version string (static, do not free). */
+const char* rust_provider_version(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RUST_PROVIDER_H */
+```
+
+The codegen derives each IPC method name by stripping the module's name
+stem (`rust_provider_`) from the C function name. So `rust_provider_add`
+is callable as `add`, `rust_provider_is_prime` as `is_prime`, and so on —
+the remaining name keeps its `snake_case` form.
+
+> **One exception:** the version accessor `rust_provider_version` is
+> exposed as `libVersion()` (the codegen's conventional name for a
+> module's version method), not `version`. You'll call it as `libVersion`
+> below. The pair `rust_provider_free_string` / the `*const c_char`
+> plumbing behind `greet` are handled internally by the generated glue —
+> you call `greet` and get a string back.
+
+---
+
+## Step 4: Configure the Logos module
+
+Three small config files turn the Rust crate into a Logos module:
+`metadata.json` (declares the module and points the codegen at the header),
+`CMakeLists.txt` (links the static archive into the generated plugin), and
+`flake.nix` (compiles the crate and drives `mkLogosModule`).
+
+### 4.1 `metadata.json` — module + codegen config
+
+`interface: "c-ffi"` selects the C-header-driven codegen, and
+`codegen.c_header` points at the header you wrote. `nix.packages.build`
+lists `cargo` and `rustc` so the Rust toolchain is available during the
+build.
+
+```json
+{
+  "name": "rust_provider_module",
+  "version": "1.0.0",
+  "description": "Example Logos module with logic implemented in pure Rust — provides math operations callable by other modules",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "c-ffi",
+  "category": "general",
+  "main": "rust_provider_module_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+
+  "codegen": {
+    "c_header": "lib/rust_provider.h"
+  },
+
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": ["cargo", "rustc"],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": ["lib"]
+    }
+  }
+}
+```
+
+Note `codegen.c_header` is `lib/rust_provider.h`, not
+`rust-lib/include/rust_provider.h`: the `flake.nix` `preConfigure` step
+(below) stages the compiled archive and the header into a `lib/`
+directory before the build configures, so by the time the codegen runs
+the header lives at `lib/rust_provider.h`.
+
+### 4.2 `CMakeLists.txt` — link the Rust archive
+
+`logos_module()` (from `logos-module-builder`) defines the plugin target.
+You then locate the Rust static archive in `lib/` and link it — plus the
+platform system libraries the Rust standard library needs.
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(RustProviderModulePlugin LANGUAGES CXX)
+
+if(DEFINED ENV{LOGOS_MODULE_BUILDER_ROOT})
+    include($ENV{LOGOS_MODULE_BUILDER_ROOT}/cmake/LogosModule.cmake)
+else()
+    message(FATAL_ERROR "LogosModule.cmake not found. LOGOS_MODULE_BUILDER_ROOT is not set.")
+endif()
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/metadata.json
+               ${CMAKE_CURRENT_BINARY_DIR}/metadata.json COPYONLY)
+
+logos_module(
+    NAME rust_provider_module
+    INCLUDE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
+)
+
+find_library(LIBRUST_PROVIDER
+    NAMES librust_provider.a rust_provider
+    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib
+    NO_DEFAULT_PATH
+)
+
+if(NOT LIBRUST_PROVIDER)
+    message(FATAL_ERROR
+        "Rust static library (librust_provider.a) not found in ${CMAKE_CURRENT_SOURCE_DIR}/lib. "
+        "Ensure the preConfigure hook ran 'cargo build --release'."
+    )
+endif()
+
+message(STATUS "Found Rust provider static library: ${LIBRUST_PROVIDER}")
+target_link_libraries(rust_provider_module_module_plugin PRIVATE ${LIBRUST_PROVIDER})
+
+if(APPLE)
+    target_link_libraries(rust_provider_module_module_plugin PRIVATE
+        "-framework CoreFoundation"
+        "-framework Security"
+    )
+else()
+    target_link_libraries(rust_provider_module_module_plugin PRIVATE pthread dl)
+endif()
+```
+
+> **The target name is `rust_provider_module_module_plugin`** — that's
+> `<module-name>_module_plugin` as produced by `logos_module()`. It looks
+> doubled because the module name already ends in `_module`.
+
+### 4.3 `flake.nix` — compile the crate and build the module
+
+The flake pins `logos-module-builder` and `logos-cpp-sdk` to the `c_ffi`
+branch (where the `c-ffi` interface lives). The `preConfigure` hook
+compiles the Rust crate offline and stages the archive + header into
+`lib/` so CMake and the codegen can find them.
+
+```nix
+{
+  description = "Example Logos module with logic implemented in pure Rust";
+
+  inputs = {
+    logos-module-builder.url = "github:logos-co/logos-module-builder/c_ffi";
+    logos-module-builder.inputs.logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk/c_ffi";
+  };
+
+  outputs = inputs@{ logos-module-builder, ... }:
+    logos-module-builder.lib.mkLogosModule {
+      src = ./.;
+      configFile = ./metadata.json;
+      flakeInputs = inputs;
+      preConfigure = ''
+        echo "=== Building Rust provider library ==="
+        export HOME=$TMPDIR
+        export CARGO_HOME=$TMPDIR/cargo
+        mkdir -p $CARGO_HOME
+
+        pushd rust-lib
+        cargo build --release --offline
+        popd
+
+        mkdir -p lib
+        cp rust-lib/target/release/librust_provider.a lib/
+        cp rust-lib/include/rust_provider.h lib/
+        echo "=== Rust provider library built and staged ==="
+      '';
+    };
+}
+```
+
+`cargo build --release --offline` works without network access because
+the crate has no dependencies. The resulting `librust_provider.a` and the
+header are copied into `lib/`, matching the `codegen.c_header` path and
+the `find_library` call in `CMakeLists.txt`.
+
+---
+
+## Step 5: Build and install the module
+
+Nix flakes only see files tracked by git, so initialise a repo and stage
+everything before building. Then build the `.lgx` package and install it.
+
+### 5.1 Ignore build artifacts
+
+```text
+result
+result-*
+lib/
+rust-lib/target/
+```
+
+### 5.2 Initialise the git repo
+
+Nix flakes require a git repository and only see tracked files:
+
+```bash
+git init
+```
+
+```bash
+git add -A
+```
+
+```bash
+nix flake update
+```
+
+```bash
+git add flake.lock
+```
+
+### 5.3 Build the module's .lgx
+
+Build the flake's `#lgx` output and link it as `./provider-lgx`. This
+compiles the Rust crate, runs the `c-ffi` codegen over the header,
+builds the Qt plugin, and bundles it as an installable `.lgx`. The first
+build is slow (Nix downloads Qt, the SDK, and the Rust toolchain).
+
+```bash
+nix build '.#lgx' -o provider-lgx
+```
+
+The `.lgx` package is now under `./provider-lgx/`:
+
+```bash
+ls provider-lgx/*.lgx
+```
+
+### 5.4 Seed the modules directory with the bundled capability module
+
+Modules are loaded through the host's capability layer, so the modules
+directory also needs the `capability_module` that ships with
+`logoscore`. Copy it across first.
+
+```bash
+mkdir -p modules
+cp -RL ./logos/modules/. ./modules/
+
+```
+
+### 5.5 Install the .lgx with lgpm
+
+Install the freshly-built package into `./modules`. It is a `core`
+module, so it goes to `--modules-dir`. The package is unsigned (a local
+dev build), so pass `--allow-unsigned`.
+
+```bash
+./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file provider-lgx/*.lgx
+```
+
+### 5.6 Confirm the install
+
+Scan the directory and confirm the module landed:
+
+```bash
+./lgpm/bin/lgpm --modules-dir ./modules list
+```
+
+---
+
+## Step 6: Run the daemon and call the module
+
+Start `logoscore` in daemon mode pointed at `./modules`, then load
+`rust_provider_module`, introspect it, and call its methods. Daemon output
+is captured in `logs.txt`.
+
+### 6.1 Start the daemon
+
+Start logoscore in daemon mode in the background, capturing output to `logs.txt`:
+
+```bash
+logoscore -D -m ./modules > logs.txt &
+```
+
+The `-D` flag starts the daemon. The client subcommands below connect to
+this running process via the config written under `~/.logoscore/`.
+
+```bash
+sleep 3
+```
+
+### 6.2 Check daemon status
+
+Verify the daemon is running:
+
+```bash
+logoscore status
+```
+
+### 6.3 List discovered modules
+
+`rust_provider_module` should be visible in the scan directory:
+
+```bash
+logoscore list-modules
+```
+
+### 6.4 Load the module
+
+Load `rust_provider_module` into the running daemon:
+
+```bash
+logoscore load-module rust_provider_module
+```
+
+### 6.5 Introspect the module with module-info
+
+`module-info` lists the `Q_INVOKABLE` methods the generated plugin
+exposes — the same methods you can `call`:
+
+```bash
+logoscore module-info rust_provider_module
+```
+
+### 6.6 Add two integers
+
+`add` is the Rust `rust_provider_add` function, reached over IPC — a real
+round-trip into the compiled Rust code:
+
+```bash
+logoscore call rust_provider_module add 5 3
+```
+
+### 6.7 Multiply two integers
+
+```bash
+logoscore call rust_provider_module multiply 4 6
+```
+
+### 6.8 Factorial
+
+```bash
+logoscore call rust_provider_module factorial 5
+```
+
+### 6.9 Fibonacci
+
+```bash
+logoscore call rust_provider_module fibonacci 10
+```
+
+### 6.10 Primality test
+
+`is_prime` returns 1 for a prime and 0 otherwise:
+
+```bash
+logoscore call rust_provider_module is_prime 7
+```
+
+```bash
+logoscore call rust_provider_module is_prime 4
+```
+
+### 6.11 Greet (string round-trip)
+
+`greet` takes a string and returns one — exercising the C-string
+conversion the Rust code performs:
+
+```bash
+logoscore call rust_provider_module greet World
+```
+
+### 6.12 Version
+
+The version accessor is exposed as `libVersion` (see the note under the
+C header above) and returns the Rust library's version string:
+
+```bash
+logoscore call rust_provider_module libVersion
+```
+
+### 6.13 Stop the daemon
+
+Shut the daemon down cleanly:
+
+```bash
+logoscore stop
+```
+
+The daemon removes its state file and exits.
+
+```bash
+sleep 2
+```
+
+### 6.14 Confirm the daemon has stopped
+
+With no daemon running, the client reports `not_running` and exits
+non-zero, so we add `|| true` to let the doc-test assert on the output:
+
+```bash
+logoscore status
+```

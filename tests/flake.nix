@@ -63,9 +63,12 @@
             version = "0.1.0";
             src = callerRustSrc;
             sourceRoot = "sdk-test-caller-rust-src/rust-lib";
-            # Hash covers vendored deps (serde, serde_json, etc.) — same tree as
-            # logos-rust-example-module's caller, so the same hash applies.
-            cargoHash = "sha256-6r17qKn4l1SWNac+3/8/4/YxGlGY2QEI3eAbznxyBAI=";
+            # Use importCargoLock (fetchurl-based) instead of cargoHash
+            # (fetchCargoVendor's Python fetcher). crates.io now returns 403 to the
+            # Python fetcher's generic User-Agent; Nix's own downloader (fetchurl) is
+            # accepted. Only bites in CI on a cachix miss, where the vendor FOD is
+            # actually built rather than substituted.
+            cargoLock.lockFile = ./caller/rust-lib/Cargo.lock;
             doCheck = false;
           };
 
