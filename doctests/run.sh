@@ -59,7 +59,11 @@ probe_dir() {
   t="$(mktemp -d "${d%/}/.doctest-probe.XXXXXX" 2>/dev/null)" || return 1
   ( cd "$t" && echo probe > f && git init -q . && git add f ) >/dev/null 2>&1 || ok=0
   if [ "$ok" = 1 ]; then
-    { cp /bin/true "$t/x" && chmod +x "$t/x" && "$t/x"; } >/dev/null 2>&1 || ok=0
+    # Exec test: create a file here and execve it directly. This trips on a
+    # noexec mount exactly as dlopen()ing the built .so would. We write our own
+    # script instead of `cp`ing a system binary so the test doesn't assume a
+    # path like /bin/true (absent on macOS) and false-negative a usable dir.
+    { printf '#!/bin/sh\nexit 0\n' > "$t/x" && chmod +x "$t/x" && "$t/x"; } >/dev/null 2>&1 || ok=0
   fi
   chmod -R u+w "$t" 2>/dev/null || true
   rm -rf "$t"
@@ -83,11 +87,15 @@ else
     fi
   done
   if [ -z "$BUILD_DIR" ]; then
-    echo "ERROR: found no writable, exec-capable, git-usable directory to build in." >&2
-    echo "       Set DOCTEST_BUILD_DIR to such a path and re-run." >&2
-    exit 1
+    # No staging candidate passed either. Rather than refuse to run, fall back to
+    # building in ./outputs anyway — the probe can false-negative (e.g. a quirky
+    # exec check), and an in-place build is what we'd do normally. If the host
+    # truly can't host the build, the spec's own steps will report the real error.
+    echo "==> No staging dir passed the probe; building in ${OUTPUT_DIR} (set DOCTEST_BUILD_DIR to override)" >&2
+    BUILD_DIR="$OUTPUT_DIR"
+  else
+    echo "==> Staging build in ${BUILD_DIR}" >&2
   fi
-  echo "==> Staging build in ${BUILD_DIR}" >&2
 fi
 
 cleanup_staging() {
