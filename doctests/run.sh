@@ -23,6 +23,14 @@
 # To run against a local logos-doctest checkout instead of the published flake,
 # set DOCTEST, e.g.:  DOCTEST="nix run path:../../logos-doctest --" ./run.sh
 #
+# The build needs a filesystem that both lets git create loose objects and is not
+# mounted noexec (it git-adds a generated module and dlopen()s the .so it builds).
+# Normally that's ./outputs and the build runs in place. In sandboxes where the
+# checkout can't host it — e.g. a `fakeowner` bind mount that rejects git's 0444
+# object temp files, or a noexec mount that fails dlopen — the script auto-stages
+# the build in $XDG_RUNTIME_DIR / $HOME / /var/tmp and copies the cleaned result
+# back into ./outputs. Force a specific staging dir with DOCTEST_BUILD_DIR.
+#
 set -euo pipefail
 
 # Run from this doctests/ directory regardless of where the script is invoked from.
@@ -32,27 +40,92 @@ cd "$(dirname "$0")"
 read -r -a DOCTEST <<< "${DOCTEST:-nix run github:logos-co/logos-doctest --}"
 OUTPUT_DIR="./outputs"
 
+# ── Pick a filesystem that can actually host the build ───────────────────────
+# The spec writes a module from scratch, `git init && git add`s it, builds it
+# into a loadable .so, and dlopen()s it through a logoscore daemon. That demands
+# a filesystem that BOTH (a) lets git create loose objects and (b) is not mounted
+# noexec. Some sandboxes break one or the other: a `fakeowner` bind mount (Docker
+# Desktop / OrbStack, as used for /workspace) rejects git's read-only (0444)
+# object temp files with "insufficient permission for adding an object", and a
+# noexec mount (often /tmp) makes dlopen fail with "failed to map segment from
+# shared object". On a normal CI filesystem ./outputs passes both checks and the
+# build runs in place, exactly as before. Otherwise we stage the build in the
+# first directory that passes and copy the cleaned result back into ./outputs.
+#
+# Force a specific staging directory by exporting DOCTEST_BUILD_DIR.
+probe_dir() {
+  # $1: directory to test. Succeeds only if git-object creation AND exec both work.
+  local d="$1" t ok=1
+  t="$(mktemp -d "${d%/}/.doctest-probe.XXXXXX" 2>/dev/null)" || return 1
+  ( cd "$t" && echo probe > f && git init -q . && git add f ) >/dev/null 2>&1 || ok=0
+  if [ "$ok" = 1 ]; then
+    { cp /bin/true "$t/x" && chmod +x "$t/x" && "$t/x"; } >/dev/null 2>&1 || ok=0
+  fi
+  chmod -R u+w "$t" 2>/dev/null || true
+  rm -rf "$t"
+  [ "$ok" = 1 ]
+}
+
+STAGING=""   # non-empty when BUILD_DIR is a throwaway dir to copy back from
+BUILD_DIR="${DOCTEST_BUILD_DIR:-}"
+if [ -n "$BUILD_DIR" ]; then
+  mkdir -p "$BUILD_DIR"
+elif probe_dir "."; then
+  BUILD_DIR="$OUTPUT_DIR"
+else
+  echo "==> ./ can't host the build (fakeowner and/or noexec); staging elsewhere" >&2
+  for base in "${XDG_RUNTIME_DIR:-}" "$HOME" /var/tmp; do
+    [ -n "$base" ] && [ -d "$base" ] || continue
+    if probe_dir "$base"; then
+      BUILD_DIR="$(mktemp -d "${base%/}/logos-rust-sdk-doctest.XXXXXX")"
+      STAGING="$BUILD_DIR"
+      break
+    fi
+  done
+  if [ -z "$BUILD_DIR" ]; then
+    echo "ERROR: found no writable, exec-capable, git-usable directory to build in." >&2
+    echo "       Set DOCTEST_BUILD_DIR to such a path and re-run." >&2
+    exit 1
+  fi
+  echo "==> Staging build in ${BUILD_DIR}" >&2
+fi
+
+cleanup_staging() {
+  if [ -n "$STAGING" ] && [ -e "$STAGING" ]; then
+    chmod -R u+w "$STAGING" 2>/dev/null || true
+    rm -rf "$STAGING"
+  fi
+}
+trap cleanup_staging EXIT
+
 echo "==> Clearing previous ${OUTPUT_DIR}/"
 # A prior run copies module artifacts out of the read-only nix store, so the
 # directories land read-only (r-x) too. `rm -rf` can't delete files inside a
 # directory it can't write to, so restore write permission first.
-if [ -e "${OUTPUT_DIR}" ]; then
-  chmod -R u+w "${OUTPUT_DIR}" 2>/dev/null || true
-fi
+for d in "${OUTPUT_DIR}" "${BUILD_DIR}"; do
+  if [ -e "${d}" ]; then
+    chmod -R u+w "${d}" 2>/dev/null || true
+  fi
+done
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
+# When staging, BUILD_DIR is a fresh mktemp dir; clear any leftover contents so
+# the spec starts from a clean tree just like ./outputs would.
+if [ "${BUILD_DIR}" != "${OUTPUT_DIR}" ]; then
+  rm -rf "${BUILD_DIR:?}/"* "${BUILD_DIR:?}/".[!.]* 2>/dev/null || true
+fi
 
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
-  echo "==> Running ${spec} into ${OUTPUT_DIR}/"
+  echo "==> Running ${spec} into ${BUILD_DIR}/"
   "${DOCTEST[@]}" run "${spec}" \
     --verbose \
     --continue-on-fail \
-    --output-dir "${OUTPUT_DIR}/"
+    --output-dir "${BUILD_DIR}/"
 
-  echo "==> Generating ${OUTPUT_DIR}/${name}.md"
+  echo "==> Generating ${BUILD_DIR}/${name}.md"
   "${DOCTEST[@]}" generate "${spec}" \
-    -o "${OUTPUT_DIR}/${name}.md"
+    -o "${BUILD_DIR}/${name}.md"
 done
 
 # The spec writes the module source INTO outputs/ (like logos-tutorial), so the
@@ -64,11 +137,24 @@ done
 #   --also lgpm          the lgpm out-link (default knows `pm`, not `lgpm`)
 #   --also provider-lgx  the .lgx out-link (non-standard name)
 #   --also logs.txt      the daemon log (default glob is *.log, not logs.txt)
-echo "==> Cleaning build artifacts from ${OUTPUT_DIR}/ (keeps generated source + .md)"
-"${DOCTEST[@]}" clean "${OUTPUT_DIR}" \
+# Module dirs are copied out of the read-only nix store, so they land read-only
+# (r-x); restore write permission first or `clean` can't delete inside them.
+chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
+
+echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + .md)"
+"${DOCTEST[@]}" clean "${BUILD_DIR}" \
   --also lgpm \
   --also provider-lgx \
   --also logs.txt \
   --verbose
+
+# If we staged the build off-tree, copy the cleaned result back into ./outputs.
+# Use -R (not -a): the destination is the checkout, which may be a `fakeowner`
+# mount that rejects chmod/chown, so preserving source perms/owner would fail.
+# After clean, only normal user-writable source files and the .md remain.
+if [ "${BUILD_DIR}" != "${OUTPUT_DIR}" ]; then
+  echo "==> Copying cleaned output from ${BUILD_DIR}/ back to ${OUTPUT_DIR}/"
+  cp -R "${BUILD_DIR}/." "${OUTPUT_DIR}/"
+fi
 
 echo "==> Done. Cleaned output (generated source + rendered docs) is in ${OUTPUT_DIR}/"
