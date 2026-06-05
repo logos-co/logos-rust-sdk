@@ -1,0 +1,90 @@
+name: Doc-Tests
+
+# Runs the executable doc-test (doctests/rust-provider-module.test.yaml) end-to-end
+# via the shared `doctest` CLI: builds logoscore and lgpm, writes a pure-Rust
+# Logos module from scratch, packages and installs it as an .lgx, starts the
+# logoscore daemon, loads the module, and calls its Rust-backed methods over IPC,
+# asserting on the output.
+#
+# This exercises the Rust-module build + IPC pipeline that logos-rust-sdk is built
+# on. It does NOT pin logos-rust-sdk to the commit under test, because the provider
+# module is pure Rust and does not consume the SDK (only a caller module would).
+# The SDK itself is verified against the working tree by the separate IPC
+# integration test in ci.yml.
+
+on:
+  pull_request:
+    branches: [master, main, new_api_test]
+  push:
+    branches: [master, main, new_api_test]
+
+concurrency:
+  group: doctests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doctests:
+    name: rust-provider-module doc-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # The runner is the shared `doctest` CLI, invoked directly via its flake
+      # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML, so no
+      # pip install step is needed. --continue-on-fail so the run walks every step
+      # and the report is complete; the job still fails (non-zero exit) if any step
+      # failed.
+      - name: Run rust-provider-module doc-test
+        run: |
+          nix run github:logos-co/logos-doctest -- run \
+            doctests/rust-provider-module.test.yaml \
+            --verbose \
+            --continue-on-fail \
+            --report "${{ runner.temp }}/rust-provider-doctest-report.html"
+
+      - name: Stage report for upload
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p report-out
+          if [ -f "${{ runner.temp }}/rust-provider-doctest-report.html" ]; then
+            cp "${{ runner.temp }}/rust-provider-doctest-report.html" report-out/index.html
+          else
+            echo "<h1>No report produced</h1>" > report-out/index.html
+          fi
+
+      - name: Upload execution report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-provider-doctest-report-${{ matrix.os }}
+          path: report-out/index.html
+          if-no-files-found: warn
+
+      - name: Verify markdown generation
+        run: |
+          nix run github:logos-co/logos-doctest -- generate \
+            doctests/rust-provider-module.test.yaml \
+            -o /tmp/rust-provider-module.md
+          test -s /tmp/rust-provider-module.md
+          echo "Generated markdown successfully"

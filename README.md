@@ -202,3 +202,31 @@ nix develop
 # Run unit tests (params serialization, etc.)
 cargo test
 ```
+
+## Testing
+
+Two complementary checks exercise the SDK and the Rust-module pipeline it builds on:
+
+- **IPC integration test** (`tests/`) — builds a minimal provider + caller module
+  pair, where the caller uses this SDK to call the provider over IPC, and verifies
+  the round-trip through `logoscore`. This is the test that exercises the SDK
+  against the working tree:
+
+  ```bash
+  nix build 'path:./tests#checks.x86_64-linux.ipc-test' \
+    --override-input logos-rust-sdk path:. --print-build-logs
+  ```
+
+- **Executable doc-test** (`doctests/rust-provider-module.test.yaml`) — a
+  step-by-step, runnable tutorial that writes a pure-Rust Logos module from
+  scratch (the `provider` pattern: Rust `staticlib` → `c-ffi` codegen → Qt plugin),
+  packages it as an `.lgx`, installs it with `lgpm`, and calls its methods through
+  a `logoscore` daemon. It documents and verifies the callee side of the IPC stack
+  this SDK builds on. Run it with the shared [`doctest`](https://github.com/logos-co/logos-doctest)
+  CLI:
+
+  ```bash
+  cd doctests && ./run.sh
+  ```
+
+  The rendered tutorial is committed at `doctests/outputs/rust-provider-module.md`.
