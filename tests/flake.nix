@@ -135,12 +135,42 @@
             export QT_QPA_PLATFORM=offscreen
             export LD_LIBRARY_PATH="${rustSdkBuild.runtimeLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-            logoscore --quit-on-finish \
-              -m ${modulesDir} \
-              -l sdk_test_caller_module \
-              -c "sdk_test_caller_module.call_add(5, 3)"
+            # Inline (`-c`) mode is legacy; drive a logoscore daemon and call via
+            # the `call` client subcommand. A persistent daemon keeps the Qt event
+            # loop running so the cross-module IPC reply is delivered reliably.
+            export LOGOSCORE_CONFIG_DIR="$(mktemp -d)"
+            DAEMON_PID=""
+            cleanup() {
+              logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" stop >/dev/null 2>&1 || true
+              [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+            }
+            trap cleanup EXIT
 
-            echo "IPC test passed: sdk_test_provider_module.add(5,3) returned via IPC" > $out/result.txt
+            logoscore -D --config-dir "$LOGOSCORE_CONFIG_DIR" -m ${modulesDir} \
+              >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
+            DAEMON_PID=$!
+            ready=0
+            for _i in $(seq 1 100); do
+              if [ -f "$LOGOSCORE_CONFIG_DIR/daemon/state.json" ] \
+                 && logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" status >/dev/null 2>&1; then
+                ready=1; break
+              fi
+              kill -0 "$DAEMON_PID" 2>/dev/null || break
+              sleep 0.2
+            done
+            [ "$ready" = 1 ] || { echo "logoscore daemon failed to start:" >&2; cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2; exit 1; }
+
+            # load-module does not auto-resolve dependencies; load provider, then caller.
+            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_provider_module
+            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_caller_module
+
+            result=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
+              call sdk_test_caller_module call_add 5 3) || true
+            echo "call result: $result"
+            echo "$result" | grep -q '"result":8' \
+              || { echo "IPC test FAILED (expected sdk_test_caller_module.call_add(5,3) == 8): $result" >&2; exit 1; }
+
+            echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC" > $out/result.txt
           '';
         }
       );
