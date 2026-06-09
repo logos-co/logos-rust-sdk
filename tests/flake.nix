@@ -143,16 +143,18 @@
             cleanup() {
               logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" stop >/dev/null 2>&1 || true
               [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+              rm -rf "$LOGOSCORE_CONFIG_DIR"
             }
             trap cleanup EXIT
 
             logoscore -D --config-dir "$LOGOSCORE_CONFIG_DIR" -m ${modulesDir} \
               >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
             DAEMON_PID=$!
+            # `status` is the definitive readiness probe; no need to poke at the
+            # daemon's internal state file.
             ready=0
             for _i in $(seq 1 100); do
-              if [ -f "$LOGOSCORE_CONFIG_DIR/daemon/state.json" ] \
-                 && logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" status >/dev/null 2>&1; then
+              if logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" status >/dev/null 2>&1; then
                 ready=1; break
               fi
               kill -0 "$DAEMON_PID" 2>/dev/null || break
@@ -164,11 +166,20 @@
             logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_provider_module
             logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_caller_module
 
-            result=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-              call sdk_test_caller_module call_add 5 3) || true
+            # Fail loudly if the call errors (don't swallow its exit code), and
+            # match the value exactly so "8" isn't satisfied by e.g. "80".
+            if ! result=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
+                 call sdk_test_caller_module call_add 5 3 2>caller.err); then
+              echo "logoscore call failed:" >&2
+              cat caller.err "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2 || true
+              exit 1
+            fi
             echo "call result: $result"
-            echo "$result" | grep -q '"result":8' \
-              || { echo "IPC test FAILED (expected sdk_test_caller_module.call_add(5,3) == 8): $result" >&2; exit 1; }
+            if ! printf '%s' "$result" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[,}]'; then
+              echo "IPC test FAILED (expected sdk_test_caller_module.call_add(5,3) == 8): $result" >&2
+              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
+              exit 1
+            fi
 
             echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC" > $out/result.txt
           '';
