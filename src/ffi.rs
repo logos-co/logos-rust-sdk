@@ -11,12 +11,14 @@ pub type LogosSdkCallback = extern "C" fn(
 
 extern "C" {
     /// Call a plugin method synchronously.
+    /// `timeout_ms <= 0` selects the default reply timeout.
     /// Returns a heap-allocated UTF-8 string that must be freed with logos_sdk_free_string.
     /// Returns NULL on failure.
     pub fn logos_sdk_call_method_sync(
         plugin_name: *const c_char,
         method_name: *const c_char,
         params_json: *const c_char,
+        timeout_ms: c_int,
     ) -> *mut c_char;
 
     /// Free a string returned by logos_sdk_call_method_sync.
