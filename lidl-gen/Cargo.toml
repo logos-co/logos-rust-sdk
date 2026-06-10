@@ -1,0 +1,12 @@
+[package]
+name = "logos-lidl-gen"
+version = "0.1.0"
+edition = "2021"
+description = "LIDL -> Rust codegen backend: typed callers and event subscribers over logos-rust-sdk"
+
+[lib]
+name = "logos_lidl_gen"
+
+[[bin]]
+name = "logos-lidl-gen"
+path = "src/main.rs"

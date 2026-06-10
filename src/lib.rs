@@ -35,6 +35,7 @@
 //! ```
 
 mod ffi;
+pub mod bytes;
 mod error;
 mod params;
 mod callback;
@@ -46,4 +47,4 @@ pub use error::LogosError;
 pub use params::{Param, ToParam};
 pub use callback::{CallResult, EventData};
 pub use plugin::PluginProxy;
-pub use api::LogosModuleSDK;
+pub use api::{protocol_abi_major, protocol_version, LogosModuleSDK};

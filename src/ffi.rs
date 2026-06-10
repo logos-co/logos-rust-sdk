@@ -1,47 +1,75 @@
-//! FFI bindings to liblogos_module_client (logos-module-client).
+//! FFI bindings to the language-neutral `lp_*` C ABI (logos-protocol).
+//!
+//! Since the protocol extraction, the Rust SDK consumes logos-protocol
+//! directly instead of logos-module-client's `logos_sdk_*` facade. The
+//! symbols resolve at final link time when CMake links the module plugin
+//! against the protocol archive (chained through logos-qt-sdk by
+//! logos-module-builder's plugin link line).
 
 use std::ffi::{c_char, c_int, c_void};
 
-/// C callback type matching LogosSdkCallback in logos_sdk_c.h.
-pub type LogosSdkCallback = extern "C" fn(
-    result: c_int,
-    message: *const c_char,
-    user_data: *mut c_void,
-);
+/// Opaque client handle (`lp_client*`).
+#[repr(C)]
+pub struct LpClient {
+    _private: [u8; 0],
+}
+
+/// Opaque subscription handle (`lp_subscription*`).
+#[repr(C)]
+pub struct LpSubscription {
+    _private: [u8; 0],
+}
+
+/// Result callback for `lp_invoke_async`:
+/// `ok != 0` → `json` is the result JSON value; `ok == 0` → canonical error
+/// object. `json` is only valid for the duration of the callback.
+pub type LpResultCb = extern "C" fn(ok: c_int, json: *const c_char, user_data: *mut c_void);
+
+/// Event callback for `lp_subscribe`. `data_json` is a JSON array payload.
+pub type LpEventCb =
+    extern "C" fn(event_name: *const c_char, data_json: *const c_char, user_data: *mut c_void);
+
+pub const LP_OK: c_int = 0;
 
 extern "C" {
-    /// Call a plugin method synchronously.
-    /// Returns a heap-allocated UTF-8 string that must be freed with logos_sdk_free_string.
-    /// Returns NULL on failure.
-    pub fn logos_sdk_call_method_sync(
-        plugin_name: *const c_char,
-        method_name: *const c_char,
-        params_json: *const c_char,
-    ) -> *mut c_char;
+    pub fn lp_protocol_version() -> *const c_char;
+    pub fn lp_protocol_abi_major() -> c_int;
 
-    /// Free a string returned by logos_sdk_call_method_sync.
-    pub fn logos_sdk_free_string(str: *mut c_char);
+    pub fn lp_string_free(s: *mut c_char);
 
-    /// Call a plugin method asynchronously.
-    /// callback receives (1=success/0=failure, message, user_data) on completion.
-    pub fn logos_sdk_call_method_async(
-        plugin_name: *const c_char,
-        method_name: *const c_char,
-        params_json: *const c_char,
-        callback: LogosSdkCallback,
+    pub fn lp_client_create(
+        target_module: *const c_char,
+        origin_module: *const c_char,
+        target_transport_json: *const c_char,
+        capability_transport_json: *const c_char,
+    ) -> *mut LpClient;
+    pub fn lp_client_destroy(client: *mut LpClient);
+
+    pub fn lp_invoke(
+        client: *mut LpClient,
+        method: *const c_char,
+        args_json: *const c_char,
+        timeout_ms: c_int,
+        out_result_json: *mut *mut c_char,
+        out_error_json: *mut *mut c_char,
+    ) -> c_int;
+
+    pub fn lp_invoke_async(
+        client: *mut LpClient,
+        method: *const c_char,
+        args_json: *const c_char,
+        timeout_ms: c_int,
+        cb: LpResultCb,
         user_data: *mut c_void,
-    );
+    ) -> c_int;
 
-    /// Register an event listener for a specific event from a plugin.
-    /// callback fires each time the event is emitted with (1, json_event_data, user_data).
-    pub fn logos_sdk_register_event(
-        plugin_name: *const c_char,
+    pub fn lp_subscribe(
+        client: *mut LpClient,
         event_name: *const c_char,
-        callback: LogosSdkCallback,
+        cb: LpEventCb,
         user_data: *mut c_void,
-    );
+    ) -> *mut LpSubscription;
+    pub fn lp_unsubscribe(sub: *mut LpSubscription);
 
-    /// Shut down the SDK's internal core client, releasing connections.
-    /// Safe to call multiple times.
-    pub fn logos_sdk_shutdown();
+    pub fn lp_get_methods(client: *mut LpClient) -> *mut c_char;
 }

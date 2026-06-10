@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ffi::LogosSdkCallback;
+use crate::ffi::{LpEventCb, LpResultCb};
 
 #[derive(Debug, Clone)]
 pub struct CallResult {
@@ -85,9 +85,21 @@ pub(crate) struct EventCallbackData {
     pub event_name: String,
 }
 
+/// Historical message semantics: the result as a plain string — JSON
+/// strings unquoted, null → "", anything else compact JSON. Keeps
+/// `result.message.parse::<i64>()` etc. working across the lp_* move.
+pub(crate) fn json_to_message(json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::String(s)) => s,
+        Ok(serde_json::Value::Null) => String::new(),
+        Ok(v) => v.to_string(),
+        Err(_) => json.to_owned(),
+    }
+}
+
 pub(crate) extern "C" fn method_callback_trampoline(
-    result: c_int,
-    message: *const c_char,
+    ok: c_int,
+    json: *const c_char,
     user_data: *mut c_void,
 ) {
     if user_data.is_null() {
@@ -96,25 +108,25 @@ pub(crate) extern "C" fn method_callback_trampoline(
 
     let callback_data = unsafe { Box::from_raw(user_data as *mut CallbackData) };
 
-    let message_str = if message.is_null() {
+    let json_str = if json.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(message) }
+        unsafe { CStr::from_ptr(json) }
             .to_string_lossy()
             .into_owned()
     };
 
     let call_result = CallResult {
-        success: result != 0,
-        message: message_str,
+        success: ok != 0,
+        message: json_to_message(&json_str),
     };
 
     let _ = callback_data.tx.send(call_result);
 }
 
 pub(crate) extern "C" fn event_callback_trampoline(
-    result: c_int,
-    message: *const c_char,
+    event_name: *const c_char,
+    data_json: *const c_char,
     user_data: *mut c_void,
 ) {
     if user_data.is_null() {
@@ -123,33 +135,26 @@ pub(crate) extern "C" fn event_callback_trampoline(
 
     let callback_data = unsafe { &*(user_data as *const EventCallbackData) };
 
-    if result == 0 {
-        return;
-    }
-
-    let message_str = if message.is_null() {
-        return;
+    let name = if event_name.is_null() {
+        callback_data.event_name.clone()
     } else {
-        unsafe { CStr::from_ptr(message) }
+        unsafe { CStr::from_ptr(event_name) }
             .to_string_lossy()
             .into_owned()
     };
 
-    let event_data = match EventData::from_json(&message_str) {
-        Ok(data) => data,
-        Err(_) => {
-            // If parsing fails, create a simple event with the raw message
-            EventData {
-                event: callback_data.event_name.clone(),
-                data: serde_json::Value::String(message_str),
-            }
-        }
+    let payload = if data_json.is_null() {
+        serde_json::Value::Array(vec![])
+    } else {
+        let raw = unsafe { CStr::from_ptr(data_json) }.to_string_lossy().into_owned();
+        serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
     };
 
+    let event_data = EventData { event: name, data: payload };
     let _ = callback_data.tx.send(event_data);
 }
 
-pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, LogosSdkCallback) {
+pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, LpResultCb) {
     let (tx, rx) = mpsc::channel();
     let callback_data = Box::new(CallbackData { tx });
     let user_data = Box::into_raw(callback_data) as *mut c_void;
@@ -158,7 +163,7 @@ pub(crate) fn create_method_callback() -> (Receiver<CallResult>, *mut c_void, Lo
 
 pub(crate) fn create_event_callback(
     event_name: &str,
-) -> (Receiver<EventData>, Box<EventCallbackData>, LogosSdkCallback) {
+) -> (Receiver<EventData>, Box<EventCallbackData>, LpEventCb) {
     let (tx, rx) = mpsc::channel();
     let callback_data = Box::new(EventCallbackData {
         tx,

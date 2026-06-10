@@ -1,6 +1,6 @@
 # logos-rust-sdk
 
-A Rust SDK for calling other Logos modules from within a Logos module. Wraps the [`logos-module-client`](https://github.com/logos-co/logos-module-client) C API to provide an ergonomic Rust interface for synchronous and asynchronous inter-module communication.
+A Rust SDK for calling other Logos modules from within a Logos module. Consumes the language-neutral **`lp_*` C ABI** from [`logos-protocol`](https://github.com/logos-co/logos-protocol) directly — typed sync/async calls, event subscriptions, and (via `logos-lidl-gen`) **LIDL-generated typed clients**.
 
 ## Overview
 

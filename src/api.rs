@@ -30,13 +30,31 @@ impl LogosModuleSDK {
         PluginProxy::new(name)
     }
 
-    /// Shut down the internal client, releasing all connections.
-    /// Safe to call multiple times. Connections are lazily re-created on next use.
-    pub fn shutdown(&self) {
-        unsafe {
-            crate::ffi::logos_sdk_shutdown();
-        }
+    /// Shut down the SDK.
+    ///
+    /// Since the move to the lp_* C ABI each `PluginProxy` owns its own
+    /// protocol client (released on drop), so there is no process-global
+    /// connection state left to tear down. Kept for source compatibility.
+    pub fn shutdown(&self) {}
+}
+
+/// The logos-protocol semver this SDK was linked against — the single
+/// number governing Logos load/call compatibility (same MAJOR ⇔
+/// compatible). Forwarded verbatim from the linked protocol library,
+/// never minted by the SDK.
+pub fn protocol_version() -> String {
+    let ptr = unsafe { crate::ffi::lp_protocol_version() };
+    if ptr.is_null() {
+        return String::new();
     }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// MAJOR component of the linked logos-protocol version.
+pub fn protocol_abi_major() -> i32 {
+    unsafe { crate::ffi::lp_protocol_abi_major() }
 }
 
 impl Default for LogosModuleSDK {
