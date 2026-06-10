@@ -8,7 +8,9 @@
 pub mod ast;
 pub mod parser;
 pub mod rustgen;
+pub mod rustgen_provider;
 
 pub use ast::ModuleDecl;
 pub use parser::parse;
 pub use rustgen::generate;
+pub use rustgen_provider::generate_provider;

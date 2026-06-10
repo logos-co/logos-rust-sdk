@@ -1,0 +1,437 @@
+//! Rust provider generation: the common module-impl C ABI exports
+//! (logos_module_impl.h) around a Rust implementation — the exact same
+//! contract the C++ SDK emits, so the uniform Qt glue (and a future no-Qt
+//! host) drives Rust and C++ modules identically.
+//!
+//! Generated layout for module `calc_demo`:
+//!   - trait `CalcDemoModule` — typed methods the author implements
+//!   - `RustModuleContext` accessor (module path / instance id /
+//!     persistence path, stamped by the host via set_context)
+//!   - typed event emitters (`emit_total_changed(...)`)
+//!   - #[no_mangle] exports: logos_module_dispatch / get_methods /
+//!     set_context / set_emit_callback / accept_token /
+//!     get_protocol_version / string_free
+//!
+//! The author writes `struct MyImpl; impl CalcDemoModule for MyImpl {...}`
+//! and calls the generated `logos_module_register!(MyImpl)`-equivalent via
+//! `register_module::<MyImpl>()` in a ctor, or simply relies on the
+//! generated `Default`-based instantiation.
+
+use crate::ast::*;
+
+fn pascal(name: &str) -> String {
+    name.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut c = s.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn rust_param_type(ty: &TypeExpr) -> &'static str {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => "String",
+        (TypeKind::Primitive, "int") => "i64",
+        (TypeKind::Primitive, "uint") => "u64",
+        (TypeKind::Primitive, "float64") => "f64",
+        (TypeKind::Primitive, "bool") => "bool",
+        (TypeKind::Primitive, "bstr") => "Vec<u8>",
+        _ => "serde_json::Value",
+    }
+}
+
+fn rust_return_type(ty: &TypeExpr) -> &'static str {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>",
+        _ => rust_param_type(ty),
+    }
+}
+
+/// Qt-style type names for the interface JSON — identical to what the C++
+/// glue/host expects from getMethods().
+fn qt_type_name(ty: &TypeExpr) -> String {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => "QString".into(),
+        (TypeKind::Primitive, "bstr") => "QByteArray".into(),
+        (TypeKind::Primitive, "int") => "int".into(),
+        (TypeKind::Primitive, "uint") => "int".into(),
+        (TypeKind::Primitive, "float64") => "double".into(),
+        (TypeKind::Primitive, "bool") => "bool".into(),
+        (TypeKind::Primitive, "result") => "LogosResult".into(),
+        (TypeKind::Array, _) => "QVariantList".into(),
+        (TypeKind::Map, _) => "QVariantMap".into(),
+        _ => "QVariant".into(),
+    }
+}
+
+fn arg_from_json(ty: &TypeExpr, expr: &str) -> String {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => format!("{}.as_str().unwrap_or_default().to_string()", expr),
+        (TypeKind::Primitive, "int") => format!("{}.as_i64().unwrap_or_default()", expr),
+        (TypeKind::Primitive, "uint") => format!("{}.as_u64().unwrap_or_default()", expr),
+        (TypeKind::Primitive, "float64") => format!("{}.as_f64().unwrap_or_default()", expr),
+        (TypeKind::Primitive, "bool") => format!("{}.as_bool().unwrap_or_default()", expr),
+        (TypeKind::Primitive, "bstr") => {
+            format!("logos_rust_sdk::bytes::decode({}).unwrap_or_default()", expr)
+        }
+        _ => format!("{}.clone()", expr),
+    }
+}
+
+fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode(&{})", expr),
+        (TypeKind::Primitive, "result") => format!(
+            "match {} {{ Ok(v) => serde_json::json!({{\"success\": true, \"value\": v, \"error\": null}}), \
+             Err(e) => serde_json::json!({{\"success\": false, \"value\": null, \"error\": e}}) }}",
+            expr
+        ),
+        _ => format!("serde_json::Value::from({})", expr),
+    }
+}
+
+fn interface_json(module: &ModuleDecl) -> serde_json::Value {
+    let mut entries = Vec::new();
+    for m in &module.methods {
+        let sig = format!(
+            "{}({})",
+            m.name,
+            m.params.iter().map(|p| qt_type_name(&p.ty)).collect::<Vec<_>>().join(",")
+        );
+        let mut obj = serde_json::json!({
+            "name": m.name,
+            "signature": sig,
+            "returnType": qt_type_name(&m.return_type),
+            "isInvokable": true,
+        });
+        if !m.params.is_empty() {
+            obj["parameters"] = serde_json::Value::Array(
+                m.params
+                    .iter()
+                    .map(|p| serde_json::json!({"type": qt_type_name(&p.ty), "name": p.name}))
+                    .collect(),
+            );
+        }
+        entries.push(obj);
+    }
+    for e in &module.events {
+        let sig = format!(
+            "{}({})",
+            e.name,
+            e.params.iter().map(|p| qt_type_name(&p.ty)).collect::<Vec<_>>().join(",")
+        );
+        let mut obj = serde_json::json!({
+            "type": "event",
+            "name": e.name,
+            "signature": sig,
+        });
+        if !e.params.is_empty() {
+            obj["parameters"] = serde_json::Value::Array(
+                e.params
+                    .iter()
+                    .map(|p| serde_json::json!({"type": qt_type_name(&p.ty), "name": p.name}))
+                    .collect(),
+            );
+        }
+        entries.push(obj);
+    }
+    serde_json::Value::Array(entries)
+}
+
+/// Generate the Rust provider scaffold. `protocol_version` is the
+/// logos-protocol semver this module is built against (stamped by the
+/// build, surfaced through logos_module_get_protocol_version).
+pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String {
+    let trait_name = format!("{}Module", pascal(&module.name));
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "// Generated by logos-lidl-gen --provider from the `{}` LIDL contract — do not edit.\n\
+         //\n\
+         // The common module-impl C ABI (logos_module_impl.h) around a Rust impl:\n\
+         // implement `{}` on your type and call `install::<YourImpl>()` once\n\
+         // (e.g. from a #[ctor] or the first dispatch will lazily Default it).\n\n\
+         use std::ffi::{{c_char, c_int, c_void, CStr, CString}};\n\
+         use std::sync::Mutex;\n\n",
+        module.name, trait_name
+    ));
+
+    // -- context ------------------------------------------------------------
+    out.push_str(
+        "#[derive(Debug, Clone, Default)]\n\
+         pub struct RustModuleContext {\n\
+         \x20   pub module_path: String,\n\
+         \x20   pub instance_id: String,\n\
+         \x20   pub instance_persistence_path: String,\n\
+         }\n\n\
+         static CONTEXT: Mutex<Option<RustModuleContext>> = Mutex::new(None);\n\n\
+         /// The module identity/context stamped by the host (None before\n\
+         /// set_context — mirrors LogosModuleContext::isContextReady()).\n\
+         pub fn context() -> Option<RustModuleContext> {\n\
+         \x20   CONTEXT.lock().unwrap().clone()\n\
+         }\n\n",
+    );
+
+    // -- emit callback + typed emitters --------------------------------------
+    out.push_str(
+        "type EmitCb = extern \"C\" fn(*const c_char, *const c_char, *mut c_void);\n\
+         struct EmitState {\n\
+         \x20   cb: Option<(EmitCb, usize)>,\n\
+         }\n\
+         unsafe impl Send for EmitState {}\n\
+         static EMIT: Mutex<EmitState> = Mutex::new(EmitState { cb: None });\n\n\
+         fn emit_event(name: &str, payload: &serde_json::Value) {\n\
+         \x20   let state = EMIT.lock().unwrap();\n\
+         \x20   if let Some((cb, ud)) = state.cb {\n\
+         \x20       let name_c = CString::new(name).unwrap_or_default();\n\
+         \x20       let json_c = CString::new(payload.to_string()).unwrap_or_default();\n\
+         \x20       cb(name_c.as_ptr(), json_c.as_ptr(), ud as *mut c_void);\n\
+         \x20   }\n\
+         }\n\n",
+    );
+
+    for e in &module.events {
+        let fn_name = format!("emit_{}", snake(&e.name));
+        let params_sig: Vec<String> = e
+            .params
+            .iter()
+            .map(|p| {
+                let t = match (&p.ty.kind, p.ty.name.as_str()) {
+                    (TypeKind::Primitive, "tstr") => "&str",
+                    (TypeKind::Primitive, "bstr") => "&[u8]",
+                    other => match other {
+                        (TypeKind::Primitive, "int") => "i64",
+                        (TypeKind::Primitive, "uint") => "u64",
+                        (TypeKind::Primitive, "float64") => "f64",
+                        (TypeKind::Primitive, "bool") => "bool",
+                        _ => "&serde_json::Value",
+                    },
+                };
+                format!("{}: {}", snake(&p.name), t)
+            })
+            .collect();
+        let pushes: Vec<String> = e
+            .params
+            .iter()
+            .map(|p| match (&p.ty.kind, p.ty.name.as_str()) {
+                (TypeKind::Primitive, "bstr") => {
+                    format!("payload.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
+                }
+                (TypeKind::Primitive, _) => {
+                    format!("payload.push(serde_json::Value::from({}));", snake(&p.name))
+                }
+                _ => format!("payload.push({}.clone());", snake(&p.name)),
+            })
+            .collect();
+        out.push_str(&format!(
+            "/// Typed emitter for the `{}` event.\n\
+             pub fn {}({}) {{\n\
+             \x20   let mut payload: Vec<serde_json::Value> = Vec::new();\n\
+             \x20   {}\n\
+             \x20   emit_event(\"{}\", &serde_json::Value::Array(payload));\n\
+             }}\n\n",
+            e.name,
+            fn_name,
+            params_sig.join(", "),
+            pushes.join("\n    "),
+            e.name
+        ));
+    }
+
+    // -- the trait ------------------------------------------------------------
+    out.push_str(&format!("pub trait {}: Send + 'static {{\n", trait_name));
+    for m in &module.methods {
+        let params: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
+            .collect();
+        out.push_str(&format!(
+            "    fn {}(&mut self{}{}) -> {};\n",
+            snake(&m.name),
+            if params.is_empty() { "" } else { ", " },
+            params.join(", "),
+            rust_return_type(&m.return_type)
+        ));
+    }
+    out.push_str("}\n\n");
+
+    // -- instance + install ----------------------------------------------------
+    out.push_str(&format!(
+        "type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;\n\
+         struct Registered {{\n\
+         \x20   dispatch: DispatchFn,\n\
+         }}\n\
+         static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\n\
+         /// Install `T` as the module implementation (Default-constructed once).\n\
+         pub fn install<T: {} + Default>() {{\n\
+         \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
+         \x20       static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);\n\
+         \x20       let mut guard = INSTANCE.lock().unwrap();\n\
+         \x20       if guard.is_none() {{\n\
+         \x20           *guard = Some(Box::new(T::default()));\n\
+         \x20       }}\n\
+         \x20       let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;\n\
+         \x20       match method {{\n",
+        trait_name, trait_name
+    ));
+
+    for m in &module.methods {
+        let n = m.params.len();
+        let args: Vec<String> = m
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| arg_from_json(&p.ty, &format!("args.get({}).unwrap_or(&serde_json::Value::Null)", i)))
+            .collect();
+        out.push_str(&format!(
+            "            \"{}\" => {{\n\
+             \x20               if args.len() < {} {{ return None; }}\n\
+             \x20               let result = imp.{}({});\n\
+             \x20               Some({})\n\
+             \x20           }}\n",
+            m.name,
+            n,
+            snake(&m.name),
+            args.join(", "),
+            ret_to_json(&m.return_type, "result")
+        ));
+    }
+
+    out.push_str(
+        "            _ => None,\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   *REGISTERED.lock().unwrap() = Some(Registered { dispatch: dispatch_impl::<T> });\n\
+         }\n\n",
+    );
+
+    // -- C ABI exports -----------------------------------------------------------
+    let iface = interface_json(module).to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    out.push_str(&format!(
+        "fn to_c_string(s: String) -> *mut c_char {{\n\
+         \x20   CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())\n\
+         }}\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_dispatch(method: *const c_char, args_json: *const c_char) -> *mut c_char {{\n\
+         \x20   if method.is_null() {{ return std::ptr::null_mut(); }}\n\
+         \x20   let method = unsafe {{ CStr::from_ptr(method) }}.to_string_lossy().into_owned();\n\
+         \x20   let args: Vec<serde_json::Value> = if args_json.is_null() {{\n\
+         \x20       Vec::new()\n\
+         \x20   }} else {{\n\
+         \x20       let raw = unsafe {{ CStr::from_ptr(args_json) }}.to_string_lossy();\n\
+         \x20       match serde_json::from_str::<serde_json::Value>(&raw) {{\n\
+         \x20           Ok(serde_json::Value::Array(a)) => a,\n\
+         \x20           _ => return std::ptr::null_mut(),\n\
+         \x20       }}\n\
+         \x20   }};\n\
+         \x20   let guard = REGISTERED.lock().unwrap();\n\
+         \x20   let registered = match guard.as_ref() {{ Some(r) => r, None => return std::ptr::null_mut() }};\n\
+         \x20   match (registered.dispatch)(&method, &args) {{\n\
+         \x20       Some(value) => to_c_string(value.to_string()),\n\
+         \x20       None => std::ptr::null_mut(),\n\
+         \x20   }}\n\
+         }}\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_get_methods() -> *mut c_char {{\n\
+         \x20   to_c_string(\"{}\".to_string())\n\
+         }}\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_set_context(\n\
+         \x20   module_path: *const c_char,\n\
+         \x20   instance_id: *const c_char,\n\
+         \x20   instance_persistence_path: *const c_char,\n\
+         ) {{\n\
+         \x20   fn s(p: *const c_char) -> String {{\n\
+         \x20       if p.is_null() {{ String::new() }} else {{ unsafe {{ CStr::from_ptr(p) }}.to_string_lossy().into_owned() }}\n\
+         \x20   }}\n\
+         \x20   *CONTEXT.lock().unwrap() = Some(RustModuleContext {{\n\
+         \x20       module_path: s(module_path),\n\
+         \x20       instance_id: s(instance_id),\n\
+         \x20       instance_persistence_path: s(instance_persistence_path),\n\
+         \x20   }});\n\
+         }}\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_set_emit_callback(cb: Option<EmitCb>, user_data: *mut c_void) {{\n\
+         \x20   EMIT.lock().unwrap().cb = cb.map(|f| (f, user_data as usize));\n\
+         }}\n\n\
+         static TOKENS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_accept_token(module_name: *const c_char, token: *const c_char) -> c_int {{\n\
+         \x20   if module_name.is_null() || token.is_null() {{ return -1; }}\n\
+         \x20   let name = unsafe {{ CStr::from_ptr(module_name) }}.to_string_lossy().into_owned();\n\
+         \x20   let tok = unsafe {{ CStr::from_ptr(token) }}.to_string_lossy().into_owned();\n\
+         \x20   TOKENS.lock().unwrap().push((name, tok));\n\
+         \x20   0\n\
+         }}\n\n\
+         /// The logos-protocol semver this module was built against\n\
+         /// (stamped at generation time by the build; never minted here).\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_get_protocol_version() -> *const c_char {{\n\
+         \x20   static VERSION: &str = \"{}\\0\";\n\
+         \x20   VERSION.as_ptr() as *const c_char\n\
+         }}\n\n\
+         #[no_mangle]\n\
+         pub extern \"C\" fn logos_module_string_free(s: *mut c_char) {{\n\
+         \x20   if !s.is_null() {{\n\
+         \x20       unsafe {{ drop(CString::from_raw(s)) }};\n\
+         \x20   }}\n\
+         }}\n",
+        iface, protocol_version
+    ));
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse;
+
+    const SAMPLE: &str = r#"
+module rust_calc {
+  version "1.0.0"
+  depends []
+  method add(a: int, b: int) -> int
+  method greet(name: tstr) -> tstr
+  method fetch() -> result
+  event totalChanged(total: int)
+}
+"#;
+
+    #[test]
+    fn generates_provider_scaffold() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.1.0");
+        assert!(code.contains("pub trait RustCalcModule"));
+        assert!(code.contains("fn add(&mut self, a: i64, b: i64) -> i64;"));
+        assert!(code.contains("fn fetch(&mut self) -> Result<serde_json::Value, String>;"));
+        assert!(code.contains("pub fn emit_total_changed(total: i64)"));
+        assert!(code.contains("logos_module_dispatch"));
+        assert!(code.contains("logos_module_get_protocol_version"));
+        assert!(code.contains("\"0.1.0\\0\""));
+        assert!(code.contains("logos_module_set_context"));
+        // interface JSON carries Qt-style names + tagged events for host parity
+        assert!(code.contains("QString"));
+        assert!(code.contains("totalChanged"));
+    }
+}
