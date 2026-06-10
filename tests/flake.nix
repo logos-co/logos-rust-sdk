@@ -2,12 +2,20 @@
   description = "Integration tests for logos-rust-sdk — builds a minimal provider+caller module pair and verifies IPC via logoscore";
 
   inputs = {
+    # The c-ffi module interface (codegen.c_header → glue + consumer api
+    # headers) lives on the legacy c_ffi builder branch; the qt-split chain
+    # replaces it with the cdylib authoring path (logos_module_impl.h), to be
+    # adopted here as a follow-up. Until then the fixtures build with the
+    # c_ffi builder, while the Rust SDK inside them binds the lp_* C ABI
+    # (resolved by the logos-protocol static lib via callerBuildSupport).
     logos-module-builder.url = "github:logos-co/logos-module-builder/c_ffi";
     logos-module-builder.inputs.logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk/c_ffi";
     # CI overrides this with --override-input logos-rust-sdk path:.
     # Keeping a real GitHub URL here lets the lock file record a valid narHash.
     logos-rust-sdk.url = "github:logos-co/logos-rust-sdk";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    # Extraction-chain branch pin — temporary, re-point at master when the
+    # qt-split chain merges.
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/f409cffc0a762c0e376268f349baaa09217e4059";
     nixpkgs.follows = "logos-module-builder/nixpkgs";
   };
 
@@ -45,7 +53,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
 
           # callerBuildSupport bundles logos-module-client (extraBuildInputs + setupHook)
-          # so the caller flake never needs to know about logos-module-client directly.
+          # so the caller flake never needs to know where the lp_* C ABI comes from.
           rustSdkBuild = logos-rust-sdk.lib.callerBuildSupport.${system};
 
           # ── Rust caller staticlib ─────────────────────────────────────────────

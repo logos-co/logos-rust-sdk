@@ -17,8 +17,11 @@ logos_module(
 )
 
 # ── Rust static library ───────────────────────────────────────────────────────
-# Contains sdk_test_caller_* functions + logos-rust-sdk rlib (inlined by Rust linker).
-# logos_sdk_* symbols are unresolved here — satisfied below by logos_module_client.
+# Contains sdk_test_caller_* functions + logos-rust-sdk rlib (inlined by Rust
+# linker). The SDK's extern "C" lp_* symbols are unresolved here — satisfied
+# below by liblogos_module_client, which links logos-protocol statically and
+# re-exports the lp_* C ABI. (Linking the protocol archive directly would
+# duplicate the transport/token symbols already inside this plugin's SDK.)
 find_library(LIBSDK_TEST_CALLER
     NAMES libsdk_test_caller.a sdk_test_caller
     PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib
@@ -35,8 +38,8 @@ endif()
 target_link_libraries(sdk_test_caller_module_module_plugin PRIVATE ${LIBSDK_TEST_CALLER})
 
 # ── logos-module-client ───────────────────────────────────────────────────────
-# Resolves logos_sdk_* symbols declared in logos-rust-sdk's extern "C" blocks.
-# LOGOS_MODULE_CLIENT_ROOT is injected by callerBuildSupport.setupHook.
+# Resolves the lp_* C-ABI symbols declared in logos-rust-sdk's extern "C"
+# blocks. LOGOS_MODULE_CLIENT_ROOT is injected by callerBuildSupport.setupHook.
 if(NOT DEFINED LOGOS_MODULE_CLIENT_ROOT OR LOGOS_MODULE_CLIENT_ROOT STREQUAL "")
     if(DEFINED ENV{LOGOS_MODULE_CLIENT_ROOT})
         set(LOGOS_MODULE_CLIENT_ROOT "$ENV{LOGOS_MODULE_CLIENT_ROOT}")

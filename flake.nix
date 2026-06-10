@@ -4,10 +4,14 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-module-client.url = "github:logos-co/logos-module-client/new_api_test";
-    logos-module-client.inputs.logos-nix.follows = "logos-nix";
-    logos-module-client.inputs.logos-cpp-sdk.follows = "logos-module-builder/logos-cpp-sdk";
-    # Test-only: module builder + logoscore are needed for the integration test suite.
+    # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
+    # library exports it (it links logos-protocol statically). Extraction-chain
+    # branch pin — temporary, re-point at master when the qt-split chain merges.
+    logos-module-client.url = "github:logos-co/logos-module-client/2bf380e0684c2467796a999fa7e569bb36eb4780";
+    # Test-only: module builder + logoscore are needed for the integration test
+    # suite. The c-ffi module interface (codegen.c_header) lives on the legacy
+    # c_ffi builder branch; the qt-split chain replaces it with the cdylib
+    # authoring path, to be adopted here as a follow-up.
     logos-module-builder.url = "github:logos-co/logos-module-builder/c_ffi";
     logos-module-builder.inputs.logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk/c_ffi";
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
@@ -48,7 +52,11 @@
     {
       # Opaque build support for Rust modules that call other modules via IPC.
       # Provides extraBuildInputs and a setupHook — consumers don't need to
-      # know about logos-module-client or any env vars.
+      # know about logos-module-client or any env vars. The SDK's extern "C"
+      # lp_* symbols resolve against liblogos_module_client.so, which links
+      # logos-protocol statically and re-exports the lp_* C ABI. (Linking the
+      # protocol archive directly into a c_ffi-era plugin would duplicate the
+      # transport/token symbols its SDK already carries.)
       lib.callerBuildSupport = nixpkgs.lib.genAttrs systems (system:
         let
           mc    = logos-module-client.packages.${system}.logos-module-client;
