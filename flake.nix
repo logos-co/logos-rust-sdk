@@ -9,12 +9,12 @@
     # branch pin — temporary, re-point at master when the qt-split chain merges.
     logos-module-client.url = "github:logos-co/logos-module-client/2bf380e0684c2467796a999fa7e569bb36eb4780";
     # Test-only: module builder + logoscore are needed for the integration test
-    # suite. The c-ffi module interface (codegen.c_header) lives on the legacy
-    # c_ffi builder branch; the qt-split chain replaces it with the cdylib
-    # authoring path, to be adopted here as a follow-up.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/c_ffi";
-    logos-module-builder.inputs.logos-cpp-sdk.url = "github:logos-co/logos-cpp-sdk/c_ffi";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    # suite. The cdylib authoring interface (interface = "cdylib" + codegen.lidl
+    # -> uniform Qt glue over the module-impl C ABI) lives on the builder's
+    # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
+    # pins — re-point at master when the chain merges.
+    logos-module-builder.url = "github:logos-co/logos-module-builder/7a2e334836ec4f1f420974e749537c6e3698e3c1";
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/5b76ba51affeba753af48fcaa1a7ab9c6df1b7fc";
   };
 
   outputs = inputs@{ self, nixpkgs, logos-nix, logos-module-client, logos-module-builder, logos-logoscore-cli }:
@@ -26,37 +26,79 @@
         pkgs = import nixpkgs { inherit system; };
       });
 
+      # The logos-protocol semver the whole stack links — stamped into the
+      # generated Rust scaffold (logos_module_get_protocol_version), forwarded
+      # from the protocol header, never minted here.
+      protocolVersion =
+        let
+          header = builtins.readFile
+            "${logos-module-builder.inputs.logos-protocol}/cpp/logos_protocol.h";
+          parts = builtins.split "LOGOS_PROTOCOL_VERSION_STRING \"([^\"]*)\"" header;
+        in
+          if builtins.length parts < 2 then "0.1.0"
+          else builtins.head (builtins.elemAt parts 1);
+
+      # Both test fixtures are Rust crates with a path dep on this repo (and a
+      # build-dep on lidl-gen, which generates the module-impl C ABI scaffold
+      # from the .lidl contract). Assemble the source layout their Cargo.toml
+      # path deps expect and build the staticlib with vendored crates.
+      mkFixtureRustLib = { pkgs, name, dir }:
+        let
+          src = pkgs.runCommand "${name}-rust-src" {} ''
+            mkdir -p $out
+            cp -r ${dir} $out/rust-lib
+            cp -r ${self} $out/logos-rust-sdk-src
+          '';
+        in
+        pkgs.rustPlatform.buildRustPackage {
+          pname = name;
+          version = "0.1.0";
+          inherit src;
+          sourceRoot = "${name}-rust-src/rust-lib";
+          # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
+          # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
+          # accepted. Only bites in CI on a cachix miss.
+          cargoLock.lockFile = "${dir}/Cargo.lock";
+          env.LOGOS_PROTOCOL_VERSION = protocolVersion;
+          doCheck = false;
+        };
+
       # ── Test modules ──────────────────────────────────────────────────────────
-      # These are built only when checks are evaluated (ws test / nix flake check).
-      # Source lives in tests/; tests/flake.nix is also a standalone flake for the
-      # same test suite.
-      provider = mkModule {
-        src = ./tests/provider;
-        configFile = ./tests/provider/metadata.json;
-        flakeInputs = inputs;
-        preConfigure = ''
-          export HOME=$TMPDIR
-          export CARGO_HOME=$TMPDIR/cargo
-          mkdir -p $CARGO_HOME
+      # Both fixtures author on the common cdylib path: lidl-gen generates the
+      # Rust C-ABI scaffold at cargo-build time; the builder generates the
+      # uniform Qt glue from the same .lidl (interface = "cdylib"). The plugin
+      # links one logos-protocol stack (via logos-qt-sdk) shared by the glue
+      # and the Rust SDK, so the host token forwarded through
+      # logos_module_accept_token authenticates the caller's outbound calls.
+      mkProvider = { pkgs, ... }:
+        mkModule {
+          src = ./tests/provider;
+          configFile = ./tests/provider/metadata.json;
+          flakeInputs = inputs;
+          preConfigure = ''
+            mkdir -p lib
+            cp ${mkFixtureRustLib { inherit pkgs; name = "sdk_test_provider"; dir = ./tests/provider/rust-lib; }}/lib/libsdk_test_provider.a lib/
+          '';
+        };
 
-          pushd rust-lib
-          cargo build --release --offline
-          popd
-
-          mkdir -p lib
-          cp rust-lib/target/release/libsdk_test_provider.a lib/
-          cp rust-lib/include/sdk_test_provider.h lib/
-        '';
-      };
+      mkCaller = { pkgs, provider, ... }:
+        mkModule {
+          src = ./tests/caller;
+          configFile = ./tests/caller/metadata.json;
+          flakeInputs = { sdk_test_provider_module = provider; } // inputs;
+          preConfigure = ''
+            mkdir -p lib
+            cp ${mkFixtureRustLib { inherit pkgs; name = "sdk_test_caller"; dir = ./tests/caller/rust-lib; }}/lib/libsdk_test_caller.a lib/
+          '';
+        };
     in
     {
-      # Opaque build support for Rust modules that call other modules via IPC.
-      # Provides extraBuildInputs and a setupHook — consumers don't need to
-      # know about logos-module-client or any env vars. The SDK's extern "C"
-      # lp_* symbols resolve against liblogos_module_client.so, which links
-      # logos-protocol statically and re-exports the lp_* C ABI. (Linking the
-      # protocol archive directly into a c_ffi-era plugin would duplicate the
-      # transport/token symbols its SDK already carries.)
+      # Opaque build support for Rust binaries that call other modules via IPC
+      # from OUTSIDE a module plugin (no qt-sdk/protocol link of their own).
+      # Provides extraBuildInputs and a setupHook over logos-module-client,
+      # whose shared library links logos-protocol statically and re-exports
+      # the lp_* C ABI. Modules built on the cdylib path don't need this —
+      # their lp_* resolve against the protocol archive already in the plugin.
       lib.callerBuildSupport = nixpkgs.lib.genAttrs systems (system:
         let
           mc    = logos-module-client.packages.${system}.logos-module-client;
@@ -68,7 +110,7 @@
             export LOGOS_MODULE_CLIENT_ROOT="${mc}"
           '';
           # Path to liblogos_module_client.so — set LD_LIBRARY_PATH to this
-          # in test derivations so logoscore subprocesses can find the library.
+          # in test derivations so subprocesses can find the library.
           runtimeLibPath = "${mc}/lib";
         }
       );
@@ -76,40 +118,9 @@
       checks = nixpkgs.lib.genAttrs systems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          rustSdkBuild = self.lib.callerBuildSupport.${system};
 
-          callerRustSrc = pkgs.runCommand "sdk-test-caller-rust-src" {} ''
-            mkdir -p $out
-            cp -r ${./tests/caller/rust-lib} $out/rust-lib
-            cp -r ${self} $out/logos-rust-sdk-src
-          '';
-
-          callerRustLib = pkgs.rustPlatform.buildRustPackage {
-            pname = "sdk_test_caller";
-            version = "0.1.0";
-            src = callerRustSrc;
-            sourceRoot = "sdk-test-caller-rust-src/rust-lib";
-            # Use importCargoLock (fetchurl-based) instead of cargoHash
-            # (fetchCargoVendor's Python fetcher). crates.io now returns 403 to the
-            # Python fetcher's generic User-Agent; Nix's own downloader (fetchurl) is
-            # accepted. Only bites in CI on a cachix miss, where the vendor FOD is
-            # actually built rather than substituted. Mirrors tests/flake.nix.
-            cargoLock.lockFile = ./tests/caller/rust-lib/Cargo.lock;
-            doCheck = false;
-          };
-
-          caller = mkModule {
-            src = ./tests/caller;
-            configFile = ./tests/caller/metadata.json;
-            flakeInputs = { sdk_test_provider_module = provider; } // inputs;
-            extraBuildInputs = rustSdkBuild.extraBuildInputs;
-            preConfigure = ''
-              mkdir -p lib
-              cp ${callerRustLib}/lib/libsdk_test_caller.a lib/
-              cp rust-lib/include/sdk_test_caller.h lib/
-              ${rustSdkBuild.setupHook}
-            '';
-          };
+          provider = mkProvider { inherit pkgs; };
+          caller   = mkCaller { inherit pkgs provider; };
 
           providerInstall = provider.packages.${system}.install;
           callerInstall   = caller.packages.${system}.install;
@@ -130,7 +141,6 @@
           } ''
             mkdir -p $out
             export QT_QPA_PLATFORM=offscreen
-            export LD_LIBRARY_PATH="${rustSdkBuild.runtimeLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
             # Inline (`-c`) mode is legacy; drive a logoscore daemon and call via
             # the `call` client subcommand. A persistent daemon keeps the Qt event

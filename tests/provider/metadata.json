@@ -4,7 +4,7 @@
   "description": "Minimal provider module for logos-rust-sdk integration tests",
   "author": "Logos Core Team",
   "type": "core",
-  "interface": "c-ffi",
+  "interface": "cdylib",
   "category": "general",
   "main": "sdk_test_provider_module_plugin",
   "dependencies": [],
@@ -12,18 +12,18 @@
   "capabilities": [],
 
   "codegen": {
-    "c_header": "lib/sdk_test_provider.h"
+    "lidl": "rust-lib/sdk_test_provider_module.lidl"
   },
 
   "nix": {
     "external_libraries": [],
     "packages": {
-      "build": ["cargo", "rustc"],
+      "build": [],
       "runtime": []
     },
     "cmake": {
       "find_packages": [],
-      "extra_include_dirs": ["lib"]
+      "extra_include_dirs": []
     }
   }
 }
