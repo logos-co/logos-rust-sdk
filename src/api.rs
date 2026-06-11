@@ -57,6 +57,25 @@ pub fn protocol_abi_major() -> i32 {
     unsafe { crate::ffi::lp_protocol_abi_major() }
 }
 
+/// Save a host-issued auth token into the SDK's protocol stack so
+/// subsequent calls to `module_name` authenticate.
+///
+/// This is the consumer half of the module-impl C ABI's
+/// `logos_module_accept_token` runtime handshake: the Qt glue receives the
+/// token from the host and forwards it across the C seam; the generated
+/// provider scaffold (lidl-gen `--provider`) hands it here so the *same*
+/// protocol stack the SDK invokes through holds the token — closing the
+/// split where the glue's stack was authenticated but the Rust one wasn't.
+pub fn save_token(module_name: &str, token: &str) -> bool {
+    let (Ok(name_c), Ok(token_c)) = (
+        std::ffi::CString::new(module_name),
+        std::ffi::CString::new(token),
+    ) else {
+        return false;
+    };
+    unsafe { crate::ffi::lp_token_save(name_c.as_ptr(), token_c.as_ptr()) == crate::ffi::LP_OK }
+}
+
 impl Default for LogosModuleSDK {
     fn default() -> Self {
         Self::new()

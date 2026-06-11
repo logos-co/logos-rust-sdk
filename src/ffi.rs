@@ -63,6 +63,8 @@ extern "C" {
         user_data: *mut c_void,
     ) -> c_int;
 
+    pub fn lp_token_save(module_name: *const c_char, token: *const c_char) -> c_int;
+
     pub fn lp_subscribe(
         client: *mut LpClient,
         event_name: *const c_char,
