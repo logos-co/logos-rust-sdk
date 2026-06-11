@@ -208,9 +208,14 @@ cargo test
 Two complementary checks exercise the SDK and the Rust-module pipeline it builds on:
 
 - **IPC integration test** (`tests/`) — builds a minimal provider + caller module
-  pair, where the caller uses this SDK to call the provider over IPC, and verifies
-  the round-trip through `logoscore`. This is the test that exercises the SDK
-  against the working tree:
+  pair on the **cdylib authoring path**: each fixture is a `.lidl` contract from
+  which `lidl-gen --provider` generates the Rust module-impl C ABI scaffold
+  (`logos_module_*` exports, typed trait, `RustModuleContext`) and
+  logos-module-builder (`interface = "cdylib"`) generates the uniform Qt glue.
+  The author writes the trait impl plus a `#[no_mangle] fn logos_module_install()`
+  hook; the plugin links one logos-protocol stack shared by the glue and the SDK,
+  so the host token forwarded through `logos_module_accept_token` authenticates
+  the caller's outbound `add()` call. Verified end-to-end through `logoscore`:
 
   ```bash
   nix build 'path:./tests#checks.x86_64-linux.ipc-test' \
