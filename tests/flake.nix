@@ -6,7 +6,7 @@
     # uniform Qt glue over the module-impl C ABI) lives on the builder's
     # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
     # pin — re-point at master when the chain merges.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/7a2e334836ec4f1f420974e749537c6e3698e3c1";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/e683a9f4b25b983facc472ba1194f5b18456d325";
     # CI overrides this with --override-input logos-rust-sdk path:.
     # Keeping a real GitHub URL here lets the lock file record a valid narHash.
     logos-rust-sdk.url = "github:logos-co/logos-rust-sdk";

@@ -13,7 +13,7 @@
     # -> uniform Qt glue over the module-impl C ABI) lives on the builder's
     # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
     # pins — re-point at master when the chain merges.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/7a2e334836ec4f1f420974e749537c6e3698e3c1";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/e683a9f4b25b983facc472ba1194f5b18456d325";
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/5b76ba51affeba753af48fcaa1a7ab9c6df1b7fc";
   };
 
