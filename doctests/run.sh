@@ -4,15 +4,16 @@
 #
 # There is one spec:
 #   rust-provider-module.test.yaml — writes a pure-Rust Logos module from scratch
-#       (the `provider` half of logos-rust-example-module / this repo's tests/),
-#       builds it into an .lgx, installs it with lgpm, and drives it through a
-#       headless logoscore daemon, calling its Rust-backed methods over IPC.
+#       on the cdylib authoring path (a .lidl contract drives lidl-gen's Rust
+#       module-impl C ABI scaffold + the builder's uniform Qt glue), builds it
+#       into an .lgx, installs it with lgpm, and drives it through a headless
+#       logoscore daemon, calling its Rust-backed methods over IPC.
 #
-# Unlike a module repo's own doc-test, this spec does NOT pin
-# logos-rust-sdk to the commit under test: the provider module is pure Rust and
-# does not consume the SDK (only a *caller* module would). The spec exercises the
-# Rust-module build + IPC pipeline that the SDK is built on. To verify the SDK
-# itself against the working tree, run the integration test instead:
+# Unlike a module repo's own doc-test, this spec does NOT pin logos-rust-sdk to
+# the commit under test: the tutorial module consumes the SDK + lidl-gen as
+# cargo git dependencies at a pinned rev (the published authoring surface, like
+# any real module repo would). To verify the SDK against the working tree, run
+# the integration test instead:
 #   nix build 'path:../tests#checks.x86_64-linux.ipc-test' --override-input logos-rust-sdk path:..
 #
 # The runner is the shared `doctest` CLI

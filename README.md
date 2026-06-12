@@ -224,11 +224,12 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
 
 - **Executable doc-test** (`doctests/rust-provider-module.test.yaml`) — a
   step-by-step, runnable tutorial that writes a pure-Rust Logos module from
-  scratch (the `provider` pattern: Rust `staticlib` → `c-ffi` codegen → Qt plugin),
-  packages it as an `.lgx`, installs it with `lgpm`, and calls its methods through
-  a `logoscore` daemon. It documents and verifies the callee side of the IPC stack
-  this SDK builds on. Run it with the shared [`doctest`](https://github.com/logos-co/logos-doctest)
-  CLI:
+  scratch on the **cdylib authoring path** (a `.lidl` contract → lidl-gen's
+  Rust module-impl C ABI scaffold + the builder's uniform Qt glue → loadable
+  module), packages it as an `.lgx`, installs it with `lgpm`, and calls its
+  methods through a `logoscore` daemon. It documents and verifies the callee
+  side of the IPC stack this SDK builds on. Run it with the shared
+  [`doctest`](https://github.com/logos-co/logos-doctest) CLI:
 
   ```bash
   cd doctests && ./run.sh
