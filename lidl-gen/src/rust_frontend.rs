@@ -5,9 +5,12 @@
 //! contract from it, instead of the other way around. The conventions mirror
 //! the C++ universal-module header:
 //!
-//! - The contract is a plain trait: required methods (no default body) are
-//!   the module's IPC methods. Methods WITH default bodies (e.g. the
-//!   framework's `on_context_ready`) are not part of the contract.
+//! - The contract is a plain trait declared `: Send + 'static` (the same
+//!   supertraits the generated scaffold's trait carries — the dispatch
+//!   stores the impl in a Box<dyn Any + Send>): required methods (no
+//!   default body) are the module's IPC methods. Methods WITH default
+//!   bodies (e.g. the framework's `on_context_ready`) are not part of the
+//!   contract.
 //! - Events live on a companion trait named `<Trait>Events` — the Rust
 //!   analog of the C++ `logos_events:` section. Each method is one event
 //!   (return type must be `()`).

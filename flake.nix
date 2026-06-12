@@ -93,6 +93,21 @@
         };
     in
     {
+      # The lidl-gen CLI: derive .lidl contracts from Rust traits
+      # (--from-rust), generate typed clients / provider scaffolds / Modules
+      # aggregates from .lidl — for tooling and doctests that need the
+      # generator outside a cargo build script.
+      packages = forAllSystems ({ pkgs, ... }: {
+        lidl-gen = pkgs.rustPlatform.buildRustPackage {
+          pname = "logos-lidl-gen";
+          version = "0.1.0";
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "logos-lidl-gen" ];
+          doCheck = false;
+        };
+      });
+
       # Opaque build support for Rust binaries that call other modules via IPC
       # from OUTSIDE a module plugin (no qt-sdk/protocol link of their own).
       # Provides extraBuildInputs and a setupHook over logos-module-client,
