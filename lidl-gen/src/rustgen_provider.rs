@@ -161,6 +161,19 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
 /// logos-protocol semver this module is built against (stamped by the
 /// build, surfaced through logos_module_get_protocol_version).
 pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String {
+    generate_provider_with(module, protocol_version, true)
+}
+
+/// Like [`generate_provider`], with control over trait emission. Pass
+/// `emit_trait = false` for the Rust-declared (contract-in-language) flow:
+/// the author hand-writes the trait — including the defaulted
+/// `on_context_ready` hook — and the scaffold only adds context, emitters,
+/// dispatch and the C ABI exports around it (see rust_frontend).
+pub fn generate_provider_with(
+    module: &ModuleDecl,
+    protocol_version: &str,
+    emit_trait: bool,
+) -> String {
     let pascal_name = pascal(&module.name);
     // sdk_test_provider_module -> SdkTestProviderModule, not ...ModuleModule
     let trait_name = if pascal_name.ends_with("Module") {
@@ -269,22 +282,37 @@ pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String 
     }
 
     // -- the trait ------------------------------------------------------------
-    out.push_str(&format!("pub trait {}: Send + 'static {{\n", trait_name));
-    for m in &module.methods {
-        let params: Vec<String> = m
-            .params
-            .iter()
-            .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
-            .collect();
+    if emit_trait {
+        out.push_str(&format!("pub trait {}: Send + 'static {{\n", trait_name));
+        out.push_str(
+            "    /// One-time setup hook: fires after the host has stamped the module\n\
+             \x20   /// context (path / instance id / persistence path) and before the\n\
+             \x20   /// first method dispatch — the Rust analog of C++'s\n\
+             \x20   /// LogosModuleContext::onContextReady().\n\
+             \x20   fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}\n\n",
+        );
+        for m in &module.methods {
+            let params: Vec<String> = m
+                .params
+                .iter()
+                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
+                .collect();
+            out.push_str(&format!(
+                "    fn {}(&mut self{}{}) -> {};\n",
+                snake(&m.name),
+                if params.is_empty() { "" } else { ", " },
+                params.join(", "),
+                rust_return_type(&m.return_type)
+            ));
+        }
+        out.push_str("}\n\n");
+    } else {
         out.push_str(&format!(
-            "    fn {}(&mut self{}{}) -> {};\n",
-            snake(&m.name),
-            if params.is_empty() { "" } else { ", " },
-            params.join(", "),
-            rust_return_type(&m.return_type)
+            "// Contract trait `{}` is author-declared in this crate (Rust-first\n\
+             // flow); the scaffold generates everything around it.\n\n",
+            trait_name
         ));
     }
-    out.push_str("}\n\n");
 
     // -- instance + install ----------------------------------------------------
     out.push_str(&format!(
@@ -293,13 +321,21 @@ pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String 
          \x20   dispatch: DispatchFn,\n\
          }}\n\
          static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\n\
-         /// Install `T` as the module implementation (Default-constructed once).\n\
+         /// Install `T` as the module implementation (Default-constructed once;\n\
+         /// `on_context_ready` fires right after construction, before the first\n\
+         /// method dispatch — the host stamps the context during registration,\n\
+         /// which always precedes dispatch).\n\
          pub fn install<T: {} + Default>() {{\n\
          \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
          \x20       static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);\n\
          \x20       let mut guard = INSTANCE.lock().unwrap();\n\
          \x20       if guard.is_none() {{\n\
          \x20           *guard = Some(Box::new(T::default()));\n\
+         \x20           if let Some(ctx) = context() {{\n\
+         \x20               if let Some(imp) = guard.as_mut().unwrap().downcast_mut::<T>() {{\n\
+         \x20                   imp.on_context_ready(&ctx);\n\
+         \x20               }}\n\
+         \x20           }}\n\
          \x20       }}\n\
          \x20       let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;\n\
          \x20       match method {{\n",
@@ -465,6 +501,10 @@ module rust_calc {
         // first dispatch lazily invokes the author's install hook
         assert!(code.contains("fn logos_module_install()"));
         assert!(code.contains("unsafe { __logos_install_hook::logos_module_install() }"));
+        // onContextReady parity: defaulted trait hook, fired once after
+        // construction (context is stamped before any dispatch)
+        assert!(code.contains("fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}"));
+        assert!(code.contains("imp.on_context_ready(&ctx);"));
         // interface JSON carries Qt-style names + tagged events for host parity
         assert!(code.contains("QString"));
         assert!(code.contains("totalChanged"));

@@ -13,3 +13,7 @@ name = "logos_lidl_gen"
 [[bin]]
 name = "logos-lidl-gen"
 path = "src/main.rs"
+
+[dependencies.syn]
+version = "2"
+features = ["full"]

@@ -104,8 +104,14 @@ pub fn generate(module: &ModuleDecl) -> String {
     out.push_str(&format!("pub struct {} {{\n    proxy: PluginProxy,\n}}\n\n", struct_name));
     out.push_str(&format!("impl {} {{\n", struct_name));
     out.push_str(&format!(
-        "    pub fn new() -> Self {{\n        Self {{ proxy: LogosModuleSDK::new().plugin(\"{}\") }}\n    }}\n",
-        module.name
+        "    /// Client bound to the contract's own module name (`{}`) —\n\
+         \x20   /// the concrete-dependency pattern.\n\
+         \x20   pub fn new() -> Self {{\n        Self {{ proxy: LogosModuleSDK::new().plugin(\"{}\") }}\n    }}\n\n\
+         \x20   /// Bind the same typed surface to ANY provider chosen at runtime —\n\
+         \x20   /// the interface-dependency pattern: the contract names the shape,\n\
+         \x20   /// the caller names the module.\n\
+         \x20   pub fn bind(module_name: &str) -> Self {{\n        Self {{ proxy: LogosModuleSDK::new().plugin(module_name) }}\n    }}\n",
+        module.name, module.name
     ));
 
     for m in &module.methods {
@@ -138,8 +144,10 @@ pub fn generate(module: &ModuleDecl) -> String {
     }
 
     for e in &module.events {
+        let event_struct = format!("{}Event", pascal(&e.name));
         out.push_str(&format!(
-            "\n    /// Subscribe to the `{}` event. Payload arrives as a JSON array{}.\n\
+            "\n    /// Subscribe to the `{}` event. Payload arrives as a JSON array{};\n\
+             \x20   /// decode each received item with [`Self::decode_{}`].\n\
              \x20   pub fn on_{}(&mut self) -> Result<Receiver<EventData>, LogosError> {{\n\
              \x20       self.proxy.on(\"{}\")\n\
              \x20   }}\n",
@@ -157,15 +165,132 @@ pub fn generate(module: &ModuleDecl) -> String {
                 )
             },
             snake(&e.name),
+            snake(&e.name),
             e.name
         ));
+        // Typed decoder: strict positional decode of the JSON-array payload
+        // into the per-event struct — the Rust analog of the C++ wrappers'
+        // typed event callbacks.
+        out.push_str(&format!(
+            "\n    /// Decode a received `{}` payload into its typed form.\n\
+             \x20   /// Returns None if the payload doesn't match the contract.\n\
+             \x20   pub fn decode_{}(ev: &EventData) -> Option<{}> {{\n\
+             \x20       let arr = ev.data.as_array()?;\n\
+             \x20       if arr.len() < {} {{ return None; }}\n\
+             \x20       Some({} {{\n",
+            e.name,
+            snake(&e.name),
+            event_struct,
+            e.params.len(),
+            event_struct
+        ));
+        for (i, p) in e.params.iter().enumerate() {
+            let field = snake(&p.name);
+            let expr = match (&p.ty.kind, p.ty.name.as_str()) {
+                (TypeKind::Primitive, "tstr") => format!("arr[{}].as_str()?.to_string()", i),
+                (TypeKind::Primitive, "int") => format!("arr[{}].as_i64()?", i),
+                (TypeKind::Primitive, "uint") => format!("arr[{}].as_u64()?", i),
+                (TypeKind::Primitive, "float64") => format!("arr[{}].as_f64()?", i),
+                (TypeKind::Primitive, "bool") => format!("arr[{}].as_bool()?", i),
+                (TypeKind::Primitive, "bstr") => {
+                    format!("logos_rust_sdk::bytes::decode(&arr[{}])?", i)
+                }
+                _ => format!("arr[{}].clone()", i),
+            };
+            out.push_str(&format!("            {}: {},\n", field, expr));
+        }
+        out.push_str("        })\n    }\n");
     }
 
     out.push_str("}\n\n");
+
+    // Per-event typed payload structs (named after the event, not the module,
+    // so they read naturally at the call site: `TotalChangedEvent { total }`).
+    for e in &module.events {
+        let event_struct = format!("{}Event", pascal(&e.name));
+        out.push_str(&format!(
+            "/// Typed payload of the `{}` event.\n#[derive(Debug, Clone)]\npub struct {} {{\n",
+            e.name, event_struct
+        ));
+        for p in &e.params {
+            let field_ty = match (&p.ty.kind, p.ty.name.as_str()) {
+                (TypeKind::Primitive, "tstr") => "String",
+                (TypeKind::Primitive, "int") => "i64",
+                (TypeKind::Primitive, "uint") => "u64",
+                (TypeKind::Primitive, "float64") => "f64",
+                (TypeKind::Primitive, "bool") => "bool",
+                (TypeKind::Primitive, "bstr") => "Vec<u8>",
+                _ => "serde_json::Value",
+            };
+            out.push_str(&format!("    pub {}: {},\n", snake(&p.name), field_ty));
+        }
+        out.push_str("}\n\n");
+    }
     out.push_str(&format!(
         "impl Default for {} {{\n    fn default() -> Self {{\n        Self::new()\n    }}\n}}\n",
         struct_name
     ));
+    out
+}
+
+/// Generate typed dependency clients plus a `Modules` aggregate — the Rust
+/// analog of C++'s generated `LogosModules` (`modules().calc.add(...)`).
+/// Each entry pairs the aggregate field name with the dependency's parsed
+/// contract; the client code is namespaced under a module of that name so
+/// several dependencies' generated types can't collide.
+pub fn generate_deps(deps: &[(String, ModuleDecl)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "// Typed dependency clients + the Modules aggregate — generated by\n\
+         // logos-lidl-gen from the dependencies' LIDL contracts. Do not edit.\n\n",
+    );
+    for (name, decl) in deps {
+        let field = snake(name);
+        out.push_str(&format!("pub mod {} {{\n", field));
+        for line in generate(decl).lines() {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str("    ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.push_str("}\n\n");
+    }
+
+    out.push_str(
+        "/// Typed access to this module's declared dependencies — one client\n\
+         /// per dependency, bound to its contract's module name.\n\
+         pub struct Modules {\n",
+    );
+    for (name, decl) in deps {
+        let field = snake(name);
+        out.push_str(&format!(
+            "    pub {}: {}::{}Client,\n",
+            field,
+            field,
+            pascal(&decl.name)
+        ));
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("impl Modules {\n    pub fn new() -> Self {\n        Self {\n");
+    for (name, decl) in deps {
+        let field = snake(name);
+        out.push_str(&format!(
+            "            {}: {}::{}Client::new(),\n",
+            field,
+            field,
+            pascal(&decl.name)
+        ));
+    }
+    out.push_str("        }\n    }\n}\n\n");
+    out.push_str(
+        "impl Default for Modules {\n    fn default() -> Self {\n        Self::new()\n    }\n}\n\n\
+         /// Convenience constructor mirroring C++'s `modules()` accessor.\n\
+         pub fn modules() -> Modules {\n    Modules::new()\n}\n\n",
+    );
     out
 }
 
@@ -198,6 +323,27 @@ module calc_module {
         assert!(code.contains("pub fn dump(&self) -> Result<serde_json::Value, LogosError>"));
         assert!(code.contains("pub fn on_result_ready(&mut self)"));
         assert!(code.contains("self.proxy.call_json(\"add\", &args)"));
+        // Runtime binding: same typed surface, provider chosen at call time
+        // (the interface-dependency pattern).
+        assert!(code.contains("pub fn bind(module_name: &str) -> Self"));
+        // Typed event payloads: per-event struct + strict decoder.
+        assert!(code.contains("pub struct ResultReadyEvent"));
+        assert!(code.contains("pub total: i64"));
+        assert!(code.contains("pub fn decode_result_ready(ev: &EventData) -> Option<ResultReadyEvent>"));
+    }
+
+
+    #[test]
+    fn generates_modules_aggregate() {
+        let calc = parse(SAMPLE).unwrap();
+        let auth = parse("module auth_module { depends [] method login(user: tstr) -> bool }").unwrap();
+        let code = generate_deps(&[("calc".to_string(), calc), ("auth".to_string(), auth)]);
+        assert!(code.contains("pub mod calc {"));
+        assert!(code.contains("pub mod auth {"));
+        assert!(code.contains("pub struct Modules {"));
+        assert!(code.contains("pub calc: calc::CalcModuleClient,"));
+        assert!(code.contains("pub auth: auth::AuthModuleClient,"));
+        assert!(code.contains("pub fn modules() -> Modules"));
     }
 
     #[test]

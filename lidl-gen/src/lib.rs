@@ -7,10 +7,14 @@
 
 pub mod ast;
 pub mod parser;
+pub mod rust_frontend;
 pub mod rustgen;
 pub mod rustgen_provider;
+pub mod serializer;
 
 pub use ast::ModuleDecl;
 pub use parser::parse;
-pub use rustgen::generate;
+pub use rust_frontend::extract_from_rust;
+pub use rustgen::{generate, generate_deps};
 pub use rustgen_provider::generate_provider;
+pub use serializer::serialize;
