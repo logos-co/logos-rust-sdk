@@ -4,8 +4,8 @@ use crate::plugin::PluginProxy;
 
 /// The main entry point for calling other Logos modules from within a module.
 ///
-/// Unlike the old LogosAPI, this requires no initialization or lifecycle management —
-/// logos-module-client handles connections lazily. Simply create an instance and
+/// No initialization or lifecycle management is required — the underlying
+/// `lp_*` protocol clients are created lazily. Simply create an instance and
 /// call `plugin()` to get a proxy for any loaded module.
 ///
 /// # Example

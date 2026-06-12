@@ -4,9 +4,9 @@ A Rust SDK for calling other Logos modules from within a Logos module. Consumes 
 
 ## Overview
 
-When writing a Logos module in Rust, you need a way to call methods on other loaded modules and subscribe to their events. This SDK provides that — it sits on top of `logos-module-client`'s `logos_sdk_*` C API and handles parameter serialization, callback trampolines, and channel-based result delivery.
+When writing a Logos module in Rust, you need a way to call methods on other loaded modules and subscribe to their events. This SDK provides that — it binds the `lp_*` C ABI directly and handles parameter serialization, callback trampolines, and channel-based result delivery.
 
-The SDK is a **pure Rust rlib** with no build-time C library dependency. The `logos_sdk_*` symbols it references are resolved at final link time when CMake links your module plugin (`.so`/`.dylib`) against `liblogos_module_client`.
+The SDK is a **pure Rust rlib** with no build-time C library dependency. On the standard authoring path (a cdylib module built by logos-module-builder, `interface = "cdylib"`) the `lp_*` symbols resolve against the logos-protocol archive already linked into the plugin — one protocol stack shared by the generated Qt glue and your Rust code. For binaries *outside* a module (CLI tools, tests), the flake's `lib.callerBuildSupport` provides `logos-module-client`'s shared library, which re-exports the same `lp_*` surface.
 
 ## Installation
 
@@ -17,13 +17,7 @@ Add to your `Cargo.toml`:
 logos-rust-sdk = { path = "../../logos-rust-sdk" }
 ```
 
-In your module's `CMakeLists.txt`, ensure `liblogos_module_client` is linked so the FFI symbols resolve:
-
-```cmake
-find_library(LOGOS_MODULE_CLIENT_LIB logos_module_client
-    HINTS $ENV{LOGOS_MODULE_CLIENT_ROOT}/lib)
-target_link_libraries(${MODULE_NAME} PRIVATE ${LOGOS_MODULE_CLIENT_LIB})
-```
+Inside a builder-built cdylib module no extra linking is needed — the plugin already carries the protocol stack. For a standalone (out-of-module) binary, link `liblogos_module_client` via the flake's `lib.callerBuildSupport` (it provides the build inputs and a setup hook).
 
 ## Quick Start
 
@@ -155,46 +149,34 @@ All fallible methods return `Result<_, LogosError>`:
 
 ## How symbols resolve
 
-`logos-rust-sdk` declares `extern "C"` bindings to `logos_sdk_*` functions but does **not** link against `liblogos_module_client` at Rust compilation time. The Rust crate compiles to an `rlib` (or `staticlib` when used by a module). The unresolved `logos_sdk_*` symbols are satisfied when CMake links the final module plugin:
+`logos-rust-sdk` declares `extern "C"` bindings to the `lp_*` protocol functions but links no C library at Rust compilation time. The Rust crate compiles to an `rlib` (or `staticlib` when used by a module), and the symbols resolve at final link:
 
 ```
-librust_caller.a          (your Rust staticlib, contains unresolved logos_sdk_* refs)
+librust_my_module.a       (your Rust staticlib, contains unresolved lp_* refs)
         ↓
 CMake links plugin .dylib
-  + liblogos_module_client.dylib   ← logos_sdk_* symbols resolved here
-        ↓
-rust_caller_module_plugin.dylib    (complete, loadable Logos module)
+  + logos-protocol archive          ← lp_* resolved here (one shared stack
+        ↓                              with the generated Qt glue)
+my_module_plugin.dylib    (complete, loadable Logos module)
 ```
+
+Standalone binaries instead resolve `lp_*` against `liblogos_module_client.so` (see `lib.callerBuildSupport` in `flake.nix`).
 
 ## Example: using the SDK inside a Logos module
 
-See [`logos-rust-example-module`](https://github.com/logos-co/logos-rust-example-module) for a complete working example with two modules communicating through IPC.
-
-The caller module's `lib.rs` pattern:
+The standard pattern is the **cdylib authoring path** — see the executable doc-test (`doctests/rust-provider-module.test.yaml`) for the complete walkthrough, and the cross-language composition tutorials in [logos-module-builder](https://github.com/logos-co/logos-module-builder) for typed dependency clients and event subscriptions. The caller side, with a typed client generated from the dependency's `.lidl` contract:
 
 ```rust
-use logos_rust_sdk::LogosModuleSDK;
-
-const PROVIDER: &str = "rust_provider_module";
-
-#[no_mangle]
-pub extern "C" fn rust_caller_call_add(a: i64, b: i64) -> i64 {
-    let sdk = LogosModuleSDK::new();
-    let provider = sdk.plugin(PROVIDER);
-    match provider.call_sync("add", &[a, b]) {
-        Ok(result) => result.message.parse::<i64>().unwrap_or(-1),
-        Err(e) => {
-            eprintln!("IPC call failed: {}", e);
-            -1
+// build.rs generated `modules()` from the dep contracts; the trait + scaffold
+// come from your own .lidl (or are derived from your trait with --from-rust).
+impl MyModule for MyImpl {
+    fn total_via_dep(&mut self) -> i64 {
+        match modules().counter.increment(1) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("call failed: {}", e); -1 }
         }
     }
 }
-```
-
-The corresponding C header declared for `c-ffi` codegen:
-
-```c
-int64_t rust_caller_call_add(int64_t a, int64_t b);
 ```
 
 ## Building
