@@ -3,6 +3,7 @@
 use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 use crate::callback::{
     create_event_callback, create_method_callback, event_callback_ptr, json_to_message,
@@ -12,11 +13,82 @@ use crate::error::LogosError;
 use crate::ffi;
 use crate::params::{params_to_lp_args, Param, ToParam};
 
+/// Shared ownership of the underlying `lp_client`. The client is destroyed
+/// when the LAST owner drops — the proxy itself or any live subscription.
+/// lp_* handles are thread-safe per-handle (the logos_protocol.h threading
+/// contract), so sharing the raw handle across threads is sound.
+struct ClientHandle(*mut ffi::LpClient);
+unsafe impl Send for ClientHandle {}
+unsafe impl Sync for ClientHandle {}
+impl Drop for ClientHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { ffi::lp_client_destroy(self.0) };
+        }
+    }
+}
+
+/// A live event subscription: the channel of incoming events PLUS ownership
+/// of everything that keeps it alive (the lp subscription, its callback
+/// state, and a share of the client). Drop it to unsubscribe.
+///
+/// The lp callback is gated by the client's liveness — a bare
+/// `Receiver` whose proxy was dropped would never see another event. This
+/// handle is what makes the module-side pattern work:
+///
+/// ```ignore
+/// let sub = modules().dep.on_some_event()?;       // proxy is a temporary
+/// std::thread::spawn(move || {
+///     for ev in sub { /* sub owns the client; events keep flowing */ }
+/// });
+/// ```
+pub struct EventSubscription {
+    rx: Receiver<EventData>,
+    sub: *mut ffi::LpSubscription,
+    _callback: Box<EventCallbackData>,
+    _client: Arc<ClientHandle>,
+}
+// Safety: the lp subscription/client handles are thread-safe per-handle, and
+// the callback box is only read by the lp trampoline.
+unsafe impl Send for EventSubscription {}
+
+impl EventSubscription {
+    /// Block until the next event arrives (or the subscription dies).
+    pub fn recv(&self) -> Result<EventData, std::sync::mpsc::RecvError> {
+        self.rx.recv()
+    }
+
+    /// Non-blocking poll for a pending event.
+    pub fn try_recv(&self) -> Result<EventData, std::sync::mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    /// The underlying channel, for `select`-style integration.
+    pub fn receiver(&self) -> &Receiver<EventData> {
+        &self.rx
+    }
+}
+
+/// Blocking iteration: `for ev in subscription { ... }` yields each event as
+/// it arrives, ending if the subscription's channel closes.
+impl Iterator for EventSubscription {
+    type Item = EventData;
+    fn next(&mut self) -> Option<EventData> {
+        self.rx.recv().ok()
+    }
+}
+
+impl Drop for EventSubscription {
+    fn drop(&mut self) {
+        // After lp_unsubscribe returns the callback will not fire again; the
+        // client share (and the callback box) drop after.
+        unsafe { ffi::lp_unsubscribe(self.sub) };
+    }
+}
+
 pub struct PluginProxy {
     plugin_name: String,
-    client: *mut ffi::LpClient,
-    subscriptions: Vec<*mut ffi::LpSubscription>,
-    event_callbacks: Vec<Box<EventCallbackData>>,
+    client: Option<Arc<ClientHandle>>,
 }
 
 impl PluginProxy {
@@ -40,9 +112,11 @@ impl PluginProxy {
             .unwrap_or(ptr::null_mut());
         PluginProxy {
             plugin_name,
-            client,
-            subscriptions: Vec::new(),
-            event_callbacks: Vec::new(),
+            client: if client.is_null() {
+                None
+            } else {
+                Some(Arc::new(ClientHandle(client)))
+            },
         }
     }
 
@@ -51,13 +125,13 @@ impl PluginProxy {
     }
 
     fn client(&self) -> Result<*mut ffi::LpClient, LogosError> {
-        if self.client.is_null() {
-            return Err(LogosError::Other(format!(
+        match &self.client {
+            Some(handle) => Ok(handle.0),
+            None => Err(LogosError::Other(format!(
                 "Failed to create protocol client for {}",
                 self.plugin_name
-            )));
+            ))),
         }
-        Ok(self.client)
     }
 
     fn args_json<T: ToParam>(&self, params: &[T]) -> Result<CString, LogosError> {
@@ -212,15 +286,28 @@ impl PluginProxy {
     }
 
     /// Subscribe to events from a plugin.
-    /// Returns a channel receiver that yields `EventData` each time the event fires.
-    pub fn on(&mut self, event: &str) -> Result<Receiver<EventData>, LogosError> {
-        let client = self.client()?;
+    ///
+    /// Returns an [`EventSubscription`]: a channel of incoming `EventData`
+    /// that OWNS the underlying lp subscription and a share of the client, so
+    /// it stays live after the proxy is dropped — including when moved into a
+    /// listener thread (the handle is `Send`). Drop it to unsubscribe.
+    pub fn on(&mut self, event: &str) -> Result<EventSubscription, LogosError> {
+        let client_handle = match &self.client {
+            Some(h) => Arc::clone(h),
+            None => {
+                return Err(LogosError::Other(format!(
+                    "Failed to create protocol client for {}",
+                    self.plugin_name
+                )))
+            }
+        };
         let event_c = CString::new(event)?;
 
         let (rx, callback_data, callback) = create_event_callback(event);
         let user_data = event_callback_ptr(&callback_data);
 
-        let sub = unsafe { ffi::lp_subscribe(client, event_c.as_ptr(), callback, user_data) };
+        let sub =
+            unsafe { ffi::lp_subscribe(client_handle.0, event_c.as_ptr(), callback, user_data) };
         if sub.is_null() {
             return Err(LogosError::EventListenerFailed {
                 plugin: self.plugin_name.clone(),
@@ -229,21 +316,11 @@ impl PluginProxy {
             });
         }
 
-        self.subscriptions.push(sub);
-        self.event_callbacks.push(callback_data);
-        Ok(rx)
-    }
-}
-
-impl Drop for PluginProxy {
-    fn drop(&mut self) {
-        // Cancel subscriptions first (after lp_unsubscribe returns the
-        // callback will not fire again), then destroy the client.
-        for sub in self.subscriptions.drain(..) {
-            unsafe { ffi::lp_unsubscribe(sub) };
-        }
-        if !self.client.is_null() {
-            unsafe { ffi::lp_client_destroy(self.client) };
-        }
+        Ok(EventSubscription {
+            rx,
+            sub,
+            _callback: callback_data,
+            _client: client_handle,
+        })
     }
 }
