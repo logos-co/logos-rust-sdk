@@ -124,17 +124,21 @@ if [ "${BUILD_DIR}" != "${OUTPUT_DIR}" ]; then
   rm -rf "${BUILD_DIR:?}/"* "${BUILD_DIR:?}/".[!.]* 2>/dev/null || true
 fi
 
+# Each spec gets ITS OWN subdirectory: the specs write module sources, git
+# repos, modules/ install dirs and a default-config logoscore daemon state —
+# sharing one dir makes the second spec trip over the first one's leftovers.
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
-  echo "==> Running ${spec} into ${BUILD_DIR}/"
+  mkdir -p "${BUILD_DIR}/${name}"
+  echo "==> Running ${spec} into ${BUILD_DIR}/${name}/"
   "${DOCTEST[@]}" run "${spec}" \
     --verbose \
     --continue-on-fail \
-    --output-dir "${BUILD_DIR}/"
+    --output-dir "${BUILD_DIR}/${name}/"
 
-  echo "==> Generating ${BUILD_DIR}/${name}.md"
+  echo "==> Generating ${BUILD_DIR}/${name}/${name}.md"
   "${DOCTEST[@]}" generate "${spec}" \
-    -o "${BUILD_DIR}/${name}.md"
+    -o "${BUILD_DIR}/${name}/${name}.md"
 done
 
 # The spec writes the module source INTO outputs/ (like logos-tutorial), so the
@@ -153,7 +157,11 @@ chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
 echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + .md)"
 "${DOCTEST[@]}" clean "${BUILD_DIR}" \
   --also lgpm \
+  --also lidl-gen \
   --also provider-lgx \
+  --also counter-lgx \
+  --also orch-lgx \
+  --also frontdesk-lgx \
   --also logs.txt \
   --verbose
 

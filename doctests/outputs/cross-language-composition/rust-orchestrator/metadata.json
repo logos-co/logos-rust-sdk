@@ -1,0 +1,21 @@
+{
+  "name": "rust_orchestrator_module",
+  "version": "1.0.0",
+  "description": "Rust-first module: declares its contract in Rust, calls the C++ counter through a typed client, emits typed events",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "cdylib",
+  "category": "general",
+  "main": "rust_orchestrator_module_plugin",
+  "dependencies": ["cpp_counter_module"],
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "lidl": "rust-lib/rust_orchestrator_module.lidl"
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": { "build": [], "runtime": [] },
+    "cmake": { "find_packages": [], "extra_include_dirs": [] }
+  }
+}

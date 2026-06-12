@@ -205,7 +205,7 @@ cargo test
 
 ## Testing
 
-Two complementary checks exercise the SDK and the Rust-module pipeline it builds on:
+Three complementary checks exercise the SDK and the Rust-module pipeline it builds on:
 
 - **IPC integration test** (`tests/`) — builds a minimal provider + caller module
   pair on the **cdylib authoring path**: each fixture is a `.lidl` contract from
@@ -222,6 +222,14 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
     --override-input logos-rust-sdk path:. --print-build-logs
   ```
 
+- **Cross-language composition doc-test**
+  (`doctests/cross-language-composition.test.yaml`) — the feature-parity
+  showcase: a contract-first C++ cdylib module, a Rust-first module (trait →
+  `.lidl` via `logos-lidl-gen --from-rust`) with module context, typed event
+  emission and a typed dependency client, and a universal C++ consumer with
+  generated typed wrappers *and* typed event subscription against the Rust
+  module — typed calls crossing the language boundary in both directions.
+
 - **Executable doc-test** (`doctests/rust-provider-module.test.yaml`) — a
   step-by-step, runnable tutorial that writes a pure-Rust Logos module from
   scratch on the **cdylib authoring path** (a `.lidl` contract → lidl-gen's
@@ -235,4 +243,5 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
   cd doctests && ./run.sh
   ```
 
-  The rendered tutorial is committed at `doctests/outputs/rust-provider-module.md`.
+  The rendered tutorial is committed at
+  `doctests/outputs/rust-provider-module/rust-provider-module.md`.
