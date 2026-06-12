@@ -1,6 +1,0 @@
-module rust_orchestrator_module {
-  version "1.0.0"
-  method tally(amount: int) -> int
-  method whoami() -> tstr
-  event tally_changed(total: int)
-}

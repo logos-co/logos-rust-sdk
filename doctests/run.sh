@@ -157,11 +157,7 @@ chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
 echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + .md)"
 "${DOCTEST[@]}" clean "${BUILD_DIR}" \
   --also lgpm \
-  --also lidl-gen \
   --also provider-lgx \
-  --also counter-lgx \
-  --also orch-lgx \
-  --also frontdesk-lgx \
   --also logs.txt \
   --verbose
 

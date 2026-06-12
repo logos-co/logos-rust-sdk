@@ -92,7 +92,9 @@ let rx = proxy.call_with_params("setValues", &[
     Param::bool("active", true),
 ])?;
 
-// Subscribe to events
+// Subscribe to events. The returned EventSubscription OWNS the underlying
+// subscription and a share of the client, so it keeps receiving after the
+// proxy is dropped — move it into a listener thread and iterate it.
 let events = proxy.on("dataChanged")?;
 while let Ok(event) = events.try_recv() {
     println!("Event: {} — {:?}", event.event, event.data);
@@ -110,9 +112,13 @@ pub struct CallResult {
 }
 ```
 
-### `EventData`
+### `EventSubscription` and `EventData`
 
-Delivered through channels returned by `on()`.
+`on()` returns an `EventSubscription`: a `Send` handle bundling the event
+channel with ownership of the lp subscription and a share of the client
+(dropping a bare proxy would otherwise silently kill the subscription).
+It supports `recv()`, `try_recv()`, blocking iteration (`for ev in sub`),
+and unsubscribes on drop. Each received item is an `EventData`:
 
 ```rust
 pub struct EventData {
@@ -205,7 +211,7 @@ cargo test
 
 ## Testing
 
-Three complementary checks exercise the SDK and the Rust-module pipeline it builds on:
+Two complementary checks exercise the SDK and the Rust-module pipeline it builds on (the cross-language composition showcases — typed calls and events crossing the C++/Rust boundary in both directions — live in [logos-module-builder](https://github.com/logos-co/logos-module-builder)'s doctests, since they exercise the builder across both SDKs):
 
 - **IPC integration test** (`tests/`) — builds a minimal provider + caller module
   pair on the **cdylib authoring path**: each fixture is a `.lidl` contract from
@@ -221,14 +227,6 @@ Three complementary checks exercise the SDK and the Rust-module pipeline it buil
   nix build 'path:./tests#checks.x86_64-linux.ipc-test' \
     --override-input logos-rust-sdk path:. --print-build-logs
   ```
-
-- **Cross-language composition doc-test**
-  (`doctests/cross-language-composition.test.yaml`) — the feature-parity
-  showcase: a contract-first C++ cdylib module, a Rust-first module (trait →
-  `.lidl` via `logos-lidl-gen --from-rust`) with module context, typed event
-  emission and a typed dependency client, and a universal C++ consumer with
-  generated typed wrappers *and* typed event subscription against the Rust
-  module — typed calls crossing the language boundary in both directions.
 
 - **Executable doc-test** (`doctests/rust-provider-module.test.yaml`) — a
   step-by-step, runnable tutorial that writes a pure-Rust Logos module from

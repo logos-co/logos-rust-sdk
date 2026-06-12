@@ -5,11 +5,8 @@ name: Doc-Tests
 #   - rust-provider-module: writes a pure-Rust Logos module from scratch on the
 #     cdylib authoring path, packages and installs it as an .lgx, and calls its
 #     Rust-backed methods through a logoscore daemon.
-#   - cross-language-composition: the cpp-sdk <-> rust-sdk feature-parity
-#     showcase — a contract-first C++ cdylib module, a Rust-first module
-#     (trait -> .lidl via lidl-gen --from-rust) with module context, typed
-#     events and a typed dependency client, and a universal C++ consumer with
-#     typed wrappers + typed event subscription, composed through one daemon.
+# (The cross-language composition showcases live in logos-module-builder's
+# doctests — they exercise the builder across BOTH SDKs.)
 #
 # These exercise the Rust-module build + IPC pipeline that logos-rust-sdk is
 # built on. They do NOT pin logos-rust-sdk to the commit under test (the tutorial
@@ -75,14 +72,12 @@ jobs:
       # pip install step is needed. --continue-on-fail so the run walks every step
       # and the report is complete; the job still fails (non-zero exit) if any step
       # failed.
-      # Both specs in ONE invocation: each runs in its own fresh temp workdir
-      # (the CLI isolates specs; --output-dir is the only sharing mode) and they
-      # land in one combined report. The workspace tests-and-doctests pipeline
-      # parses this block to discover the spec list — keep every spec here.
+      # All specs in ONE invocation, one combined report. The workspace
+      # tests-and-doctests pipeline parses this block to discover the spec
+      # list — keep every spec here.
       - name: Run doc-tests
         run: |
           nix run github:logos-co/logos-doctest -- run \
-            doctests/cross-language-composition.test.yaml \
             doctests/rust-provider-module.test.yaml \
             --verbose \
             --continue-on-fail \
@@ -203,7 +198,7 @@ jobs:
             const marker = "<!-- rust-provider-doctest-report-links -->";
             const body =
               `${marker}\n` +
-              `### 📊 doc-test reports (rust-provider-module + cross-language-composition)\n\n` +
+              `### 📊 doc-test reports\n\n` +
               `Rendered documentation alongside the commands actually run and their output ` +
               `(updated each run, commit \`${context.sha.slice(0,7)}\`):\n\n` +
               `${links}\n\n` +
