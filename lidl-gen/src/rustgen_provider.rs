@@ -317,29 +317,50 @@ pub fn generate_provider_with(
     // -- instance + install ----------------------------------------------------
     out.push_str(&format!(
         "type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;\n\
+         type EnsureFn = fn(bool);\n\
          struct Registered {{\n\
          \x20   dispatch: DispatchFn,\n\
+         \x20   ensure: EnsureFn,\n\
          }}\n\
-         static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\n\
-         /// Install `T` as the module implementation (Default-constructed once;\n\
-         /// `on_context_ready` fires right after construction, before the first\n\
-         /// method dispatch — the host stamps the context during registration,\n\
-         /// which always precedes dispatch).\n\
+         static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\
+         static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);\n\
+         static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\n\n\
+         /// Install `T` as the module implementation (Default-constructed once).\n\
+         ///\n\
+         /// `on_context_ready` fires AT MODULE LOAD — as soon as the host has\n\
+         /// delivered both the context (set_context) and the event plumbing\n\
+         /// (set_emit_callback), which the glue does during registration,\n\
+         /// before the module is published for inbound calls. This matches\n\
+         /// C++'s onContextReady-in-onInit semantics: subscriptions, outbound\n\
+         /// calls and typed emission all work from the hook without waiting\n\
+         /// for a first inbound dispatch. (For hosts that never wire an emit\n\
+         /// callback, the hook still fires before the first dispatch.)\n\
          pub fn install<T: {} + Default>() {{\n\
-         \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
-         \x20       static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);\n\
+         \x20   fn ensure_impl<T: {} + Default>(require_emit: bool) {{\n\
          \x20       let mut guard = INSTANCE.lock().unwrap();\n\
          \x20       if guard.is_none() {{\n\
          \x20           *guard = Some(Box::new(T::default()));\n\
-         \x20           if let Some(ctx) = context() {{\n\
-         \x20               if let Some(imp) = guard.as_mut().unwrap().downcast_mut::<T>() {{\n\
-         \x20                   imp.on_context_ready(&ctx);\n\
-         \x20               }}\n\
-         \x20           }}\n\
+         \x20       }}\n\
+         \x20       if HOOK_FIRED.load(std::sync::atomic::Ordering::SeqCst) {{\n\
+         \x20           return;\n\
+         \x20       }}\n\
+         \x20       let Some(ctx) = context() else {{ return; }};\n\
+         \x20       if require_emit && EMIT.lock().unwrap().cb.is_none() {{\n\
+         \x20           return;\n\
+         \x20       }}\n\
+         \x20       if let Some(imp) = guard.as_mut().unwrap().downcast_mut::<T>() {{\n\
+         \x20           HOOK_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);\n\
+         \x20           imp.on_context_ready(&ctx);\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
+         \x20       let mut guard = INSTANCE.lock().unwrap();\n\
+         \x20       if guard.is_none() {{\n\
+         \x20           *guard = Some(Box::new(T::default()));\n\
          \x20       }}\n\
          \x20       let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;\n\
          \x20       match method {{\n",
-        trait_name, trait_name
+        trait_name, trait_name, trait_name
     ));
 
     for m in &module.methods {
@@ -368,7 +389,23 @@ pub fn generate_provider_with(
         "            _ => None,\n\
          \x20       }\n\
          \x20   }\n\
-         \x20   *REGISTERED.lock().unwrap() = Some(Registered { dispatch: dispatch_impl::<T> });\n\
+         \x20   *REGISTERED.lock().unwrap() = Some(Registered {\n\
+         \x20       dispatch: dispatch_impl::<T>,\n\
+         \x20       ensure: ensure_impl::<T>,\n\
+         \x20   });\n\
+         }\n\n\
+         /// Run the author's install hook (once) and give the ready-latch a\n\
+         /// chance to fire `on_context_ready`. Called from every C-ABI entry\n\
+         /// point: set_context / set_emit_callback latch on full wiring;\n\
+         /// dispatch passes require_emit = false as the no-event-host fallback.\n\
+         fn ensure_ready(require_emit: bool) {\n\
+         \x20   if REGISTERED.lock().unwrap().is_none() {\n\
+         \x20       unsafe { __logos_install_hook::logos_module_install() };\n\
+         \x20   }\n\
+         \x20   let ensure = REGISTERED.lock().unwrap().as_ref().map(|r| r.ensure);\n\
+         \x20   if let Some(f) = ensure {\n\
+         \x20       f(require_emit);\n\
+         \x20   }\n\
          }\n\n\
          mod __logos_install_hook {\n\
          \x20   // Defined by the module author (a #[no_mangle] fn at crate root):\n\
@@ -402,9 +439,7 @@ pub fn generate_provider_with(
          \x20           _ => return std::ptr::null_mut(),\n\
          \x20       }}\n\
          \x20   }};\n\
-         \x20   if REGISTERED.lock().unwrap().is_none() {{\n\
-         \x20       unsafe {{ __logos_install_hook::logos_module_install() }};\n\
-         \x20   }}\n\
+         \x20   ensure_ready(false);\n\
          \x20   let guard = REGISTERED.lock().unwrap();\n\
          \x20   let registered = match guard.as_ref() {{ Some(r) => r, None => return std::ptr::null_mut() }};\n\
          \x20   match (registered.dispatch)(&method, &args) {{\n\
@@ -430,10 +465,12 @@ pub fn generate_provider_with(
          \x20       instance_id: s(instance_id),\n\
          \x20       instance_persistence_path: s(instance_persistence_path),\n\
          \x20   }});\n\
+         \x20   ensure_ready(true);\n\
          }}\n\n\
          #[no_mangle]\n\
          pub extern \"C\" fn logos_module_set_emit_callback(cb: Option<EmitCb>, user_data: *mut c_void) {{\n\
          \x20   EMIT.lock().unwrap().cb = cb.map(|f| (f, user_data as usize));\n\
+         \x20   ensure_ready(true);\n\
          }}\n\n\
          static TOKENS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());\n\n\
          #[no_mangle]\n\
