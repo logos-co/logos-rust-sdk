@@ -36,6 +36,30 @@ impl Param {
     }
 }
 
+/// Convert a Param list to the plain JSON array of (typed) values the
+/// lp_* C ABI takes — Param.value is stringly-typed with a coercion tag.
+pub(crate) fn params_to_lp_args(params: &[Param]) -> Result<String, serde_json::Error> {
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(params.len());
+    for p in params {
+        let v = match p.param_type.as_str() {
+            "int" | "uint" => p
+                .value
+                .parse::<i64>()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|_| serde_json::Value::String(p.value.clone())),
+            "double" => p
+                .value
+                .parse::<f64>()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|_| serde_json::Value::String(p.value.clone())),
+            "bool" => serde_json::Value::Bool(p.value == "true"),
+            _ => serde_json::Value::String(p.value.clone()),
+        };
+        out.push(v);
+    }
+    serde_json::to_string(&out)
+}
+
 pub trait ToParam {
     fn to_param(&self, name: &str) -> Param;
     fn param_type() -> &'static str;

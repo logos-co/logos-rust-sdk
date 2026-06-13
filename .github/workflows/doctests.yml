@@ -1,16 +1,18 @@
 name: Doc-Tests
 
-# Runs the executable doc-test (doctests/rust-provider-module.test.yaml) end-to-end
-# via the shared `doctest` CLI: builds logoscore and lgpm, writes a pure-Rust
-# Logos module from scratch, packages and installs it as an .lgx, starts the
-# logoscore daemon, loads the module, and calls its Rust-backed methods over IPC,
-# asserting on the output.
+# Runs the executable doc-tests (doctests/*.test.yaml) end-to-end via the shared
+# `doctest` CLI:
+#   - rust-provider-module: writes a pure-Rust Logos module from scratch on the
+#     cdylib authoring path, packages and installs it as an .lgx, and calls its
+#     Rust-backed methods through a logoscore daemon.
+# (The cross-language composition showcases live in logos-module-builder's
+# doctests — they exercise the builder across BOTH SDKs.)
 #
-# This exercises the Rust-module build + IPC pipeline that logos-rust-sdk is built
-# on. It does NOT pin logos-rust-sdk to the commit under test, because the provider
-# module is pure Rust and does not consume the SDK (only a caller module would).
-# The SDK itself is verified against the working tree by the separate IPC
-# integration test in ci.yml.
+# These exercise the Rust-module build + IPC pipeline that logos-rust-sdk is
+# built on. They do NOT pin logos-rust-sdk to the commit under test (the tutorial
+# modules consume the SDK as cargo git dependencies at a pinned rev, like any
+# real module repo would). The SDK itself is verified against the working tree
+# by the separate IPC integration test in ci.yml.
 #
 # ──────────────────────────────────────────────────────────────────────────────
 # One-time setup required for the clickable report links to work:
@@ -20,7 +22,8 @@ name: Doc-Tests
 #      the gh-pages branch on its first run.)
 #   2. Nothing else — GITHUB_TOKEN already has the permissions granted below.
 #
-# Each run publishes the two-column HTML report to:
+# Each run publishes the combined two-column HTML report (all specs, one
+# dropdown entry each) to:
 #   https://<owner>.github.io/<repo>/pr-<N>/<os>/      (pull requests)
 #   https://<owner>.github.io/<repo>/main/<os>/        (pushes to main/master)
 # and (for PRs) posts/updates a comment with the links.
@@ -42,7 +45,7 @@ concurrency:
 
 jobs:
   doctests:
-    name: rust-provider-module doc-test (${{ matrix.os }})
+    name: doc-tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -69,21 +72,24 @@ jobs:
       # pip install step is needed. --continue-on-fail so the run walks every step
       # and the report is complete; the job still fails (non-zero exit) if any step
       # failed.
-      - name: Run rust-provider-module doc-test
+      # All specs in ONE invocation, one combined report. The workspace
+      # tests-and-doctests pipeline parses this block to discover the spec
+      # list — keep every spec here.
+      - name: Run doc-tests
         run: |
           nix run github:logos-co/logos-doctest -- run \
             doctests/rust-provider-module.test.yaml \
             --verbose \
             --continue-on-fail \
-            --report "${{ runner.temp }}/rust-provider-doctest-report.html"
+            --report "${{ runner.temp }}/rust-sdk-doctest-report.html"
 
       - name: Stage report for upload
         if: always()
         shell: bash
         run: |
           mkdir -p report-out
-          if [ -f "${{ runner.temp }}/rust-provider-doctest-report.html" ]; then
-            cp "${{ runner.temp }}/rust-provider-doctest-report.html" report-out/index.html
+          if [ -f "${{ runner.temp }}/rust-sdk-doctest-report.html" ]; then
+            cp "${{ runner.temp }}/rust-sdk-doctest-report.html" report-out/index.html
           else
             echo "<h1>No report produced</h1>" > report-out/index.html
           fi
@@ -92,17 +98,18 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rust-provider-doctest-report-${{ matrix.os }}
+          name: rust-sdk-doctest-report-${{ matrix.os }}
           path: report-out/index.html
           if-no-files-found: warn
 
       - name: Verify markdown generation
         run: |
-          nix run github:logos-co/logos-doctest -- generate \
-            doctests/rust-provider-module.test.yaml \
-            -o /tmp/rust-provider-module.md
-          test -s /tmp/rust-provider-module.md
-          echo "Generated markdown successfully"
+          for spec in doctests/*.test.yaml; do
+            out="/tmp/$(basename "${spec%.test.yaml}").md"
+            nix run github:logos-co/logos-doctest -- generate "$spec" -o "$out"
+            test -s "$out"
+            echo "Generated $out"
+          done
 
   publish-report:
     name: Publish report to GitHub Pages
@@ -143,7 +150,7 @@ jobs:
           mkdir -p "site/$BASE"
           found=""
           for os in ubuntu-latest macos-latest; do
-            src="artifacts/rust-provider-doctest-report-$os/index.html"
+            src="artifacts/rust-sdk-doctest-report-$os/index.html"
             if [ -f "$src" ]; then
               mkdir -p "site/$BASE/$os"
               cp "$src" "site/$BASE/$os/index.html"
@@ -155,9 +162,9 @@ jobs:
           # Landing page for this ref linking to each OS report.
           {
             echo "<!doctype html><meta charset=utf-8>"
-            echo "<title>rust-provider-module doc-test reports — $BASE</title>"
+            echo "<title>logos-rust-sdk doc-test reports — $BASE</title>"
             echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}</style>"
-            echo "<h1>rust-provider-module doc-test reports</h1>"
+            echo "<h1>logos-rust-sdk doc-test reports</h1>"
             echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
             for os in ubuntu-latest macos-latest; do
               if [ -d "site/$BASE/$os" ]; then
@@ -174,7 +181,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           keep_files: true          # don't wipe other PRs' directories
-          commit_message: "Publish rust-provider-module doc-test report for ${{ steps.arrange.outputs.base }} (${{ github.sha }})"
+          commit_message: "Publish doc-test reports for ${{ steps.arrange.outputs.base }} (${{ github.sha }})"
 
       - name: Comment on PR with report links
         if: ${{ github.event_name == 'pull_request' && steps.arrange.outputs.found != '' }}
@@ -191,7 +198,7 @@ jobs:
             const marker = "<!-- rust-provider-doctest-report-links -->";
             const body =
               `${marker}\n` +
-              `### 📊 rust-provider-module doc-test report\n\n` +
+              `### 📊 doc-test reports\n\n` +
               `Rendered documentation alongside the commands actually run and their output ` +
               `(updated each run, commit \`${context.sha.slice(0,7)}\`):\n\n` +
               `${links}\n\n` +

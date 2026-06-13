@@ -1,0 +1,6 @@
+module sdk_test_caller_module {
+  version "0.1.0"
+  description "Minimal caller module for logos-rust-sdk integration tests"
+  depends [sdk_test_provider_module]
+  method call_add(a: int, b: int) -> int
+}

@@ -2,9 +2,12 @@
 //!
 //! A Rust SDK for calling other Logos modules from within a module.
 //!
-//! This SDK wraps the `logos-module-client` C API (`logos_sdk_*`), which in turn
-//! uses `LogosAPI` / `LogosAPIClient` over Qt Remote Objects IPC. No lifecycle
-//! management is needed — connections are established lazily on first call.
+//! This SDK binds the language-neutral `lp_*` C ABI from `logos-protocol`
+//! directly. Inside a module built on the cdylib path the symbols resolve
+//! against the protocol archive already linked into the plugin; standalone
+//! (out-of-module) binaries link `logos-module-client`'s shared library,
+//! which re-exports the same `lp_*` surface. No lifecycle management is
+//! needed — connections are established lazily on first call.
 //!
 //! ## Example (inside a Logos module)
 //!
@@ -35,6 +38,7 @@
 //! ```
 
 mod ffi;
+pub mod bytes;
 mod error;
 mod params;
 mod callback;
@@ -45,5 +49,5 @@ mod api;
 pub use error::LogosError;
 pub use params::{Param, ToParam};
 pub use callback::{CallResult, EventData};
-pub use plugin::PluginProxy;
-pub use api::LogosModuleSDK;
+pub use plugin::{EventSubscription, PluginProxy};
+pub use api::{protocol_abi_major, protocol_version, save_token, LogosModuleSDK};

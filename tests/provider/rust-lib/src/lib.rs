@@ -1,7 +1,22 @@
-/// Add two integers. Exposed as a Logos IPC method via c-ffi codegen.
+//! Minimal provider module — logos-rust-sdk integration test fixture, on the
+//! common cdylib authoring path: the module-impl C ABI exports come from the
+//! scaffold lidl-gen generates from the .lidl contract at build time; the
+//! author code is just the trait impl plus the install hook.
+
+include!(concat!(env!("OUT_DIR"), "/provider_gen.rs"));
+
+#[derive(Default)]
+struct ProviderImpl;
+
+impl SdkTestProviderModule for ProviderImpl {
+    fn add(&mut self, a: i64, b: i64) -> i64 {
+        a + b
+    }
+}
+
 #[no_mangle]
-pub extern "C" fn sdk_test_provider_add(a: i64, b: i64) -> i64 {
-    a + b
+pub extern "Rust" fn logos_module_install() {
+    install::<ProviderImpl>();
 }
 
 #[cfg(test)]
@@ -10,8 +25,9 @@ mod tests {
 
     #[test]
     fn test_add() {
-        assert_eq!(sdk_test_provider_add(5, 3), 8);
-        assert_eq!(sdk_test_provider_add(-1, 1), 0);
-        assert_eq!(sdk_test_provider_add(0, 0), 0);
+        let mut imp = ProviderImpl;
+        assert_eq!(imp.add(5, 3), 8);
+        assert_eq!(imp.add(-1, 1), 0);
+        assert_eq!(imp.add(0, 0), 0);
     }
 }

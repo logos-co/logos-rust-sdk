@@ -12,13 +12,16 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/metadata.json
 
 logos_module(
     NAME sdk_test_caller_module
-    INCLUDE_DIRS
-        ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
 # ── Rust static library ───────────────────────────────────────────────────────
-# Contains sdk_test_caller_* functions + logos-rust-sdk rlib (inlined by Rust linker).
-# logos_sdk_* symbols are unresolved here — satisfied below by logos_module_client.
+# Contains the logos_module_* C ABI exports (generated scaffold) + the author
+# impl + the logos-rust-sdk rlib. Its lp_* undefineds resolve against the
+# logos-protocol archive already in the plugin link (via logos-qt-sdk) — ONE
+# protocol stack shared by the Qt glue and the Rust SDK, so the host token the
+# glue forwards through logos_module_accept_token authenticates this module's
+# outbound calls. Re-mention the protocol target after the Rust archive so
+# single-pass linkers (GNU ld) see it later on the line.
 find_library(LIBSDK_TEST_CALLER
     NAMES libsdk_test_caller.a sdk_test_caller
     PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib
@@ -32,41 +35,10 @@ if(NOT LIBSDK_TEST_CALLER)
     )
 endif()
 
-target_link_libraries(sdk_test_caller_module_module_plugin PRIVATE ${LIBSDK_TEST_CALLER})
-
-# ── logos-module-client ───────────────────────────────────────────────────────
-# Resolves logos_sdk_* symbols declared in logos-rust-sdk's extern "C" blocks.
-# LOGOS_MODULE_CLIENT_ROOT is injected by callerBuildSupport.setupHook.
-if(NOT DEFINED LOGOS_MODULE_CLIENT_ROOT OR LOGOS_MODULE_CLIENT_ROOT STREQUAL "")
-    if(DEFINED ENV{LOGOS_MODULE_CLIENT_ROOT})
-        set(LOGOS_MODULE_CLIENT_ROOT "$ENV{LOGOS_MODULE_CLIENT_ROOT}")
-    else()
-        message(FATAL_ERROR
-            "LOGOS_MODULE_CLIENT_ROOT is not set. "
-            "Pass -DLOGOS_MODULE_CLIENT_ROOT=<path> or set LOGOS_MODULE_CLIENT_ROOT env var."
-        )
-    endif()
-endif()
-
-get_filename_component(LOGOS_MODULE_CLIENT_ROOT "${LOGOS_MODULE_CLIENT_ROOT}" ABSOLUTE)
-
-find_library(LOGOS_MODULE_CLIENT_LIBRARY
-    NAMES logos_module_client
-    PATHS "${LOGOS_MODULE_CLIENT_ROOT}/lib"
-    NO_DEFAULT_PATH
+target_link_libraries(sdk_test_caller_module_module_plugin PRIVATE
+    ${LIBSDK_TEST_CALLER}
+    logos-protocol::logos_protocol
 )
-
-if(NOT LOGOS_MODULE_CLIENT_LIBRARY)
-    message(FATAL_ERROR "liblogos_module_client not found in ${LOGOS_MODULE_CLIENT_ROOT}/lib")
-endif()
-
-add_library(logos_module_client SHARED IMPORTED)
-set_target_properties(logos_module_client PROPERTIES
-    IMPORTED_LOCATION "${LOGOS_MODULE_CLIENT_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${LOGOS_MODULE_CLIENT_ROOT}/include"
-)
-
-target_link_libraries(sdk_test_caller_module_module_plugin PRIVATE logos_module_client)
 
 # ── Platform-specific Rust runtime deps ──────────────────────────────────────
 if(APPLE)

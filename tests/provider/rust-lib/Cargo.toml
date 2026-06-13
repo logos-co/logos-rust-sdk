@@ -5,3 +5,10 @@ edition = "2021"
 
 [lib]
 crate-type = ["staticlib"]
+
+[dependencies]
+serde_json = "1"
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }
+
+[build-dependencies]
+logos-lidl-gen = { path = "../logos-rust-sdk-src/lidl-gen" }

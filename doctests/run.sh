@@ -4,15 +4,16 @@
 #
 # There is one spec:
 #   rust-provider-module.test.yaml — writes a pure-Rust Logos module from scratch
-#       (the `provider` half of logos-rust-example-module / this repo's tests/),
-#       builds it into an .lgx, installs it with lgpm, and drives it through a
-#       headless logoscore daemon, calling its Rust-backed methods over IPC.
+#       on the cdylib authoring path (a .lidl contract drives lidl-gen's Rust
+#       module-impl C ABI scaffold + the builder's uniform Qt glue), builds it
+#       into an .lgx, installs it with lgpm, and drives it through a headless
+#       logoscore daemon, calling its Rust-backed methods over IPC.
 #
-# Unlike a module repo's own doc-test, this spec does NOT pin
-# logos-rust-sdk to the commit under test: the provider module is pure Rust and
-# does not consume the SDK (only a *caller* module would). The spec exercises the
-# Rust-module build + IPC pipeline that the SDK is built on. To verify the SDK
-# itself against the working tree, run the integration test instead:
+# Unlike a module repo's own doc-test, this spec does NOT pin logos-rust-sdk to
+# the commit under test: the tutorial module consumes the SDK + lidl-gen as
+# cargo git dependencies at a pinned rev (the published authoring surface, like
+# any real module repo would). To verify the SDK against the working tree, run
+# the integration test instead:
 #   nix build 'path:../tests#checks.x86_64-linux.ipc-test' --override-input logos-rust-sdk path:..
 #
 # The runner is the shared `doctest` CLI
@@ -123,17 +124,21 @@ if [ "${BUILD_DIR}" != "${OUTPUT_DIR}" ]; then
   rm -rf "${BUILD_DIR:?}/"* "${BUILD_DIR:?}/".[!.]* 2>/dev/null || true
 fi
 
+# Each spec gets ITS OWN subdirectory: the specs write module sources, git
+# repos, modules/ install dirs and a default-config logoscore daemon state —
+# sharing one dir makes the second spec trip over the first one's leftovers.
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
-  echo "==> Running ${spec} into ${BUILD_DIR}/"
+  mkdir -p "${BUILD_DIR}/${name}"
+  echo "==> Running ${spec} into ${BUILD_DIR}/${name}/"
   "${DOCTEST[@]}" run "${spec}" \
     --verbose \
     --continue-on-fail \
-    --output-dir "${BUILD_DIR}/"
+    --output-dir "${BUILD_DIR}/${name}/"
 
-  echo "==> Generating ${BUILD_DIR}/${name}.md"
+  echo "==> Generating ${BUILD_DIR}/${name}/${name}.md"
   "${DOCTEST[@]}" generate "${spec}" \
-    -o "${BUILD_DIR}/${name}.md"
+    -o "${BUILD_DIR}/${name}/${name}.md"
 done
 
 # The spec writes the module source INTO outputs/ (like logos-tutorial), so the
