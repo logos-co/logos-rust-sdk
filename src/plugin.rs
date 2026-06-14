@@ -4,6 +4,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::callback::{
     create_event_callback, create_method_callback, event_callback_ptr, json_to_message,
@@ -234,6 +235,31 @@ impl PluginProxy {
     /// Suitable for use inside a `Q_INVOKABLE`-generated Rust function where the
     /// Qt event loop is already running in the module process.
     pub fn call_sync<T: ToParam>(&self, method: &str, params: &[T]) -> Result<CallResult, LogosError> {
+        self.call_sync_timeout_ms(method, params, 0)
+    }
+
+    /// Call a plugin method synchronously, bounding the wait by `timeout`.
+    ///
+    /// The timeout overrides the transport default for this one call — use it
+    /// for a method whose reply legitimately takes longer than the default,
+    /// e.g. a network-bootstrap handshake. A zero or out-of-range `timeout`
+    /// falls back to the transport default (`lp_invoke` treats `timeout_ms <= 0`
+    /// that way).
+    pub fn call_sync_with_timeout<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout: Duration,
+    ) -> Result<CallResult, LogosError> {
+        self.call_sync_timeout_ms(method, params, duration_to_timeout_ms(timeout))
+    }
+
+    fn call_sync_timeout_ms<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout_ms: c_int,
+    ) -> Result<CallResult, LogosError> {
         let client = self.client()?;
         let method_c = CString::new(method)?;
         let args = self.args_json(params)?;
@@ -245,7 +271,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args.as_ptr(),
-                0,
+                timeout_ms,
                 &mut result_json,
                 &mut error_json,
             )
@@ -430,5 +456,26 @@ impl PluginProxy {
             _callback: callback_data,
             _client: client_handle,
         })
+    }
+}
+
+/// Convert a `Duration` to the `lp_invoke` `timeout_ms` argument, saturating at
+/// the positive `c_int` range. `lp_invoke` treats `timeout_ms <= 0` as "use the
+/// transport default", so a zero duration naturally selects it.
+fn duration_to_timeout_ms(timeout: Duration) -> c_int {
+    timeout.as_millis().min(c_int::MAX as u128) as c_int
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_to_timeout_ms_passes_through_zeroes_and_saturates() {
+        assert_eq!(duration_to_timeout_ms(Duration::from_secs(35)), 35_000);
+        // Zero falls back to the transport default (lp_invoke treats <= 0 that way).
+        assert_eq!(duration_to_timeout_ms(Duration::ZERO), 0);
+        // Out-of-range durations saturate rather than wrapping to a negative.
+        assert_eq!(duration_to_timeout_ms(Duration::MAX), c_int::MAX);
     }
 }
