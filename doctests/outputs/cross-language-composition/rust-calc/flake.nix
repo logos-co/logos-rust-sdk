@@ -1,7 +1,7 @@
 {
   description = "Basic Rust provider with a typed event";
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder/c47cff9b3195d33d2abad5f59768a84d8aa5bc16";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/19e2c133b7202ce8a8675791a7dbf136f2eeb96f";
     # Provides logos-lidl-gen (the contract->scaffold generator the builder
     # runs) and the SDK the crate links. One extra input vs a C++ module.
     logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/441b936f2bcb309ea8f42f017f4612c139a97297";
