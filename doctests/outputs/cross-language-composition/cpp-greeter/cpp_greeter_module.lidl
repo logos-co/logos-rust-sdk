@@ -1,0 +1,5 @@
+module cpp_greeter_module {
+  version "1.0.0"
+  description "Contract-first C++ cdylib module: a greeter"
+  method greet(name: tstr) -> tstr
+}

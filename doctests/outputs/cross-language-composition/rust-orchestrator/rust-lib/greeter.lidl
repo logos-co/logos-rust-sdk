@@ -1,0 +1,5 @@
+module greeter {
+  version "1.0.0"
+  description "Greeter interface — bound to a concrete provider module at runtime"
+  method greet(name: tstr) -> tstr
+}

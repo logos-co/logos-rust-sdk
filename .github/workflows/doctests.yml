@@ -2,11 +2,11 @@ name: Doc-Tests
 
 # Runs the executable doc-tests (doctests/*.test.yaml) end-to-end via the shared
 # `doctest` CLI:
-#   - rust-provider-module: writes a pure-Rust Logos module from scratch on the
-#     cdylib authoring path, packages and installs it as an .lgx, and calls its
-#     Rust-backed methods through a logoscore daemon.
-# (The cross-language composition showcases live in logos-module-builder's
-# doctests — they exercise the builder across BOTH SDKs.)
+#   - cross-language-composition: builds three modules — a Rust provider, a C++
+#     provider, and a Rust consumer — on the builder-driven cdylib path (no
+#     build.rs), then drives the consumer through a logoscore daemon to exercise
+#     the whole Rust-SDK surface: module context, sync + async typed calls,
+#     event subscription, and concrete + interface dependencies.
 #
 # These exercise the Rust-module build + IPC pipeline that logos-rust-sdk is
 # built on. They do NOT pin logos-rust-sdk to the commit under test (the tutorial
@@ -78,7 +78,7 @@ jobs:
       - name: Run doc-tests
         run: |
           nix run github:logos-co/logos-doctest -- run \
-            doctests/rust-provider-module.test.yaml \
+            doctests/cross-language-composition.test.yaml \
             --verbose \
             --continue-on-fail \
             --report "${{ runner.temp }}/rust-sdk-doctest-report.html"

@@ -2,3 +2,4 @@ result
 result-*
 lib/
 rust-lib/target/
+rust-lib/generated/

@@ -17,7 +17,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: logos-lidl-gen <module.lidl> [--provider] [--dep name=dep.lidl ...] [--protocol-version X.Y.Z] [-o <out.rs>]\n\
+            "Usage: logos-lidl-gen <module.lidl> [--provider] [--no-trait] [--dep name=dep.lidl ...] [--protocol-version X.Y.Z] [-o <out.rs>]\n\
              \x20      logos-lidl-gen --from-rust <lib.rs> --trait <ContractTrait> [--module-name n] [--module-version X.Y.Z] [-o <out.lidl>]"
         );
         std::process::exit(1);
@@ -77,6 +77,11 @@ fn main() {
 
     let input = &args[1];
     let provider = args.iter().any(|a| a == "--provider");
+    // Rust-first authoring: the trait is declared in the crate (the .lidl was
+    // derived from it with --from-rust), so the provider scaffold must wrap the
+    // author's trait instead of generating one. Mirrors build.rs calling
+    // generate_provider_with(.., emit_trait = false).
+    let no_trait = args.iter().any(|a| a == "--no-trait");
     let mut deps: Vec<(String, logos_lidl_gen::ModuleDecl)> = Vec::new();
     for (i, a) in args.iter().enumerate() {
         if a != "--dep" {
@@ -133,7 +138,11 @@ fn main() {
         }
     };
     let mut code = if provider {
-        logos_lidl_gen::generate_provider(&module, &protocol_version)
+        if no_trait {
+            logos_lidl_gen::rustgen_provider::generate_provider_with(&module, &protocol_version, false)
+        } else {
+            logos_lidl_gen::generate_provider(&module, &protocol_version)
+        }
     } else {
         logos_lidl_gen::generate(&module)
     };

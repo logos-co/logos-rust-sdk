@@ -1,0 +1,7 @@
+module rust_calc_module {
+  version "1.0.0"
+  description "Basic Rust provider: arithmetic plus a typed computed event"
+  method add(a: int, b: int) -> int
+  method multiply(a: int, b: int) -> int
+  event computed(total: int)
+}

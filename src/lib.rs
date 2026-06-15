@@ -1,41 +1,37 @@
 //! # Logos Rust SDK
 //!
-//! A Rust SDK for calling other Logos modules from within a module.
+//! The runtime behind the **typed, generated clients** a Rust Logos module uses
+//! to call other modules. It binds the language-neutral `lp_*` C ABI from
+//! `logos-protocol` directly; `logos-module-builder` runs `logos-lidl-gen` to
+//! generate a typed client per dependency on top of it, so module code calls
+//! `modules().<dep>.<method>(...)` rather than naming this crate's types.
 //!
-//! This SDK binds the language-neutral `lp_*` C ABI from `logos-protocol`
-//! directly. Inside a module built on the cdylib path the symbols resolve
-//! against the protocol archive already linked into the plugin; standalone
-//! (out-of-module) binaries link `logos-module-client`'s shared library,
-//! which re-exports the same `lp_*` surface. No lifecycle management is
-//! needed — connections are established lazily on first call.
+//! Inside a module built on the cdylib path the `lp_*` symbols resolve against
+//! the protocol archive already linked into the plugin. No lifecycle management
+//! is needed — connections are established lazily on first call.
 //!
-//! ## Example (inside a Logos module)
+//! ## Example (generated typed client, inside a Logos module)
 //!
-//! ```rust,no_run
-//! use logos_rust_sdk::{LogosModuleSDK, LogosError};
-//!
-//! // Call another module synchronously (suitable for use in Q_INVOKABLE-generated functions)
-//! fn call_provider_add(a: i64, b: i64) -> i64 {
-//!     let sdk = LogosModuleSDK::new();
-//!     let provider = sdk.plugin("rust_provider_module");
-//!     match provider.call_sync("add", &[a, b]) {
-//!         Ok(result) if result.success => result.message.parse().unwrap_or(-1),
-//!         _ => -1,
+//! ```ignore
+//! impl MyModule for MyImpl {
+//!     // Synchronous typed call to a concrete dependency.
+//!     fn total(&mut self) -> i64 {
+//!         modules().counter_module.increment(1).unwrap_or(-1)
 //!     }
-//! }
 //!
-//! // Async call with channel-based result
-//! fn call_provider_greet(name: &str) -> Result<(), LogosError> {
-//!     let sdk = LogosModuleSDK::new();
-//!     let provider = sdk.plugin("rust_provider_module");
-//!     let rx = provider.call("greet", &[name])?;
-//!     // Check later (non-blocking):
-//!     if let Ok(result) = rx.try_recv() {
-//!         println!("Greeting: {}", result.message);
+//!     // Asynchronous twin: the typed result lands on the event loop, after
+//!     // this method returns.
+//!     fn bump_async(&mut self) {
+//!         modules().counter_module.increment_async(1, |res| {
+//!             if let Ok(v) = res { /* stash v; read it back from a later method */ }
+//!         });
 //!     }
-//!     Ok(())
 //! }
 //! ```
+//!
+//! `modules()`, the typed dependency clients, the trait, and `context()` are all
+//! emitted by the builder from the contracts. See the full walkthrough in
+//! `doctests/cross-language-composition.test.yaml`.
 
 mod ffi;
 pub mod bytes;

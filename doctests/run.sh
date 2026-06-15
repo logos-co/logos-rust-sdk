@@ -3,11 +3,13 @@
 # Execute the logos-rust-sdk doc-test(s) end-to-end and regenerate their Markdown.
 #
 # There is one spec:
-#   rust-provider-module.test.yaml — writes a pure-Rust Logos module from scratch
-#       on the cdylib authoring path (a .lidl contract drives lidl-gen's Rust
-#       module-impl C ABI scaffold + the builder's uniform Qt glue), builds it
-#       into an .lgx, installs it with lgpm, and drives it through a headless
-#       logoscore daemon, calling its Rust-backed methods over IPC.
+#   cross-language-composition.test.yaml — writes three modules from scratch on
+#       the builder-driven cdylib path (no build.rs): a Rust provider, a C++
+#       provider, and a Rust consumer that ties them together. Builds each into
+#       an .lgx, installs them with lgpm, and drives the consumer through a
+#       headless logoscore daemon to exercise the whole Rust-SDK surface — module
+#       context, sync + async typed calls, event subscription, and concrete +
+#       interface dependencies.
 #
 # Unlike a module repo's own doc-test, this spec does NOT pin logos-rust-sdk to
 # the commit under test: the tutorial module consumes the SDK + lidl-gen as
@@ -145,10 +147,12 @@ done
 # committed tree is the generated source (flake.nix, metadata.json, CMakeLists.txt,
 # rust-lib/, .gitignore) plus the rendered .md — with all build artifacts stripped.
 # `doctest clean`'s defaults cover .git/, modules/, *.so/*.dylib, flake.lock, and
-# the out-links named lm/logos/pm/result*. Two of this spec's leftovers fall
+# the out-links named lm/logos/pm/result*. Several of this spec's leftovers fall
 # outside those defaults, so add them explicitly:
 #   --also lgpm          the lgpm out-link (default knows `pm`, not `lgpm`)
-#   --also provider-lgx  the .lgx out-link (non-standard name)
+#   --also calc-lgx      the rust_calc_module .lgx out-link
+#   --also greeter-lgx   the cpp_greeter_module .lgx out-link
+#   --also orch-lgx      the rust_orchestrator_module .lgx out-link
 #   --also logs.txt      the daemon log (default glob is *.log, not logs.txt)
 # Module dirs are copied out of the read-only nix store, so they land read-only
 # (r-x); restore write permission first or `clean` can't delete inside them.
@@ -157,7 +161,9 @@ chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
 echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + .md)"
 "${DOCTEST[@]}" clean "${BUILD_DIR}" \
   --also lgpm \
-  --also provider-lgx \
+  --also calc-lgx \
+  --also greeter-lgx \
+  --also orch-lgx \
   --also logs.txt \
   --verbose
 
