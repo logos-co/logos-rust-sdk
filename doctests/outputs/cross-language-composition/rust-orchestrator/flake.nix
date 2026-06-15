@@ -1,7 +1,7 @@
 {
   description = "Rust consumer: concrete + interface deps, context, sync/async, events";
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder/19e2c133b7202ce8a8675791a7dbf136f2eeb96f";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/113b2e1228d059393f12050db9eeaa57a5123536";
     logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/441b936f2bcb309ea8f42f017f4612c139a97297";
     # The concrete dependency's flake (its published .lidl drives
     # modules().rust_calc_module). Placeholder — locked to the real checkout

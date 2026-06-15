@@ -1,7 +1,7 @@
 {
   description = "Contract-first C++ cdylib module: a greeter";
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder/19e2c133b7202ce8a8675791a7dbf136f2eeb96f";
+    logos-module-builder.url = "github:logos-co/logos-module-builder/113b2e1228d059393f12050db9eeaa57a5123536";
   };
   outputs = inputs@{ self, logos-module-builder, ... }:
     logos-module-builder.lib.mkLogosModule {
