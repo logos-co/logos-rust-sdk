@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Logos Team"]
-description = "Rust SDK for calling other Logos modules via IPC, wrapping logos-module-client"
+description = "Rust SDK for calling other Logos modules — binds the lp_* C ABI from logos-protocol; the runtime behind logos-lidl-gen's typed clients"
 repository = "https://github.com/logos-co/logos-rust-sdk"
 keywords = ["logos", "sdk", "ipc", "modules"]
 categories = ["api-bindings"]
@@ -12,8 +12,9 @@ categories = ["api-bindings"]
 [lib]
 name = "logos_rust_sdk"
 path = "src/lib.rs"
-# Compiled as rlib; logos_sdk_* symbols are resolved at final link time by
-# liblogos_module_client when the module plugin .so/.dylib is linked by CMake.
+# Compiled as rlib; the lp_* symbols are left unresolved and bound at final
+# link time against the logos-protocol archive when CMake links the module
+# plugin .so/.dylib.
 crate-type = ["rlib"]
 
 [dependencies]
