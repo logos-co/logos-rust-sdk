@@ -81,11 +81,9 @@ sections:
       separate code-generator build — the module builder runs the Rust and C++
       generators itself.
 
-      > The builder-driven Rust path and the cdylib authoring path currently
-      > live on the protocol-extraction branches, so `logoscore` is pinned to
-      > the matching head and the modules below pin `logos-module-builder` /
-      > `logos-rust-sdk` to theirs. Once the chain merges, drop the pins and
-      > build plain master.
+      > `logoscore`, `logos-module-builder`, and `logos-rust-sdk` are pinned to
+      > known-good merged-master commits so the tour is reproducible. Bump them
+      > to newer masters (or a release tag) as the stack advances.
     steps:
       - title: "Build logoscore"
         run: "nix build 'github:logos-co/logos-logoscore-cli/11be0e5afad9c96c42048a8780e8b4ca10729e24' --out-link ./logos"
@@ -150,10 +148,10 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "441b936f2bcb309ea8f42f017f4612c139a97297" }
+            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "8b89e562a52218af6beef6fa6e3cfa12ab52e93e" }
         post_text: |
-          > The `rev` pins the branch the builder-driven Rust path currently
-          > lives on; drop it (or pin a release tag) once the chain merges.
+          > The `rev` pins a known-good `logos-rust-sdk` master commit; bump it
+          > to a newer master or a release tag as the SDK advances.
       - title: "The module logic"
         text: |
           Create `rust-calc/rust-lib/src/lib.rs`. `include!` pulls in the
@@ -268,7 +266,7 @@ sections:
                 logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
                 # Provides logos-lidl-gen (the contract->scaffold generator the builder
                 # runs) and the SDK the crate links. One extra input vs a C++ module.
-                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/441b936f2bcb309ea8f42f017f4612c139a97297";
+                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
               };
               outputs = inputs@{ self, logos-module-builder, ... }:
                 let
@@ -472,7 +470,7 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "441b936f2bcb309ea8f42f017f4612c139a97297" }
+            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "8b89e562a52218af6beef6fa6e3cfa12ab52e93e" }
       - title: "The implementation — the whole consumer surface"
         text: |
           Create `rust-orchestrator/rust-lib/src/lib.rs`. Everything typed here
@@ -653,7 +651,7 @@ sections:
               description = "Rust consumer: concrete + interface deps, context, sync/async, events";
               inputs = {
                 logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/441b936f2bcb309ea8f42f017f4612c139a97297";
+                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
                 # The concrete dependency's flake (its published .lidl drives
                 # modules().rust_calc_module). Placeholder — locked to the real checkout
                 # at build time via --override-input (nix rejects relative paths here).

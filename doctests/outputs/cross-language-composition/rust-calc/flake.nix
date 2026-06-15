@@ -4,7 +4,7 @@
     logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
     # Provides logos-lidl-gen (the contract->scaffold generator the builder
     # runs) and the SDK the crate links. One extra input vs a C++ module.
-    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/441b936f2bcb309ea8f42f017f4612c139a97297";
+    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
   };
   outputs = inputs@{ self, logos-module-builder, ... }:
     let
