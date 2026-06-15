@@ -140,6 +140,40 @@ pub fn generate(module: &ModuleDecl) -> String {
             m.name,
             conv
         ));
+
+        // Async twin of the sync method — feature parity with the C++ client's
+        // `<method>Async(..., callback)`. Fires the call and delivers the typed
+        // result to a one-shot callback; inside a module the callback runs on
+        // the Qt event loop, so it lands after the current method returns.
+        let async_params = if params_sig.is_empty() {
+            "&self, callback: F".to_string()
+        } else {
+            format!("&self, {}, callback: F", params_sig.join(", "))
+        };
+        out.push_str(&format!(
+            "\n    /// Async twin of [`Self::{}`]: fire the call and receive the typed\n\
+             \x20   /// result in `callback` once it lands — the Rust analog of the C++\n\
+             \x20   /// client's `{}Async`. The callback runs from the protocol\n\
+             \x20   /// completion path (the module's Qt event loop), so it fires after\n\
+             \x20   /// the current method returns, never inline.\n\
+             \x20   pub fn {}_async<F>({})\n\
+             \x20   where\n\
+             \x20       F: FnOnce(Result<{}, LogosError>) + Send + 'static,\n\
+             \x20   {{\n\
+             \x20       let args = serde_json::Value::Array(vec![{}]);\n\
+             \x20       self.proxy.call_json_async(\"{}\", &args, move |result| {{\n\
+             \x20           callback(result.and_then(|value| {}));\n\
+             \x20       }});\n\
+             \x20   }}\n",
+            fn_name,
+            m.name,
+            fn_name,
+            async_params,
+            ret_ty,
+            args.join(", "),
+            m.name,
+            conv
+        ));
     }
 
     for e in &module.events {
@@ -322,6 +356,12 @@ module calc_module {
         assert!(code.contains("pub fn store(&self, data: &[u8]) -> Result<bool, LogosError>"));
         assert!(code.contains("logos_rust_sdk::bytes::encode(data)"));
         assert!(code.contains("pub fn dump(&self) -> Result<serde_json::Value, LogosError>"));
+        // Async twins: parity with the C++ client's <method>Async(..., callback).
+        assert!(code.contains("pub fn add_async<F>(&self, a: i64, b: i64, callback: F)"));
+        assert!(code.contains("F: FnOnce(Result<i64, LogosError>) + Send + 'static,"));
+        assert!(code.contains("self.proxy.call_json_async(\"add\", &args, move |result|"));
+        // No-arg method still takes only the callback.
+        assert!(code.contains("pub fn dump_async<F>(&self, callback: F)"));
         assert!(code.contains("pub fn on_result_ready(&mut self)"));
         assert!(code.contains("self.proxy.call_json(\"add\", &args)"));
         // Runtime binding: same typed surface, provider chosen at call time

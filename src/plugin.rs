@@ -1,6 +1,6 @@
 //! Plugin proxy for method calls and event subscriptions, over the lp_* C ABI.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -84,6 +84,52 @@ impl Drop for EventSubscription {
         // client share (and the callback box) drop after.
         unsafe { ffi::lp_unsubscribe(self.sub) };
     }
+}
+
+/// Everything an in-flight async call needs to outlive the proxy that
+/// launched it: the one-shot completion closure, the names for error
+/// reporting, and — crucially — a share of the client. A `modules()`
+/// dependency client is a temporary, so without holding this share the
+/// client would be destroyed the instant the call statement ends, before
+/// the result arrives. Reclaimed (and dropped) by the trampoline when the
+/// result lands. Mirrors how [`EventSubscription`] keeps its client alive.
+struct AsyncCallState {
+    callback: Box<dyn FnOnce(Result<serde_json::Value, LogosError>) + Send>,
+    plugin: String,
+    method: String,
+    _client: Arc<ClientHandle>,
+}
+
+/// lp result trampoline for [`PluginProxy::call_json_async`]: reclaim the
+/// boxed state, turn `(ok, json)` into a typed `Result<Value, _>` (the raw
+/// JSON value on success; a `PluginCallFailed` carrying the canonical error
+/// object's message on failure — the async analog of `call_json`'s sync error
+/// path), and hand it to the one-shot callback.
+extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *mut c_void) {
+    if user_data.is_null() {
+        return;
+    }
+    let state = unsafe { Box::from_raw(user_data as *mut AsyncCallState) };
+    let AsyncCallState { callback, plugin, method, _client } = *state;
+
+    let raw = if json.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned()
+    };
+
+    let result = if ok != 0 {
+        Ok(serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw)))
+    } else {
+        let message = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or(raw);
+        Err(LogosError::PluginCallFailed { plugin, method, message })
+    };
+
+    callback(result);
+    // `_client` (the held client share) drops here, after the callback ran.
 }
 
 pub struct PluginProxy {
@@ -283,6 +329,68 @@ impl PluginProxy {
     pub fn call_sync_no_params(&self, method: &str) -> Result<CallResult, LogosError> {
         let empty: &[&str] = &[];
         self.call_sync(method, empty)
+    }
+
+    /// Call a plugin method asynchronously with a raw JSON argument array,
+    /// delivering the raw JSON result value (or an error) to `callback`.
+    ///
+    /// This is the async twin of [`call_json`](Self::call_json) and the typed
+    /// backbone the LIDL-generated `<method>_async` wrappers build on — the
+    /// Rust analog of the C++ client's `<method>Async(..., callback)`. The
+    /// callback is invoked **exactly once**: synchronously here if the call
+    /// can't even be dispatched (bad client / arguments), otherwise from the
+    /// protocol stack's completion path once the result lands — inside a
+    /// loaded module that is the module's Qt event loop, so it fires after
+    /// control returns to the loop (it will NOT complete while you block the
+    /// current method).
+    ///
+    /// The in-flight call holds its own share of the client, so it completes
+    /// even if `self` is a temporary (e.g. `modules().dep`) dropped at the end
+    /// of the call statement.
+    pub fn call_json_async<F>(&self, method: &str, args: &serde_json::Value, callback: F)
+    where
+        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+    {
+        let client_handle = match &self.client {
+            Some(h) => Arc::clone(h),
+            None => {
+                callback(Err(LogosError::Other(format!(
+                    "Failed to create protocol client for {}",
+                    self.plugin_name
+                ))));
+                return;
+            }
+        };
+        let method_c = match CString::new(method) {
+            Ok(c) => c,
+            Err(e) => return callback(Err(LogosError::InvalidString(e))),
+        };
+        let args_str = match serde_json::to_string(args) {
+            Ok(s) => s,
+            Err(e) => return callback(Err(LogosError::JsonError(e.to_string()))),
+        };
+        let args_c = match CString::new(args_str) {
+            Ok(c) => c,
+            Err(e) => return callback(Err(LogosError::InvalidString(e))),
+        };
+
+        let state = Box::new(AsyncCallState {
+            callback: Box::new(callback),
+            plugin: self.plugin_name.clone(),
+            method: method.to_string(),
+            _client: Arc::clone(&client_handle),
+        });
+        let user_data = Box::into_raw(state) as *mut c_void;
+        unsafe {
+            ffi::lp_invoke_async(
+                client_handle.0,
+                method_c.as_ptr(),
+                args_c.as_ptr(),
+                0,
+                async_call_trampoline,
+                user_data,
+            );
+        }
     }
 
     /// Subscribe to events from a plugin.
