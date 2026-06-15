@@ -164,17 +164,26 @@ Standalone binaries instead resolve `lp_*` against `liblogos_module_client.so` (
 
 ## Example: using the SDK inside a Logos module
 
-The standard pattern is the **cdylib authoring path** — see the executable doc-test (`doctests/rust-provider-module.test.yaml`) for the complete walkthrough, and the cross-language composition tutorials in [logos-module-builder](https://github.com/logos-co/logos-module-builder) for typed dependency clients and event subscriptions. The caller side, with a typed client generated from the dependency's `.lidl` contract:
+The standard pattern is the **cdylib authoring path** — see the executable doc-test (`doctests/cross-language-composition.test.yaml`) for a complete walkthrough that composes a Rust consumer over a Rust and a C++ provider, exercising module context, sync/async typed calls, event subscription, and concrete + interface dependencies. The caller side uses a typed client generated from the dependency's `.lidl` contract — every cross-module call is typed, never string-keyed:
 
 ```rust
-// build.rs generated `modules()` from the dep contracts; the trait + scaffold
-// come from your own .lidl (or are derived from your trait with --from-rust).
+// The builder generated `modules()` from the dep contracts; the trait + scaffold
+// come from your own .lidl. No build.rs — metadata.json's codegen.rust drives it.
 impl MyModule for MyImpl {
+    // Synchronous typed call.
     fn total_via_dep(&mut self) -> i64 {
         match modules().counter.increment(1) {
             Ok(v) => v,
             Err(e) => { eprintln!("call failed: {}", e); -1 }
         }
+    }
+
+    // Asynchronous twin: fire and receive the typed result in a callback that
+    // runs on the module's event loop after this method returns.
+    fn bump_async(&mut self) {
+        modules().counter.increment_async(1, |res| {
+            if let Ok(v) = res { /* stash v; read it from a later method */ }
+        });
     }
 }
 ```
@@ -210,13 +219,15 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
     --override-input logos-rust-sdk path:. --print-build-logs
   ```
 
-- **Executable doc-test** (`doctests/rust-provider-module.test.yaml`) — a
-  step-by-step, runnable tutorial that writes a pure-Rust Logos module from
-  scratch on the **cdylib authoring path** (a `.lidl` contract → lidl-gen's
-  Rust module-impl C ABI scaffold + the builder's uniform Qt glue → loadable
-  module), packages it as an `.lgx`, installs it with `lgpm`, and calls its
-  methods through a `logoscore` daemon. It documents and verifies the callee
-  side of the IPC stack this SDK builds on. Run it with the shared
+- **Executable doc-test** (`doctests/cross-language-composition.test.yaml`) — a
+  step-by-step, runnable tutorial that writes three modules from scratch on the
+  **builder-driven cdylib path** (no `build.rs`): a Rust provider, a C++
+  provider, and a Rust consumer that ties them together. It packages each as an
+  `.lgx`, installs them with `lgpm`, and drives the consumer through a
+  `logoscore` daemon to exercise the whole consumer surface — module context
+  (`module_path` / `instance_id` / `instance_persistence_path`), **sync and
+  async** typed calls, typed **event subscription**, and both a **concrete** and
+  an **interface** dependency. Run it with the shared
   [`doctest`](https://github.com/logos-co/logos-doctest) CLI:
 
   ```bash
@@ -224,4 +235,4 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
   ```
 
   The rendered tutorial is committed at
-  `doctests/outputs/rust-provider-module/rust-provider-module.md`.
+  `doctests/outputs/cross-language-composition/cross-language-composition.md`.

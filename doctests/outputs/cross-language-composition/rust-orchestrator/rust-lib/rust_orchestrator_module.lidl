@@ -1,0 +1,10 @@
+module rust_orchestrator_module {
+  version "1.0.0"
+  description "Rust consumer: concrete + interface deps, context, sync/async, events"
+  method tally(a: int, b: int) -> int
+  method tally_async(a: int, b: int) -> int
+  method last_async() -> int
+  method hello(name: tstr) -> tstr
+  method whereami() -> tstr
+  method last_computed() -> int
+}

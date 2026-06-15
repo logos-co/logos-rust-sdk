@@ -1,0 +1,25 @@
+{
+  "name": "rust_orchestrator_module",
+  "version": "1.0.0",
+  "description": "Rust consumer: concrete + interface deps, context, sync/async typed calls, event subscription",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "cdylib",
+  "category": "general",
+  "main": "rust_orchestrator_module_plugin",
+  "dependencies": ["rust_calc_module"],
+  "interface_dependencies": [
+    { "name": "greeter", "file": "rust-lib/greeter.lidl" }
+  ],
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "lidl": "rust-lib/rust_orchestrator_module.lidl",
+    "rust": { "crate": "rust-lib", "staticlib": "rust_orchestrator" }
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": { "build": [], "runtime": [] },
+    "cmake": { "find_packages": [], "extra_include_dirs": [] }
+  }
+}
