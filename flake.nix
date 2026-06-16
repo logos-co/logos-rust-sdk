@@ -11,15 +11,16 @@
       url = "github:logos-co/logos-lidl";
       inputs.logos-nix.follows = "logos-nix";
     };
-    # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
-    # library exports it (it links logos-protocol statically).
-    logos-module-client.url = "github:logos-co/logos-module-client";
+    # The SDK's FFI binds the lp_* C ABI. Out-of-plugin callers link it from
+    # logos-protocol's shared library (liblogos_protocol.{so,dylib}); the pin
+    # is reached via logos-module-builder.inputs.logos-protocol below so the
+    # lp_* ABI matches what the cdylib modules embed.
     # Test-only: module builder + logoscore drive the integration test suite.
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
   };
 
-  outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-client, logos-module-builder, logos-logoscore-cli }:
+  outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-builder, logos-logoscore-cli }:
     let
       mkModule = logos-module-builder.lib.mkLogosModule;
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -123,23 +124,24 @@
 
       # Opaque build support for Rust binaries that call other modules via IPC
       # from OUTSIDE a module plugin (no qt-sdk/protocol link of their own).
-      # Provides extraBuildInputs and a setupHook over logos-module-client,
-      # whose shared library links logos-protocol statically and re-exports
-      # the lp_* C ABI. Modules built on the cdylib path don't need this —
-      # their lp_* resolve against the protocol archive already in the plugin.
+      # Provides extraBuildInputs and a setupHook over logos-protocol's shared
+      # library (liblogos_protocol.{so,dylib}), which exports the lp_* C ABI the
+      # SDK's FFI binds. Sourced from the builder's protocol pin so it matches
+      # the lp_* ABI the cdylib modules embed. Modules built on the cdylib path
+      # don't need this — their lp_* resolve against the protocol archive
+      # already in the plugin.
       lib.callerBuildSupport = nixpkgs.lib.genAttrs systems (system:
         let
-          mc    = logos-module-client.packages.${system}.logos-module-client;
-          mcLib = logos-module-client.packages.${system}.logos-module-client-lib;
+          protocol = logos-module-builder.inputs.logos-protocol.packages.${system}.logos-protocol;
         in
         {
-          extraBuildInputs = [ mcLib ];
+          extraBuildInputs = [ protocol ];
           setupHook = ''
-            export LOGOS_MODULE_CLIENT_ROOT="${mc}"
+            export LOGOS_PROTOCOL_ROOT="${protocol}"
           '';
-          # Path to liblogos_module_client.so — set LD_LIBRARY_PATH to this
+          # Path to liblogos_protocol.{so,dylib} — set LD_LIBRARY_PATH to this
           # in test derivations so subprocesses can find the library.
-          runtimeLibPath = "${mc}/lib";
+          runtimeLibPath = "${protocol}/lib";
         }
       );
 
