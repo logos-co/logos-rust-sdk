@@ -4,6 +4,13 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
+    # The canonical, language-neutral LIDL frontend. lidl-gen reaches its
+    # parser/serializer/validator over the C ABI (lidl_ffi) instead of
+    # reimplementing the grammar; build.rs links the C archives from here.
+    logos-lidl = {
+      url = "github:logos-co/logos-lidl";
+      inputs.logos-nix.follows = "logos-nix";
+    };
     # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
     # library exports it (it links logos-protocol statically). Extraction-chain
     # branch pin — temporary, re-point at master when the qt-split chain merges.
@@ -17,7 +24,7 @@
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/616cb079a5828caecfafd6d4e432519c864e3fb1";
   };
 
-  outputs = inputs@{ self, nixpkgs, logos-nix, logos-module-client, logos-module-builder, logos-logoscore-cli }:
+  outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-client, logos-module-builder, logos-logoscore-cli }:
     let
       mkModule = logos-module-builder.lib.mkLogosModule;
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -59,7 +66,12 @@
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
+          # logos-lidl: the fixture's build script build-depends on lidl-gen,
+          # which now links logos-lidl's C ABI — the archives must be on the
+          # linker path (buildInput) and LOGOS_LIDL_ROOT set for build.rs.
+          buildInputs = [ logos-lidl.packages.${pkgs.system}.logos-lidl ];
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
+          env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${pkgs.system}.logos-lidl}";
           doCheck = false;
         };
 
@@ -97,13 +109,17 @@
       # (--from-rust), generate typed clients / provider scaffolds / Modules
       # aggregates from .lidl — for tooling and doctests that need the
       # generator outside a cargo build script.
-      packages = forAllSystems ({ pkgs, ... }: {
+      packages = forAllSystems ({ pkgs, system, ... }: {
         lidl-gen = pkgs.rustPlatform.buildRustPackage {
           pname = "logos-lidl-gen";
           version = "0.1.0";
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "logos-lidl-gen" ];
+          # logos-lidl: build.rs links its C ABI archives (the binary embeds the
+          # canonical frontend, so the published CLI is self-contained).
+          buildInputs = [ logos-lidl.packages.${system}.logos-lidl ];
+          env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${system}.logos-lidl}";
           doCheck = false;
         };
       });

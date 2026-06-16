@@ -126,8 +126,13 @@ pub fn generate(module: &ModuleDecl) -> String {
             .map(|p| param_to_json(&snake(&p.name), &p.ty))
             .collect();
         let (ret_ty, conv) = return_conv(&m.return_type);
+        // Carry the contract's doc comment onto the generated method.
+        out.push('\n');
+        for line in m.description.lines() {
+            out.push_str(&format!("    /// {}\n", line));
+        }
         out.push_str(&format!(
-            "\n    pub fn {}(&self{}{}) -> Result<{}, LogosError> {{\n\
+            "    pub fn {}(&self{}{}) -> Result<{}, LogosError> {{\n\
              \x20       let args = serde_json::Value::Array(vec![{}]);\n\
              \x20       let value = self.proxy.call_json(\"{}\", &args)?;\n\
              \x20       {}\n\
@@ -178,8 +183,13 @@ pub fn generate(module: &ModuleDecl) -> String {
 
     for e in &module.events {
         let event_struct = format!("{}Event", pascal(&e.name));
+        // Author's event doc first, then the generated subscription notes.
+        out.push('\n');
+        for line in e.description.lines() {
+            out.push_str(&format!("    /// {}\n", line));
+        }
         out.push_str(&format!(
-            "\n    /// Subscribe to the `{}` event. Payload arrives as a JSON array{};\n\
+            "    /// Subscribe to the `{}` event. Payload arrives as a JSON array{};\n\
              \x20   /// decode each received item with [`Self::decode_{}`]. The returned\n\
              \x20   /// subscription owns its client share — move it into a listener\n\
              \x20   /// thread and iterate it; drop it to unsubscribe.\n\
@@ -332,17 +342,17 @@ pub fn generate_deps(deps: &[(String, ModuleDecl)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
+    use crate::parse;
 
     const SAMPLE: &str = r#"
 module calc_module {
   version "1.0.0"
   depends []
-  method add(a: int, b: int) -> int
+  method add(a: int, b: int) -> int description "Add two numbers"
   method describe(name: tstr) -> tstr
   method store(data: bstr) -> bool
   method dump() -> any
-  event resultReady(total: int)
+  event resultReady(total: int) description "Fires when a result is ready"
 }
 "#;
 
@@ -371,6 +381,9 @@ module calc_module {
         assert!(code.contains("pub struct ResultReadyEvent"));
         assert!(code.contains("pub total: i64"));
         assert!(code.contains("pub fn decode_result_ready(ev: &EventData) -> Option<ResultReadyEvent>"));
+        // Contract doc comments are carried onto the generated method/event.
+        assert!(code.contains("/// Add two numbers"));
+        assert!(code.contains("/// Fires when a result is ready"));
     }
 
 

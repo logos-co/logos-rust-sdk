@@ -507,7 +507,7 @@ pub fn generate_provider_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
+    use crate::parse;
 
     const SAMPLE: &str = r#"
 module rust_calc {

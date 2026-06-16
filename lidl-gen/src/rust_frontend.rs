@@ -14,9 +14,9 @@
 //! - Events live on a companion trait named `<Trait>Events` — the Rust
 //!   analog of the C++ `logos_events:` section. Each method is one event
 //!   (return type must be `()`).
-//! - `///` doc comments are not yet carried into the contract (the .lidl
-//!   grammar carries per-module description only, which comes from the
-//!   caller).
+//! - `///` doc comments on a contract/event method become that method's
+//!   `description` (the Rust analog of the C++ impl-header doc capture),
+//!   carried into the `.lidl` and on to the generated client.
 //!
 //! Supported types (the std-convertible LIDL subset): `i64`→int, `u64`→uint,
 //! `f64`→float64, `bool`→bool, `String`/`&str`→tstr, `Vec<u8>`/`&[u8]`→bstr,
@@ -24,6 +24,33 @@
 //! `Result<serde_json::Value, String>`→result, `()`→void (returns only).
 
 use crate::ast::*;
+
+/// Collect a method's `///` doc comment (desugared by syn into `#[doc = "..."]`
+/// attributes) into a single description string, mirroring the C++ impl-header
+/// parser's `joinDocLines`: one line per attribute, leading/trailing blank
+/// lines dropped, joined with `\n`.
+fn doc_from_attrs(attrs: &[syn::Attribute]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        if let syn::Meta::NameValue(nv) = &attr.meta {
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                let line = s.value();
+                // `///` desugars with a leading space; drop exactly one.
+                lines.push(line.strip_prefix(' ').unwrap_or(&line).to_string());
+            }
+        }
+    }
+    while lines.first().map_or(false, |l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
 
 fn snake(name: &str) -> String {
     let mut out = String::new();
@@ -182,6 +209,12 @@ pub fn extract_from_rust(
                     name: f.sig.ident.to_string(),
                     params: signature_to_params(&f.sig)?,
                     return_type,
+                    description: doc_from_attrs(&f.attrs),
+                    // The return-shape flags are re-derived from the LIDL return
+                    // type by logos-lidl when the .lidl is parsed for codegen, so
+                    // they need not be set here (the serializer ignores them).
+                    json_return: false,
+                    result_return: false,
                 });
             }
         } else if ident == events_trait {
@@ -196,6 +229,7 @@ pub fn extract_from_rust(
                 module.events.push(EventDecl {
                     name: f.sig.ident.to_string(),
                     params: signature_to_params(&f.sig)?,
+                    description: doc_from_attrs(&f.attrs),
                 });
             }
         }
@@ -214,6 +248,8 @@ mod tests {
     const SRC: &str = r#"
 /// The calc contract, declared in Rust.
 pub trait RustCalcModule {
+    /// Add two numbers.
+    /// Returns their sum.
     fn add(&mut self, a: i64, b: i64) -> i64;
     fn greet(&mut self, name: String) -> String;
     fn store(&mut self, data: Vec<u8>) -> bool;
@@ -223,6 +259,7 @@ pub trait RustCalcModule {
 }
 
 pub trait RustCalcModuleEvents {
+    /// Fires when the running total changes.
     fn total_changed(&self, total: i64);
 }
 "#;
@@ -241,6 +278,17 @@ pub trait RustCalcModuleEvents {
         assert_eq!(m.events.len(), 1);
         assert_eq!(m.events[0].name, "total_changed");
         assert_eq!(m.events[0].params[0].ty.name, "int");
+    }
+
+    #[test]
+    fn captures_doc_comments_as_descriptions() {
+        let m = extract_from_rust(SRC, "RustCalcModule", None, "1.0.0").unwrap();
+        // Multi-line `///` joined with a newline; blank-trimmed.
+        assert_eq!(m.methods[0].description, "Add two numbers.\nReturns their sum.");
+        // Undocumented method → empty description.
+        assert_eq!(m.methods[1].description, "");
+        // Event docs are captured too.
+        assert_eq!(m.events[0].description, "Fires when the running total changes.");
     }
 
     #[test]
