@@ -4362,6 +4362,32 @@
         "type": "github"
       }
     },
+    "logos-lidl": {
+      "inputs": {
+        "logos-nix": [
+          "logos-nix"
+        ],
+        "nixpkgs": [
+          "logos-lidl",
+          "logos-nix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1781644893,
+        "narHash": "sha256-EjSn54bSCvwLJvwAT+8cfwjaWXsK07JJ3V5yAyMkyVY=",
+        "owner": "logos-co",
+        "repo": "logos-lidl",
+        "rev": "636b06b9f24a993b7f8dc3d31672a9c9634801f7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-lidl",
+        "rev": "636b06b9f24a993b7f8dc3d31672a9c9634801f7",
+        "type": "github"
+      }
+    },
     "logos-logoscore-cli": {
       "inputs": {
         "logos-capability-module": "logos-capability-module",
@@ -47179,6 +47205,7 @@
     },
     "root": {
       "inputs": {
+        "logos-lidl": "logos-lidl",
         "logos-logoscore-cli": "logos-logoscore-cli",
         "logos-module-builder": "logos-module-builder_13",
         "logos-module-client": "logos-module-client_4",

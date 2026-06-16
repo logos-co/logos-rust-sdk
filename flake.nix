@@ -7,8 +7,10 @@
     # The canonical, language-neutral LIDL frontend. lidl-gen reaches its
     # parser/serializer/validator over the C ABI (lidl_ffi) instead of
     # reimplementing the grammar; build.rs links the C archives from here.
+    # Temporary branch pin (descriptions + C ABI) — re-point at master once
+    # logos-lidl lands.
     logos-lidl = {
-      url = "github:logos-co/logos-lidl";
+      url = "github:logos-co/logos-lidl/636b06b9f24a993b7f8dc3d31672a9c9634801f7";
       inputs.logos-nix.follows = "logos-nix";
     };
     # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
