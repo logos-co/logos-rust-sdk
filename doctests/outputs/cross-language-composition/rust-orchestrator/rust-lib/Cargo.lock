@@ -11,7 +11,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "logos-rust-sdk"
 version = "0.2.0"
-source = "git+https://github.com/logos-co/logos-rust-sdk?rev=441b936f2bcb309ea8f42f017f4612c139a97297#441b936f2bcb309ea8f42f017f4612c139a97297"
+source = "git+https://github.com/logos-co/logos-rust-sdk?rev=8b89e562a52218af6beef6fa6e3cfa12ab52e93e#8b89e562a52218af6beef6fa6e3cfa12ab52e93e"
 dependencies = [
  "serde",
  "serde_json",
