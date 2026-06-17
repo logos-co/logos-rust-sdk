@@ -3,7 +3,7 @@
 //! scaffold lidl-gen generates from the .lidl contract at build time; the
 //! author code is just the trait impl plus the install hook.
 
-include!(concat!(env!("OUT_DIR"), "/provider_gen.rs"));
+include!("provider_gen.rs");
 
 #[derive(Default)]
 struct ProviderImpl;

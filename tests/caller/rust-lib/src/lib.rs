@@ -8,7 +8,7 @@
 //! generated `logos_module_accept_token` handshake — the seam the legacy
 //! c-ffi path could not cross.
 
-include!(concat!(env!("OUT_DIR"), "/provider_gen.rs"));
+include!("provider_gen.rs");
 
 use logos_rust_sdk::LogosModuleSDK;
 

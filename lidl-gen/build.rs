@@ -1,21 +1,14 @@
-//! Link logos-lidl's C ABI — only under the `ffi` feature (the default). The
-//! archives' directory comes from `LOGOS_LIDL_ROOT`, which the nix build exports
-//! and which every TARGET-unit compile (the lidl-gen package / CLI, ordinary
-//! library use) sees.
+//! Link logos-lidl's C ABI — the JSON bridge over the canonical frontend that
+//! `src/lidl_ffi.rs` binds. The nix build exports the package prefix as
+//! `LOGOS_LIDL_ROOT`; its `lib/` holds the static archives. `logos_lidl_c`
+//! (the C ABI) depends on the `logos_lidl` core and the C++ standard library.
 //!
-//! Why feature-gated: when this crate is a *build-dependency* under nixpkgs,
-//! CARGO_BUILD_TARGET makes it a HOST unit and keeps env vars / RUSTFLAGS /
-//! input lib dirs out of that host build — so no `-L` can reach the rlib's
-//! bundle of `logos_lidl_c` and the link fails ("could not find native static
-//! library"). Such consumers (the test fixtures) build with
-//! `default-features = false`, pre-parse the `.lidl` to JSON at an outer step,
-//! and use `from_json`; this build script then emits nothing.
+//! These directives propagate to anything that links this crate — including the
+//! lib consumed as a build-dependency (e.g. the test fixtures' build scripts).
+//! Under nix, `logos-lidl` is also a buildInput, so the archives are on the
+//! linker's default search path even where the `-L` below isn't inherited.
 
 fn main() {
-    // No native linking unless the C-ABI frontend is compiled in.
-    if std::env::var_os("CARGO_FEATURE_FFI").is_none() {
-        return;
-    }
     if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }

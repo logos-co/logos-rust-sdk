@@ -40,23 +40,24 @@
           if builtins.length parts < 2 then "0.1.0"
           else builtins.head (builtins.elemAt parts 1);
 
-      # Both test fixtures are Rust crates with a path dep on this repo (and a
-      # build-dep on lidl-gen, which generates the module-impl C ABI scaffold
-      # from the .lidl contract). Assemble the source layout their Cargo.toml
-      # path deps expect and build the staticlib with vendored crates.
+      # Both test fixtures are Rust crates with a path dep on this repo. The Rust
+      # C-ABI scaffold is generated from the .lidl contract HERE, by the prebuilt
+      # logos-lidl-gen CLI, and written into the crate's `src/` as a real source
+      # file the build then compiles.
+      #
+      # Why not generate it in the fixture's own build.rs (as a build-dependency
+      # on lidl-gen)? Under nixpkgs, CARGO_BUILD_TARGET makes a build-dependency a
+      # HOST unit, and lidl-gen's build.rs there cannot link logos-lidl's C ABI:
+      # the host build script sees no LOGOS_LIDL_ROOT / RUSTFLAGS, no
+      # nativeBuildInputs/depsBuildBuild on PATH, and no files written after
+      # unpack (only `src/*.rs` and committed crate files survive into the build).
+      # So the C frontend runs out-of-process in the CLI (it links the archives
+      # fine as a target unit), and only its generated `.rs` output crosses into
+      # the build. This matches how module-builder generates Rust scaffolds.
       mkFixtureRustLib = { pkgs, name, dir }:
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
           version = "0.1.0";
-          # Parse the .lidl into module_ast.json HERE, in the source derivation,
-          # with the prebuilt logos-lidl-gen CLI (it links logos-lidl's C ABI as a
-          # target unit). The JSON is baked next to the .lidl in the main crate's
-          # source so it is read like any other source file. This is the only
-          # mechanism that reaches the fixture's build script under nixpkgs:
-          # CARGO_BUILD_TARGET makes the lidl-gen build-dependency a HOST unit
-          # that can't link the C ABI, and a host build script sees neither custom
-          # env vars, nor nativeBuildInputs/depsBuildBuild on its PATH, nor files
-          # written after unpack — only cargo vars and the crate's own source.
           src = pkgs.runCommand "${name}-rust-src" {} ''
             set -euo pipefail
             mkdir -p $out
@@ -64,18 +65,14 @@
             cp -r ${self} $out/logos-rust-sdk-src
             chmod -R u+w $out/rust-lib
             ${self.packages.${pkgs.system}.lidl-gen}/bin/logos-lidl-gen \
-              $out/rust-lib/*.lidl --to-json -o $out/rust-lib/module_ast.json
-            echo "DIAG-SRC wrote:"; ls -l $out/rust-lib/module_ast.json
+              $out/rust-lib/*.lidl --provider --protocol-version ${protocolVersion} \
+              -o $out/rust-lib/src/provider_gen.rs
           '';
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
-          # lidl-gen is taken with default-features = false (its Cargo.toml in the
-          # fixtures), so the build-dependency links no C ABI; the build script
-          # codegens from module_ast.json via the pure-Rust from_json.
-          env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
 
