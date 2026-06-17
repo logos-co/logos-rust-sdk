@@ -68,12 +68,13 @@
           # build-script executable here) rather than searched-for at rlib compile
           # — the latter needs a `-L native=` path that nixpkgs' CARGO_BUILD_TARGET
           # keeps out of HOST build-dependency compiles (it splits host/target
-          # units, so LOGOS_LIDL_ROOT/RUSTFLAGS never reach them). So logos-lidl
-          # must be a HOST input too: nativeBuildInputs puts its lib dir on the
-          # host cc-wrapper's search path for that build-script-exe link.
+          # units, so LOGOS_LIDL_ROOT/RUSTFLAGS never reach them). The build-script
+          # executable is a *build-platform* artifact, so its link uses the build
+          # cc-wrapper (NIX_LDFLAGS_FOR_BUILD) — populated by depsBuildBuild, not
+          # nativeBuildInputs (tools/PATH) or buildInputs (target NIX_LDFLAGS).
           # buildInputs keeps it for target-unit links; LOGOS_LIDL_ROOT feeds the
           # `-L native=` belt on target-unit compiles.
-          nativeBuildInputs = [ lidlPkg ];
+          depsBuildBuild = [ lidlPkg ];
           buildInputs = [ lidlPkg ];
           env = {
             LOGOS_PROTOCOL_VERSION = protocolVersion;
