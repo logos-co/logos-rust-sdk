@@ -58,17 +58,16 @@
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
-          # Parse the .lidl into module_ast.json HERE, with the prebuilt CLI (it
-          # links logos-lidl's C ABI as a target unit). The fixture's build script
-          # then codegens from that JSON via `from_json` with the C frontend
-          # disabled (default-features = false) — because nixpkgs' CARGO_BUILD_TARGET
-          # makes a build-dependency a HOST unit whose build can't link the C ABI.
-          # module_ast.json lands in the main crate dir (sourceRoot), which (unlike
-          # a path-dependency crate) is preserved intact for the cargo build.
+          # The fixture's build script parses the .lidl by shelling out to the
+          # prebuilt logos-lidl-gen CLI on PATH (it links logos-lidl's C ABI as a
+          # target unit), then codegens from the JSON via this crate's pure-Rust
+          # from_json (the build-dependency is taken with default-features = false,
+          # so it links no C ABI itself — nixpkgs' CARGO_BUILD_TARGET makes a
+          # build-dependency a HOST unit whose build can't link the C archives).
+          # PATH reaches host build scripts (unlike custom env vars / lib dirs),
+          # and the build script writes its JSON to OUT_DIR, so nothing depends on
+          # files surviving in the (re-copied) source tree.
           nativeBuildInputs = [ self.packages.${pkgs.system}.lidl-gen ];
-          preConfigure = ''
-            logos-lidl-gen *.lidl --to-json -o module_ast.json
-          '';
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
