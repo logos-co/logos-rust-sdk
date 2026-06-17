@@ -62,11 +62,19 @@
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
           # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which now links logos-lidl's C ABI — the archives must be on the
-          # linker path (buildInput) and LOGOS_LIDL_ROOT set for build.rs.
+          # which now links logos-lidl's C ABI. lidl-gen's build.rs emits the
+          # `-l static=logos_lidl_c` directive, but rustc resolves `static=`
+          # native libs through its OWN `-L native=` search paths — and a build
+          # script's link-search does not reliably reach a *build-dependency's*
+          # rlib compile (it builds fine on macOS but fails on Linux CI:
+          # "could not find native static library `logos_lidl_c`"). Put the
+          # archive dir on rustc's search path unconditionally via RUSTFLAGS so
+          # the lidl-gen rlib compiles on every platform; keep LOGOS_LIDL_ROOT for
+          # build.rs and the buildInput for the final link.
           buildInputs = [ logos-lidl.packages.${pkgs.system}.logos-lidl ];
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${pkgs.system}.logos-lidl}";
+          env.RUSTFLAGS = "-L native=${logos-lidl.packages.${pkgs.system}.logos-lidl}/lib";
           doCheck = false;
         };
 

@@ -3,6 +3,14 @@ name = "logos-lidl-gen"
 version = "0.1.0"
 edition = "2021"
 description = "LIDL -> Rust codegen backend: typed callers and event subscribers over logos-rust-sdk"
+# Declares that this crate links the logos-lidl native archives (build.rs emits
+# the `-l static=logos_lidl_c`/`logos_lidl`). Idiomatic for a sys-style crate and
+# lets dependents see the `DEP_LOGOS_LIDL_*` metadata. NOTE: the `-L` search path
+# that lets rustc *find* those archives is supplied by the build environment
+# (LOGOS_LIDL_ROOT + the nix builder's RUSTFLAGS), not by Cargo propagation —
+# build-script link-search does not reliably reach a build-dependency's own rlib
+# compile, which is where the test fixtures consume this crate.
+links = "logos_lidl"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
