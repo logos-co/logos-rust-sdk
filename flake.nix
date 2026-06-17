@@ -12,16 +12,11 @@
       inputs.logos-nix.follows = "logos-nix";
     };
     # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
-    # library exports it (it links logos-protocol statically). Extraction-chain
-    # branch pin — temporary, re-point at master when the qt-split chain merges.
-    logos-module-client.url = "github:logos-co/logos-module-client/2bf380e0684c2467796a999fa7e569bb36eb4780";
-    # Test-only: module builder + logoscore are needed for the integration test
-    # suite. The cdylib authoring interface (interface = "cdylib" + codegen.lidl
-    # -> uniform Qt glue over the module-impl C ABI) lives on the builder's
-    # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
-    # pins — re-point at master when the chain merges.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/c849834b9d7b7eff1f94624c9126d7fdb77a3c48";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/616cb079a5828caecfafd6d4e432519c864e3fb1";
+    # library exports it (it links logos-protocol statically).
+    logos-module-client.url = "github:logos-co/logos-module-client";
+    # Test-only: module builder + logoscore drive the integration test suite.
+    logos-module-builder.url = "github:logos-co/logos-module-builder";
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
   };
 
   outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-client, logos-module-builder, logos-logoscore-cli }:
@@ -45,33 +40,35 @@
           if builtins.length parts < 2 then "0.1.0"
           else builtins.head (builtins.elemAt parts 1);
 
-      # Both test fixtures are Rust crates with a path dep on this repo (and a
-      # build-dep on lidl-gen, which generates the module-impl C ABI scaffold
-      # from the .lidl contract). Assemble the source layout their Cargo.toml
-      # path deps expect and build the staticlib with vendored crates.
+      # Both test fixtures are Rust crates with a path dep on this repo. Their
+      # module-impl C-ABI scaffold (`src/provider_gen.rs`) is generated from the
+      # .lidl contract by `logos-lidl-gen --provider` and CHECKED IN — regenerate
+      # with that command if the .lidl changes (see each crate's
+      # provider_gen.rs header).
+      #
+      # Why checked in instead of generated in the fixture's own build.rs (as a
+      # build-dependency on lidl-gen)? Under nixpkgs, CARGO_BUILD_TARGET makes a
+      # build-dependency a HOST unit, and lidl-gen's build.rs there cannot link
+      # logos-lidl's C ABI — the host build script reaches the archives by no
+      # mechanism (no LOGOS_LIDL_ROOT/RUSTFLAGS, nothing on PATH, and
+      # buildRustPackage strips any file the build *generates* into the crate;
+      # only committed source survives). So the C frontend runs out-of-process
+      # (the CLI links the archives fine as a target unit) and its output is
+      # committed. This matches how module-builder ships Rust module scaffolds.
       mkFixtureRustLib = { pkgs, name, dir }:
-        let
+        pkgs.rustPlatform.buildRustPackage {
+          pname = name;
+          version = "0.1.0";
           src = pkgs.runCommand "${name}-rust-src" {} ''
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
           '';
-        in
-        pkgs.rustPlatform.buildRustPackage {
-          pname = name;
-          version = "0.1.0";
-          inherit src;
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
-          # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which now links logos-lidl's C ABI — the archives must be on the
-          # linker path (buildInput) and LOGOS_LIDL_ROOT set for build.rs.
-          buildInputs = [ logos-lidl.packages.${pkgs.system}.logos-lidl ];
-          env.LOGOS_PROTOCOL_VERSION = protocolVersion;
-          env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${pkgs.system}.logos-lidl}";
           doCheck = false;
         };
 
