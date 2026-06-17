@@ -40,33 +40,29 @@
           if builtins.length parts < 2 then "0.1.0"
           else builtins.head (builtins.elemAt parts 1);
 
-      # Both test fixtures are Rust crates with a path dep on this repo. The Rust
-      # C-ABI scaffold is generated from the .lidl contract HERE, by the prebuilt
-      # logos-lidl-gen CLI, and written into the crate's `src/` as a real source
-      # file the build then compiles.
+      # Both test fixtures are Rust crates with a path dep on this repo. Their
+      # module-impl C-ABI scaffold (`src/provider_gen.rs`) is generated from the
+      # .lidl contract by `logos-lidl-gen --provider` and CHECKED IN — regenerate
+      # with that command if the .lidl changes (see each crate's
+      # provider_gen.rs header).
       #
-      # Why not generate it in the fixture's own build.rs (as a build-dependency
-      # on lidl-gen)? Under nixpkgs, CARGO_BUILD_TARGET makes a build-dependency a
-      # HOST unit, and lidl-gen's build.rs there cannot link logos-lidl's C ABI:
-      # the host build script sees no LOGOS_LIDL_ROOT / RUSTFLAGS, no
-      # nativeBuildInputs/depsBuildBuild on PATH, and no files written after
-      # unpack (only `src/*.rs` and committed crate files survive into the build).
-      # So the C frontend runs out-of-process in the CLI (it links the archives
-      # fine as a target unit), and only its generated `.rs` output crosses into
-      # the build. This matches how module-builder generates Rust scaffolds.
+      # Why checked in instead of generated in the fixture's own build.rs (as a
+      # build-dependency on lidl-gen)? Under nixpkgs, CARGO_BUILD_TARGET makes a
+      # build-dependency a HOST unit, and lidl-gen's build.rs there cannot link
+      # logos-lidl's C ABI — the host build script reaches the archives by no
+      # mechanism (no LOGOS_LIDL_ROOT/RUSTFLAGS, nothing on PATH, and
+      # buildRustPackage strips any file the build *generates* into the crate;
+      # only committed source survives). So the C frontend runs out-of-process
+      # (the CLI links the archives fine as a target unit) and its output is
+      # committed. This matches how module-builder ships Rust module scaffolds.
       mkFixtureRustLib = { pkgs, name, dir }:
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
           version = "0.1.0";
           src = pkgs.runCommand "${name}-rust-src" {} ''
-            set -euo pipefail
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
-            chmod -R u+w $out/rust-lib
-            ${self.packages.${pkgs.system}.lidl-gen}/bin/logos-lidl-gen \
-              $out/rust-lib/*.lidl --provider --protocol-version ${protocolVersion} \
-              -o $out/rust-lib/src/provider_gen.rs
           '';
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
