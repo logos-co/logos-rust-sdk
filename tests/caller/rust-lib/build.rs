@@ -16,6 +16,18 @@ fn main() {
     let ast = std::path::Path::new(&manifest).join("module_ast.json");
     println!("cargo:rerun-if-changed={}", ast.display());
 
+    // TEMP DIAG5 (remove before merge): what does the build see in the crate dir?
+    let listing: Vec<_> = std::fs::read_dir(&manifest)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    println!(
+        "cargo:warning=DIAG5 manifest={manifest} ast_exists={} listing={listing:?}",
+        ast.exists()
+    );
+
     let json = std::fs::read_to_string(&ast).expect("read pre-parsed module_ast.json");
     let module = logos_lidl_gen::from_json(&json).expect("parse module AST json");
 

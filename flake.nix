@@ -58,12 +58,14 @@
           # env vars, nor nativeBuildInputs/depsBuildBuild on its PATH, nor files
           # written after unpack — only cargo vars and the crate's own source.
           src = pkgs.runCommand "${name}-rust-src" {} ''
+            set -euo pipefail
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
             chmod -R u+w $out/rust-lib
             ${self.packages.${pkgs.system}.lidl-gen}/bin/logos-lidl-gen \
               $out/rust-lib/*.lidl --to-json -o $out/rust-lib/module_ast.json
+            echo "DIAG-SRC wrote:"; ls -l $out/rust-lib/module_ast.json
           '';
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
