@@ -79,6 +79,12 @@
           env = {
             LOGOS_PROTOCOL_VERSION = protocolVersion;
             LOGOS_LIDL_ROOT = "${lidlPkg}";
+            # The host build-script-exe link (a build-platform rustc→cc→ld
+            # invocation) didn't pick up the archive dir from depsBuildBuild/
+            # buildInputs. GCC honours LIBRARY_PATH for `-l` resolution and the
+            # linker subprocess inherits the derivation env (unlike build scripts,
+            # which cargo isolates), so point it at logos-lidl's lib dir.
+            LIBRARY_PATH = "${lidlPkg}/lib";
           };
           doCheck = false;
         };
