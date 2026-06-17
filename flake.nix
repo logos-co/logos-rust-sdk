@@ -48,30 +48,31 @@
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
           version = "0.1.0";
+          # Parse the .lidl into module_ast.json HERE, in the source derivation,
+          # with the prebuilt logos-lidl-gen CLI (it links logos-lidl's C ABI as a
+          # target unit). The JSON is baked next to the .lidl in the main crate's
+          # source so it is read like any other source file. This is the only
+          # mechanism that reaches the fixture's build script under nixpkgs:
+          # CARGO_BUILD_TARGET makes the lidl-gen build-dependency a HOST unit
+          # that can't link the C ABI, and a host build script sees neither custom
+          # env vars, nor nativeBuildInputs/depsBuildBuild on its PATH, nor files
+          # written after unpack — only cargo vars and the crate's own source.
           src = pkgs.runCommand "${name}-rust-src" {} ''
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
+            chmod -R u+w $out/rust-lib
+            ${self.packages.${pkgs.system}.lidl-gen}/bin/logos-lidl-gen \
+              $out/rust-lib/*.lidl --to-json -o $out/rust-lib/module_ast.json
           '';
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
-          # The fixture's build script parses the .lidl by shelling out to the
-          # prebuilt logos-lidl-gen CLI on PATH (it links logos-lidl's C ABI as a
-          # target unit), then codegens from the JSON via this crate's pure-Rust
-          # from_json (the build-dependency is taken with default-features = false,
-          # so it links no C ABI itself — nixpkgs' CARGO_BUILD_TARGET makes a
-          # build-dependency a HOST unit whose build can't link the C archives).
-          # PATH reaches host build scripts (unlike custom env vars / lib dirs),
-          # and the build script writes its JSON to OUT_DIR, so nothing depends on
-          # files surviving in the (re-copied) source tree.
-          nativeBuildInputs = [ self.packages.${pkgs.system}.lidl-gen ];
-          # The build script *executes* the CLI (a build→build tool), so it must
-          # also be in depsBuildBuild for its bin dir to be on the build script's
-          # PATH under strictDeps on Linux.
-          depsBuildBuild = [ self.packages.${pkgs.system}.lidl-gen ];
+          # lidl-gen is taken with default-features = false (its Cargo.toml in the
+          # fixtures), so the build-dependency links no C ABI; the build script
+          # codegens from module_ast.json via the pure-Rust from_json.
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
