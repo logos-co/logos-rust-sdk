@@ -21,6 +21,12 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ast = Path::new(&out_dir).join("module_ast.json");
 
+    // TEMP DIAG4 (remove before merge): is the CLI on the build script's PATH?
+    let path = std::env::var("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&path)
+        .find(|d| d.join("logos-lidl-gen").exists());
+    println!("cargo:warning=DIAG4 logos-lidl-gen on PATH: {found:?}; PATH={path}");
+
     let status = Command::new("logos-lidl-gen")
         .arg(&lidl)
         .arg("--to-json")

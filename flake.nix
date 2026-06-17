@@ -68,6 +68,10 @@
           # and the build script writes its JSON to OUT_DIR, so nothing depends on
           # files surviving in the (re-copied) source tree.
           nativeBuildInputs = [ self.packages.${pkgs.system}.lidl-gen ];
+          # The build script *executes* the CLI (a build→build tool), so it must
+          # also be in depsBuildBuild for its bin dir to be on the build script's
+          # PATH under strictDeps on Linux.
+          depsBuildBuild = [ self.packages.${pkgs.system}.lidl-gen ];
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
