@@ -63,27 +63,22 @@
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
           # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which links logos-lidl's C ABI (build.rs emits `-l static=logos_lidl_c`,
-          # and `-L native=$LOGOS_LIDL_ROOT/lib` so rustc can resolve it).
-          # nixpkgs sets CARGO_BUILD_TARGET, so cargo splits host vs target units
-          # and neither the `env` vars below nor RUSTFLAGS (target-only, even when
-          # keyed by triple) reach a *build-dependency's* build script — it runs as
-          # a HOST unit. lidl-gen's build.rs then saw LOGOS_LIDL_ROOT=NotPresent,
-          # emitted no `-L`, and its rlib failed on Linux CI with "could not find
-          # native static library `logos_lidl_c`". Cargo's `[env]` config table is
-          # NOT host/target-split — it injects env vars into every build script —
-          # so write LOGOS_LIDL_ROOT there (force, after cargoSetupHook) to feed the
-          # host build-dependency's build.rs. The plain `env` entry still covers
-          # target-unit compiles.
+          # which links logos-lidl's C ABI. lidl-gen's build.rs uses the `-bundle`
+          # modifier so the archives are resolved at the *final link* (the host
+          # build-script executable here) rather than searched-for at rlib compile
+          # — the latter needs a `-L native=` path that nixpkgs' CARGO_BUILD_TARGET
+          # keeps out of HOST build-dependency compiles (it splits host/target
+          # units, so LOGOS_LIDL_ROOT/RUSTFLAGS never reach them). So logos-lidl
+          # must be a HOST input too: nativeBuildInputs puts its lib dir on the
+          # host cc-wrapper's search path for that build-script-exe link.
+          # buildInputs keeps it for target-unit links; LOGOS_LIDL_ROOT feeds the
+          # `-L native=` belt on target-unit compiles.
+          nativeBuildInputs = [ lidlPkg ];
           buildInputs = [ lidlPkg ];
           env = {
             LOGOS_PROTOCOL_VERSION = protocolVersion;
             LOGOS_LIDL_ROOT = "${lidlPkg}";
           };
-          postConfigure = ''
-            mkdir -p .cargo
-            printf '\n[env]\nLOGOS_LIDL_ROOT = { value = "%s", force = true }\n' "${lidlPkg}" >> .cargo/config.toml
-          '';
           doCheck = false;
         };
 

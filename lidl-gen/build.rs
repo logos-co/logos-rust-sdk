@@ -3,32 +3,27 @@
 //! `LOGOS_LIDL_ROOT`; its `lib/` holds the static archives. `logos_lidl_c`
 //! (the C ABI) depends on the `logos_lidl` core and the C++ standard library.
 //!
-//! rustc resolves `static=` native libs through its own `-L native=` search
-//! paths (not the C linker's default paths), so the directory holding the
-//! archives must be on rustc's search path at every compile that links this
-//! crate — including the rlib compile when it is a *build-dependency* (the test
-//! fixtures build-depend on it). See flake.nix mkFixtureRustLib for how that
-//! path reaches host build-dependency compiles under nix.
+//! The archives are linked with the `-bundle` modifier so they are NOT bundled
+//! into this crate's rlib: rustc would otherwise have to *find* `logos_lidl_c.a`
+//! at rlib-compile time (via a `-L native=` search path), which fails when this
+//! crate is consumed as a *build-dependency* (a HOST unit) under nixpkgs —
+//! CARGO_BUILD_TARGET keeps LOGOS_LIDL_ROOT and RUSTFLAGS out of host build
+//! scripts, so no search path is available there. With `-bundle` the requirement
+//! defers to the final link of whatever includes this crate (e.g. the test
+//! fixtures' build-script executable), where nix's cc-wrapper resolves it from
+//! logos-lidl in nativeBuildInputs/buildInputs. The `-L native=` below (emitted
+//! when LOGOS_LIDL_ROOT is visible, i.e. target-unit compiles) is a belt for
+//! that final link.
 
 fn main() {
-    // The `-L native=` search path comes from LOGOS_LIDL_ROOT when this build
-    // script can see it (every TARGET-unit compile: the lidl-gen package, the
-    // published CLI). When lidl-gen is consumed as a *build-dependency* (a HOST
-    // unit), nixpkgs' CARGO_BUILD_TARGET keeps this env var out of the host
-    // build-script environment, so the search path is supplied by the nix builder
-    // via CARGO_TARGET_<triple>_RUSTFLAGS instead (see flake.nix mkFixtureRustLib).
-    // TEMP DIAG (remove before merge): confirm the [env] config feeds the host
-    // build-dependency build script.
-    println!(
-        "cargo:warning=DIAG2 lidl-gen build.rs: LOGOS_LIDL_ROOT={:?}",
-        std::env::var("LOGOS_LIDL_ROOT")
-    );
     if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }
+    // `-bundle`: don't copy the archive into this rlib (see module docs) — defer
+    // the link to the final artifact, where the cc-wrapper supplies the path.
     // Order matters for static linking: the C ABI uses the core's symbols.
-    println!("cargo:rustc-link-lib=static=logos_lidl_c");
-    println!("cargo:rustc-link-lib=static=logos_lidl");
+    println!("cargo:rustc-link-lib=static:-bundle=logos_lidl_c");
+    println!("cargo:rustc-link-lib=static:-bundle=logos_lidl");
     // logos_lidl_c is C++ (uses nlohmann/json) — pull in the C++ runtime.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "macos" || target_os == "ios" {
