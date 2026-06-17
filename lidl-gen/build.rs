@@ -3,39 +3,20 @@
 //! `LOGOS_LIDL_ROOT`; its `lib/` holds the static archives. `logos_lidl_c`
 //! (the C ABI) depends on the `logos_lidl` core and the C++ standard library.
 //!
-//! These directives propagate to anything that links this crate — including the
-//! lib consumed as a build-dependency (e.g. the test fixtures' build scripts).
-//! Under nix, `logos-lidl` is also a buildInput, so the archives are on the
-//! linker's default search path even where the `-L` below isn't inherited.
+//! rustc resolves `static=` native libs through its own `-L native=` search
+//! paths (not the C linker's default paths), so the directory holding the
+//! archives must be on rustc's search path at every compile that links this
+//! crate — including the rlib compile when it is a *build-dependency* (the test
+//! fixtures build-depend on it). See flake.nix mkFixtureRustLib for how that
+//! path reaches host build-dependency compiles under nix.
 
 fn main() {
-    // --- TEMP DIAGNOSTIC (remove before merge) ---------------------------------
-    // Determine why the ubuntu ipc-test fixture build cannot find logos_lidl_c
-    // when lidl-gen is consumed as a *build-dependency* (host unit). Report the
-    // env + archive presence loudly; panic if the env/archive is missing so the
-    // message is unmissable in CI even though build-dep build-script warnings are
-    // normally suppressed.
-    let diag_root = std::env::var("LOGOS_LIDL_ROOT");
-    let diag_host = std::env::var("HOST").unwrap_or_default();
-    let diag_target = std::env::var("TARGET").unwrap_or_default();
-    let diag_a = diag_root
-        .as_deref()
-        .ok()
-        .map(|r| std::path::Path::new(r).join("lib/liblogos_lidl_c.a"));
-    let diag_exists = diag_a.as_ref().map(|p| p.exists()).unwrap_or(false);
-    println!(
-        "cargo:warning=DIAG lidl-gen build.rs: LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target} liblogos_lidl_c.a_exists={diag_exists}"
-    );
-    eprintln!(
-        "DIAG-STDERR lidl-gen build.rs: LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target} liblogos_lidl_c.a_exists={diag_exists}"
-    );
-    if !diag_exists {
-        panic!(
-            "DIAG lidl-gen build.rs: cannot see logos_lidl_c archive — LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target}"
-        );
-    }
-    // --- end diagnostic --------------------------------------------------------
-
+    // The `-L native=` search path comes from LOGOS_LIDL_ROOT when this build
+    // script can see it (every TARGET-unit compile: the lidl-gen package, the
+    // published CLI). When lidl-gen is consumed as a *build-dependency* (a HOST
+    // unit), nixpkgs' CARGO_BUILD_TARGET keeps this env var out of the host
+    // build-script environment, so the search path is supplied by the nix builder
+    // via CARGO_TARGET_<triple>_RUSTFLAGS instead (see flake.nix mkFixtureRustLib).
     if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }

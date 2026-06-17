@@ -51,6 +51,19 @@
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
           '';
+          lidlPkg = logos-lidl.packages.${pkgs.system}.logos-lidl;
+          # Cargo keys rustflags by the *compilation target triple*. nixpkgs sets
+          # CARGO_BUILD_TARGET, which makes cargo split host vs target units and
+          # keeps plain RUSTFLAGS (and the `env` vars build.rs reads) out of HOST
+          # build-dependency compiles — that's why the fixtures' build-dep on
+          # lidl-gen failed on Linux CI with "could not find native static library
+          # `logos_lidl_c`": its build.rs ran as a host unit, never saw
+          # LOGOS_LIDL_ROOT, and emitted no `-L`. The triple-keyed flags var DOES
+          # reach host units (target-applies-to-host defaults true, host==target
+          # here), so it supplies the search path to lidl-gen's rlib compile on
+          # every platform.
+          hostTriple = pkgs.stdenv.hostPlatform.rust.rustcTarget;
+          rustflagsEnv = "CARGO_TARGET_${pkgs.lib.toUpper (builtins.replaceStrings [ "-" "." ] [ "_" "_" ] hostTriple)}_RUSTFLAGS";
         in
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
@@ -62,19 +75,16 @@
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
           # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which now links logos-lidl's C ABI. lidl-gen's build.rs emits the
-          # `-l static=logos_lidl_c` directive, but rustc resolves `static=`
-          # native libs through its OWN `-L native=` search paths — and a build
-          # script's link-search does not reliably reach a *build-dependency's*
-          # rlib compile (it builds fine on macOS but fails on Linux CI:
-          # "could not find native static library `logos_lidl_c`"). Put the
-          # archive dir on rustc's search path unconditionally via RUSTFLAGS so
-          # the lidl-gen rlib compiles on every platform; keep LOGOS_LIDL_ROOT for
-          # build.rs and the buildInput for the final link.
-          buildInputs = [ logos-lidl.packages.${pkgs.system}.logos-lidl ];
-          env.LOGOS_PROTOCOL_VERSION = protocolVersion;
-          env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${pkgs.system}.logos-lidl}";
-          env.RUSTFLAGS = "-L native=${logos-lidl.packages.${pkgs.system}.logos-lidl}/lib";
+          # which links logos-lidl's C ABI (build.rs emits `-l static=logos_lidl_c`).
+          # buildInput puts the archive on the final-link path; LOGOS_LIDL_ROOT lets
+          # build.rs emit `-L` for target units; the triple-keyed RUSTFLAGS supplies
+          # the same `-L` to the host build-dependency rlib compile (see above).
+          buildInputs = [ lidlPkg ];
+          env = {
+            LOGOS_PROTOCOL_VERSION = protocolVersion;
+            LOGOS_LIDL_ROOT = "${lidlPkg}";
+            ${rustflagsEnv} = "-L native=${lidlPkg}/lib";
+          };
           doCheck = false;
         };
 
