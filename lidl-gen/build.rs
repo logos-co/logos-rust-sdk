@@ -17,6 +17,12 @@ fn main() {
     // unit), nixpkgs' CARGO_BUILD_TARGET keeps this env var out of the host
     // build-script environment, so the search path is supplied by the nix builder
     // via CARGO_TARGET_<triple>_RUSTFLAGS instead (see flake.nix mkFixtureRustLib).
+    // TEMP DIAG (remove before merge): confirm the [env] config feeds the host
+    // build-dependency build script.
+    println!(
+        "cargo:warning=DIAG2 lidl-gen build.rs: LOGOS_LIDL_ROOT={:?}",
+        std::env::var("LOGOS_LIDL_ROOT")
+    );
     if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }

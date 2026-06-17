@@ -52,18 +52,6 @@
             cp -r ${self} $out/logos-rust-sdk-src
           '';
           lidlPkg = logos-lidl.packages.${pkgs.system}.logos-lidl;
-          # Cargo keys rustflags by the *compilation target triple*. nixpkgs sets
-          # CARGO_BUILD_TARGET, which makes cargo split host vs target units and
-          # keeps plain RUSTFLAGS (and the `env` vars build.rs reads) out of HOST
-          # build-dependency compiles — that's why the fixtures' build-dep on
-          # lidl-gen failed on Linux CI with "could not find native static library
-          # `logos_lidl_c`": its build.rs ran as a host unit, never saw
-          # LOGOS_LIDL_ROOT, and emitted no `-L`. The triple-keyed flags var DOES
-          # reach host units (target-applies-to-host defaults true, host==target
-          # here), so it supplies the search path to lidl-gen's rlib compile on
-          # every platform.
-          hostTriple = pkgs.stdenv.hostPlatform.rust.rustcTarget;
-          rustflagsEnv = "CARGO_TARGET_${pkgs.lib.toUpper (builtins.replaceStrings [ "-" "." ] [ "_" "_" ] hostTriple)}_RUSTFLAGS";
         in
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
@@ -75,16 +63,27 @@
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
           # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which links logos-lidl's C ABI (build.rs emits `-l static=logos_lidl_c`).
-          # buildInput puts the archive on the final-link path; LOGOS_LIDL_ROOT lets
-          # build.rs emit `-L` for target units; the triple-keyed RUSTFLAGS supplies
-          # the same `-L` to the host build-dependency rlib compile (see above).
+          # which links logos-lidl's C ABI (build.rs emits `-l static=logos_lidl_c`,
+          # and `-L native=$LOGOS_LIDL_ROOT/lib` so rustc can resolve it).
+          # nixpkgs sets CARGO_BUILD_TARGET, so cargo splits host vs target units
+          # and neither the `env` vars below nor RUSTFLAGS (target-only, even when
+          # keyed by triple) reach a *build-dependency's* build script — it runs as
+          # a HOST unit. lidl-gen's build.rs then saw LOGOS_LIDL_ROOT=NotPresent,
+          # emitted no `-L`, and its rlib failed on Linux CI with "could not find
+          # native static library `logos_lidl_c`". Cargo's `[env]` config table is
+          # NOT host/target-split — it injects env vars into every build script —
+          # so write LOGOS_LIDL_ROOT there (force, after cargoSetupHook) to feed the
+          # host build-dependency's build.rs. The plain `env` entry still covers
+          # target-unit compiles.
           buildInputs = [ lidlPkg ];
           env = {
             LOGOS_PROTOCOL_VERSION = protocolVersion;
             LOGOS_LIDL_ROOT = "${lidlPkg}";
-            ${rustflagsEnv} = "-L native=${lidlPkg}/lib";
           };
+          postConfigure = ''
+            mkdir -p .cargo
+            printf '\n[env]\nLOGOS_LIDL_ROOT = { value = "%s", force = true }\n' "${lidlPkg}" >> .cargo/config.toml
+          '';
           doCheck = false;
         };
 
