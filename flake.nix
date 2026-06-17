@@ -12,16 +12,11 @@
       inputs.logos-nix.follows = "logos-nix";
     };
     # The SDK's FFI binds the lp_* C ABI; the chain logos-module-client shared
-    # library exports it (it links logos-protocol statically). Extraction-chain
-    # branch pin — temporary, re-point at master when the qt-split chain merges.
-    logos-module-client.url = "github:logos-co/logos-module-client/2bf380e0684c2467796a999fa7e569bb36eb4780";
-    # Test-only: module builder + logoscore are needed for the integration test
-    # suite. The cdylib authoring interface (interface = "cdylib" + codegen.lidl
-    # -> uniform Qt glue over the module-impl C ABI) lives on the builder's
-    # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
-    # pins — re-point at master when the chain merges.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/c849834b9d7b7eff1f94624c9126d7fdb77a3c48";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/616cb079a5828caecfafd6d4e432519c864e3fb1";
+    # library exports it (it links logos-protocol statically).
+    logos-module-client.url = "github:logos-co/logos-module-client";
+    # Test-only: module builder + logoscore drive the integration test suite.
+    logos-module-builder.url = "github:logos-co/logos-module-builder";
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
   };
 
   outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-client, logos-module-builder, logos-logoscore-cli }:
