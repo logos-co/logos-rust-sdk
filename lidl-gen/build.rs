@@ -9,6 +9,33 @@
 //! linker's default search path even where the `-L` below isn't inherited.
 
 fn main() {
+    // --- TEMP DIAGNOSTIC (remove before merge) ---------------------------------
+    // Determine why the ubuntu ipc-test fixture build cannot find logos_lidl_c
+    // when lidl-gen is consumed as a *build-dependency* (host unit). Report the
+    // env + archive presence loudly; panic if the env/archive is missing so the
+    // message is unmissable in CI even though build-dep build-script warnings are
+    // normally suppressed.
+    let diag_root = std::env::var("LOGOS_LIDL_ROOT");
+    let diag_host = std::env::var("HOST").unwrap_or_default();
+    let diag_target = std::env::var("TARGET").unwrap_or_default();
+    let diag_a = diag_root
+        .as_deref()
+        .ok()
+        .map(|r| std::path::Path::new(r).join("lib/liblogos_lidl_c.a"));
+    let diag_exists = diag_a.as_ref().map(|p| p.exists()).unwrap_or(false);
+    println!(
+        "cargo:warning=DIAG lidl-gen build.rs: LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target} liblogos_lidl_c.a_exists={diag_exists}"
+    );
+    eprintln!(
+        "DIAG-STDERR lidl-gen build.rs: LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target} liblogos_lidl_c.a_exists={diag_exists}"
+    );
+    if !diag_exists {
+        panic!(
+            "DIAG lidl-gen build.rs: cannot see logos_lidl_c archive — LOGOS_LIDL_ROOT={diag_root:?} HOST={diag_host} TARGET={diag_target}"
+        );
+    }
+    // --- end diagnostic --------------------------------------------------------
+
     if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }
