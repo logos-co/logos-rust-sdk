@@ -1,29 +1,29 @@
 //! Link logos-lidl's C ABI — the JSON bridge over the canonical frontend that
-//! `src/lidl_ffi.rs` binds. The nix build exports the package prefix as
-//! `LOGOS_LIDL_ROOT`; its `lib/` holds the static archives. `logos_lidl_c`
-//! (the C ABI) depends on the `logos_lidl` core and the C++ standard library.
+//! `src/lidl_ffi.rs` binds. `logos_lidl_c` (the C ABI) depends on the
+//! `logos_lidl` core and the C++ standard library; both are static archives.
 //!
-//! The archives are linked with the `-bundle` modifier so they are NOT bundled
-//! into this crate's rlib: rustc would otherwise have to *find* `logos_lidl_c.a`
-//! at rlib-compile time (via a `-L native=` search path), which fails when this
-//! crate is consumed as a *build-dependency* (a HOST unit) under nixpkgs —
-//! CARGO_BUILD_TARGET keeps LOGOS_LIDL_ROOT and RUSTFLAGS out of host build
-//! scripts, so no search path is available there. With `-bundle` the requirement
-//! defers to the final link of whatever includes this crate (e.g. the test
-//! fixtures' build-script executable), where nix's cc-wrapper resolves it from
-//! logos-lidl in nativeBuildInputs/buildInputs. The `-L native=` below (emitted
-//! when LOGOS_LIDL_ROOT is visible, i.e. target-unit compiles) is a belt for
-//! that final link.
+//! Finding the archives' directory is the tricky part under nix. The obvious
+//! `LOGOS_LIDL_ROOT` (the package prefix) works for every TARGET-unit compile,
+//! but nixpkgs sets CARGO_BUILD_TARGET, so cargo treats this crate as a HOST
+//! unit when it is a *build-dependency* (the test fixtures build-depend on it to
+//! generate their scaffold) and keeps env vars / RUSTFLAGS out of that host
+//! build script — `LOGOS_LIDL_ROOT` is then unset and no `-L` gets emitted.
+//! `CARGO_MANIFEST_DIR`, by contrast, is handed to EVERY build script, host or
+//! target. So the nix builder copies the archives into `<crate>/nix-lib` (see
+//! flake.nix mkFixtureRustLib) and we search there first; the LOGOS_LIDL_ROOT
+//! path remains the fallback for ordinary (target-unit / standalone) builds.
 
 fn main() {
-    if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let nix_lib = std::path::Path::new(&manifest).join("nix-lib");
+    if nix_lib.join("liblogos_lidl_c.a").exists() {
+        println!("cargo:rustc-link-search=native={}", nix_lib.display());
+    } else if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
         println!("cargo:rustc-link-search=native={root}/lib");
     }
-    // `-bundle`: don't copy the archive into this rlib (see module docs) — defer
-    // the link to the final artifact, where the cc-wrapper supplies the path.
     // Order matters for static linking: the C ABI uses the core's symbols.
-    println!("cargo:rustc-link-lib=static:-bundle=logos_lidl_c");
-    println!("cargo:rustc-link-lib=static:-bundle=logos_lidl");
+    println!("cargo:rustc-link-lib=static=logos_lidl_c");
+    println!("cargo:rustc-link-lib=static=logos_lidl");
     // logos_lidl_c is C++ (uses nlohmann/json) — pull in the C++ runtime.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "macos" || target_os == "ios" {

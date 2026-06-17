@@ -46,12 +46,27 @@
       # path deps expect and build the staticlib with vendored crates.
       mkFixtureRustLib = { pkgs, name, dir }:
         let
+          lidlPkg = logos-lidl.packages.${pkgs.system}.logos-lidl;
+          # The fixture's build script build-depends on lidl-gen, whose build.rs
+          # links logos-lidl's C ABI. nixpkgs sets CARGO_BUILD_TARGET, so cargo
+          # treats lidl-gen as a HOST unit there and keeps env vars / RUSTFLAGS
+          # out of its build script — LOGOS_LIDL_ROOT is unset, so lidl-gen's
+          # build.rs cannot emit a `-L native=` and the rlib bundle of
+          # logos_lidl_c fails ("could not find native static library"). Every
+          # other injection route (RUSTFLAGS, triple-keyed RUSTFLAGS, cargo [env],
+          # `-bundle` + nativeBuildInputs/depsBuildBuild/LIBRARY_PATH) is likewise
+          # defeated by that host/target isolation. The one path cargo always
+          # gives a build script is CARGO_MANIFEST_DIR, so copy the archives into
+          # the lidl-gen crate dir and let its build.rs search there.
           src = pkgs.runCommand "${name}-rust-src" {} ''
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
+            chmod -R u+w $out/logos-rust-sdk-src
+            mkdir -p $out/logos-rust-sdk-src/lidl-gen/nix-lib
+            cp ${lidlPkg}/lib/liblogos_lidl_c.a ${lidlPkg}/lib/liblogos_lidl.a \
+              $out/logos-rust-sdk-src/lidl-gen/nix-lib/
           '';
-          lidlPkg = logos-lidl.packages.${pkgs.system}.logos-lidl;
         in
         pkgs.rustPlatform.buildRustPackage {
           pname = name;
@@ -62,30 +77,7 @@
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
-          # logos-lidl: the fixture's build script build-depends on lidl-gen,
-          # which links logos-lidl's C ABI. lidl-gen's build.rs uses the `-bundle`
-          # modifier so the archives are resolved at the *final link* (the host
-          # build-script executable here) rather than searched-for at rlib compile
-          # — the latter needs a `-L native=` path that nixpkgs' CARGO_BUILD_TARGET
-          # keeps out of HOST build-dependency compiles (it splits host/target
-          # units, so LOGOS_LIDL_ROOT/RUSTFLAGS never reach them). The build-script
-          # executable is a *build-platform* artifact, so its link uses the build
-          # cc-wrapper (NIX_LDFLAGS_FOR_BUILD) — populated by depsBuildBuild, not
-          # nativeBuildInputs (tools/PATH) or buildInputs (target NIX_LDFLAGS).
-          # buildInputs keeps it for target-unit links; LOGOS_LIDL_ROOT feeds the
-          # `-L native=` belt on target-unit compiles.
-          depsBuildBuild = [ lidlPkg ];
-          buildInputs = [ lidlPkg ];
-          env = {
-            LOGOS_PROTOCOL_VERSION = protocolVersion;
-            LOGOS_LIDL_ROOT = "${lidlPkg}";
-            # The host build-script-exe link (a build-platform rustc→cc→ld
-            # invocation) didn't pick up the archive dir from depsBuildBuild/
-            # buildInputs. GCC honours LIBRARY_PATH for `-l` resolution and the
-            # linker subprocess inherits the derivation env (unlike build scripts,
-            # which cargo isolates), so point it at logos-lidl's lib dir.
-            LIBRARY_PATH = "${lidlPkg}/lib";
-          };
+          env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
 
