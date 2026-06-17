@@ -16,6 +16,16 @@
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let nix_lib = std::path::Path::new(&manifest).join("nix-lib");
+    // TEMP DIAG3 (remove before merge): why ubuntu's host build-dep rlib can't
+    // find the archive even though darwin's can.
+    println!(
+        "cargo:warning=DIAG3 manifest={manifest} nix_lib_exists={} a_exists={} listing={:?}",
+        nix_lib.exists(),
+        nix_lib.join("liblogos_lidl_c.a").exists(),
+        std::fs::read_dir(std::path::Path::new(&manifest))
+            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect::<Vec<_>>())
+            .unwrap_or_else(|e| vec![format!("readdir-err: {e}")])
+    );
     if nix_lib.join("liblogos_lidl_c.a").exists() {
         println!("cargo:rustc-link-search=native={}", nix_lib.display());
     } else if let Ok(root) = std::env::var("LOGOS_LIDL_ROOT") {
