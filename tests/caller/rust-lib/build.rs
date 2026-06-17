@@ -2,14 +2,20 @@
 //! trait, RustModuleContext) from the .lidl contract — the Rust half of the
 //! cdylib authoring path. The Qt glue half is generated from the same
 //! contract by logos-module-builder (interface = "cdylib").
+//!
+//! The `.lidl` is parsed at an outer (nix) build step into `module_ast.json`
+//! with `logos-lidl-gen --to-json`; this build script reconstructs the AST via
+//! `from_json` and runs the pure-Rust codegen. lidl-gen is depended on with
+//! `default-features = false` so it does not link logos-lidl's C ABI here —
+//! that link cannot be satisfied for a HOST build-dependency under nixpkgs.
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let lidl = std::path::Path::new(&manifest).join("sdk_test_caller_module.lidl");
-    println!("cargo:rerun-if-changed={}", lidl.display());
+    let ast = std::path::Path::new(&manifest).join("module_ast.json");
+    println!("cargo:rerun-if-changed={}", ast.display());
 
-    let source = std::fs::read_to_string(&lidl).expect("read .lidl contract");
-    let module = logos_lidl_gen::parse(&source).expect("parse .lidl contract");
+    let json = std::fs::read_to_string(&ast).expect("read pre-parsed module_ast.json");
+    let module = logos_lidl_gen::from_json(&json).expect("parse module AST json");
 
     // The logos-protocol semver this module is built against (surfaced via
     // logos_module_get_protocol_version). The nix build exports it; plain

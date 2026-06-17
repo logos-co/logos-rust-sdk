@@ -75,6 +75,39 @@ fn main() {
         return;
     }
 
+    // ── LIDL → AST JSON ───────────────────────────────────────────────────
+    // Parse a `.lidl` with the C-ABI frontend and emit the ModuleDecl as JSON.
+    // Lets a downstream build script reconstruct the AST with `from_json`
+    // (no `ffi` feature) when it cannot link the C frontend itself.
+    if args.iter().any(|a| a == "--to-json") {
+        let source = match std::fs::read_to_string(&args[1]) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", &args[1], e);
+                std::process::exit(1);
+            }
+        };
+        let module = match logos_lidl_gen::parse(&source) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Failed to parse {}: {}", &args[1], e);
+                std::process::exit(2);
+            }
+        };
+        let json = serde_json::to_string_pretty(&module).expect("serialize ModuleDecl to JSON");
+        match flag_value(&args, "-o") {
+            Some(path) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("Failed to write {}: {}", path, e);
+                    std::process::exit(3);
+                }
+                println!("Wrote {} (AST JSON)", path);
+            }
+            None => std::io::stdout().write_all(json.as_bytes()).unwrap(),
+        }
+        return;
+    }
+
     let input = &args[1];
     let provider = args.iter().any(|a| a == "--provider");
     // Rust-first authoring: the trait is declared in the crate (the .lidl was

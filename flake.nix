@@ -45,38 +45,30 @@
       # from the .lidl contract). Assemble the source layout their Cargo.toml
       # path deps expect and build the staticlib with vendored crates.
       mkFixtureRustLib = { pkgs, name, dir }:
-        let
-          lidlPkg = logos-lidl.packages.${pkgs.system}.logos-lidl;
-          # The fixture's build script build-depends on lidl-gen, whose build.rs
-          # links logos-lidl's C ABI. nixpkgs sets CARGO_BUILD_TARGET, so cargo
-          # treats lidl-gen as a HOST unit there and keeps env vars / RUSTFLAGS
-          # out of its build script — LOGOS_LIDL_ROOT is unset, so lidl-gen's
-          # build.rs cannot emit a `-L native=` and the rlib bundle of
-          # logos_lidl_c fails ("could not find native static library"). Every
-          # other injection route (RUSTFLAGS, triple-keyed RUSTFLAGS, cargo [env],
-          # `-bundle` + nativeBuildInputs/depsBuildBuild/LIBRARY_PATH) is likewise
-          # defeated by that host/target isolation. The one path cargo always
-          # gives a build script is CARGO_MANIFEST_DIR, so copy the archives into
-          # the lidl-gen crate dir and let its build.rs search there.
+        pkgs.rustPlatform.buildRustPackage {
+          pname = name;
+          version = "0.1.0";
           src = pkgs.runCommand "${name}-rust-src" {} ''
             mkdir -p $out
             cp -r ${dir} $out/rust-lib
             cp -r ${self} $out/logos-rust-sdk-src
-            chmod -R u+w $out/logos-rust-sdk-src
-            mkdir -p $out/logos-rust-sdk-src/lidl-gen/nix-lib
-            cp ${lidlPkg}/lib/liblogos_lidl_c.a ${lidlPkg}/lib/liblogos_lidl.a \
-              $out/logos-rust-sdk-src/lidl-gen/nix-lib/
           '';
-        in
-        pkgs.rustPlatform.buildRustPackage {
-          pname = name;
-          version = "0.1.0";
-          inherit src;
           sourceRoot = "${name}-rust-src/rust-lib";
           # importCargoLock (fetchurl-based) instead of cargoHash: crates.io
           # 403s fetchCargoVendor's Python fetcher; Nix's own downloader is
           # accepted. Only bites in CI on a cachix miss.
           cargoLock.lockFile = "${dir}/Cargo.lock";
+          # Parse the .lidl into module_ast.json HERE, with the prebuilt CLI (it
+          # links logos-lidl's C ABI as a target unit). The fixture's build script
+          # then codegens from that JSON via `from_json` with the C frontend
+          # disabled (default-features = false) — because nixpkgs' CARGO_BUILD_TARGET
+          # makes a build-dependency a HOST unit whose build can't link the C ABI.
+          # module_ast.json lands in the main crate dir (sourceRoot), which (unlike
+          # a path-dependency crate) is preserved intact for the cargo build.
+          nativeBuildInputs = [ self.packages.${pkgs.system}.lidl-gen ];
+          preConfigure = ''
+            logos-lidl-gen *.lidl --to-json -o module_ast.json
+          '';
           env.LOGOS_PROTOCOL_VERSION = protocolVersion;
           doCheck = false;
         };
