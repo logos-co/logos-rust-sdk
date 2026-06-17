@@ -5,6 +5,7 @@ edition = "2021"
 description = "LIDL -> Rust codegen backend: typed callers and event subscribers over logos-rust-sdk"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [lib]
