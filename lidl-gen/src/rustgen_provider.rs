@@ -214,71 +214,6 @@ pub fn install<T: __TRAIT__ + Default>() {
         match method {
 "##;
 
-// concurrency:"multi" extra C ABI export: async dispatch. Appended (multi only)
-// after the common exports. No placeholders.
-const MULTI_ASYNC_EXPORT: &str = r##"
-/// Async dispatch (concurrency: "multi"). Returns immediately; runs the handler
-/// on a worker thread and invokes `reply(result_json, ctx)` exactly once on
-/// completion. `result_json` is owned by this cdylib and valid only for the
-/// duration of the reply call — the host must parse/copy it synchronously. It is
-/// null when the method is unknown or produced no value.
-#[no_mangle]
-pub extern "C" fn logos_module_dispatch_async(
-    method: *const c_char,
-    args_json: *const c_char,
-    reply: Option<extern "C" fn(*const c_char, *mut c_void)>,
-    ctx: *mut c_void,
-) {
-    fn fire(
-        reply: Option<extern "C" fn(*const c_char, *mut c_void)>,
-        ctx: *mut c_void,
-        json: Option<String>,
-    ) {
-        if let Some(cb) = reply {
-            match json {
-                Some(s) => {
-                    let c = CString::new(s).unwrap_or_default();
-                    cb(c.as_ptr(), ctx);
-                }
-                None => cb(std::ptr::null(), ctx),
-            }
-        }
-    }
-    if method.is_null() {
-        fire(reply, ctx, None);
-        return;
-    }
-    let method = unsafe { CStr::from_ptr(method) }.to_string_lossy().into_owned();
-    let args: Vec<serde_json::Value> = if args_json.is_null() {
-        Vec::new()
-    } else {
-        let raw = unsafe { CStr::from_ptr(args_json) }.to_string_lossy();
-        match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(serde_json::Value::Array(a)) => a,
-            _ => {
-                fire(reply, ctx, None);
-                return;
-            }
-        }
-    };
-    ensure_ready(false);
-    let dispatch = REGISTERED.lock().unwrap().as_ref().map(|r| r.dispatch);
-    let Some(dispatch) = dispatch else {
-        fire(reply, ctx, None);
-        return;
-    };
-    // Raw/fn pointers aren't Send; wrap the ctx so it can cross to the worker.
-    struct SendCtx(*mut c_void);
-    unsafe impl Send for SendCtx {}
-    let ctx_s = SendCtx(ctx);
-    std::thread::spawn(move || {
-        let ctx_s = ctx_s;
-        let result = dispatch(&method, &args).map(|v| v.to_string());
-        fire(reply, ctx_s.0, result);
-    });
-}
-"##;
-
 /// Generate the Rust provider scaffold. `protocol_version` is the
 /// logos-protocol semver this module is built against (stamped by the
 /// build, surfaced through logos_module_get_protocol_version).
@@ -648,11 +583,13 @@ pub fn generate_provider_with(
         iface, protocol_version
     ));
 
-    // concurrency:"multi" — the extra async dispatch export (the sync
-    // logos_module_dispatch above stays as the QtRO/serial fallback).
-    if multi {
-        out.push_str(MULTI_ASYNC_EXPORT);
-    }
+    // concurrency:"multi" needs NO extra C ABI here. The sync
+    // logos_module_dispatch above is already safe to call CONCURRENTLY in multi
+    // mode (the shared Arc instance is cloned per call and no lock is held across
+    // the handler — see MULTI_INSTALL_BLOCK). The Qt glue is what spawns a worker
+    // per call and pushes the deferred completion event over the existing channel;
+    // this cdylib just serves those concurrent dispatch calls. The provider/host
+    // ABI is unchanged — an old host loads and forwards a multi module unmodified.
 
     out
 }
@@ -712,10 +649,12 @@ module rust_calc {
     }
 
     #[test]
-    fn multi_mode_emits_shared_self_and_async_export() {
+    fn multi_mode_emits_shared_self_for_concurrent_dispatch() {
         let m = parse(SAMPLE).unwrap();
         let code = generate_provider_with(&m, "0.1.0", true, true);
-        // multi contract: &self receivers + Send + Sync trait bound
+        // multi contract: &self receivers + Send + Sync trait bound — the
+        // compile-time guarantee that lets logos_module_dispatch be called
+        // CONCURRENTLY (the Qt glue spawns a worker per call).
         assert!(code.contains("pub trait RustCalcModule: Send + Sync + 'static"));
         assert!(code.contains("fn add(&self, a: i64, b: i64) -> i64;"));
         assert!(code.contains("fn on_context_ready(&self, _ctx: &RustModuleContext)"));
@@ -723,13 +662,15 @@ module rust_calc {
         assert!(code.contains("std::sync::Arc<dyn std::any::Any + Send + Sync>"));
         assert!(code.contains("let imp: std::sync::Arc<T> ="));
         assert!(!code.contains("downcast_mut::<T>()"));
-        // async C ABI export present; the sync one is retained for the fallback
-        assert!(code.contains("pub extern \"C\" fn logos_module_dispatch_async"));
-        assert!(code.contains("pub extern \"C\" fn logos_module_dispatch("));
         // the shared per-method arm still calls imp.<method> (same as single)
         assert!(code.contains("let result = imp.add("));
+        // NO new C ABI: concurrency rides on the existing sync dispatch — the Qt
+        // glue defers (sentinel + completion event), not a dispatch_async export.
+        // The provider/host ABI is unchanged in both modes.
+        assert!(code.contains("pub extern \"C\" fn logos_module_dispatch("));
+        assert!(!code.contains("logos_module_dispatch_async"));
 
-        // single mode is unchanged: &mut self, Box instance, no async export
+        // single mode is unchanged: &mut self, Box instance.
         let single = generate_provider_with(&m, "0.1.0", true, false);
         assert!(single.contains("fn add(&mut self, a: i64, b: i64) -> i64;"));
         assert!(single.contains("Box<dyn std::any::Any + Send>"));
