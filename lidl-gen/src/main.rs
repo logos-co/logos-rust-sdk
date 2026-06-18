@@ -137,12 +137,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // concurrency:"multi" — emit the concurrent-dispatch scaffold (Arc<&self>
+    // instance + logos_module_dispatch_async). Fed from metadata.json's
+    // `concurrency` field by the builder. Absent / anything else ⇒ single.
+    let multi = flag_value(&args, "--concurrency").as_deref() == Some("multi");
     let mut code = if provider {
-        if no_trait {
-            logos_lidl_gen::rustgen_provider::generate_provider_with(&module, &protocol_version, false)
-        } else {
-            logos_lidl_gen::generate_provider(&module, &protocol_version)
-        }
+        logos_lidl_gen::rustgen_provider::generate_provider_with(
+            &module,
+            &protocol_version,
+            !no_trait,
+            multi,
+        )
     } else {
         logos_lidl_gen::generate(&module)
     };

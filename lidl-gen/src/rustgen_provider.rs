@@ -157,22 +157,153 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
     serde_json::Value::Array(entries)
 }
 
+// concurrency:"multi" instance + install block (replaces the single-mode one).
+// `__TRAIT__` is substituted with the contract trait name. The instance is a
+// shared `Arc<dyn Any + Send + Sync>`; the INSTANCE mutex guards construction
+// only, so dispatch clones the Arc and runs the handler on `&self` with no lock
+// held — calls to one module overlap. Ends at `match method {` so the shared
+// per-method arms (and the closing block) append exactly as for single mode.
+const MULTI_INSTALL_BLOCK: &str = r##"type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
+type EnsureFn = fn(bool);
+struct Registered {
+    dispatch: DispatchFn,
+    ensure: EnsureFn,
+}
+static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
+// Shared across worker threads; the mutex guards CONSTRUCTION only.
+static INSTANCE: Mutex<Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>> = Mutex::new(None);
+static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install `T` as the module implementation (Default-constructed once).
+///
+/// `on_context_ready` fires AT MODULE LOAD, before the module is published for
+/// inbound calls — single-threaded at that point, so it matches the single-mode
+/// scaffold's "fires once before the first dispatch" contract.
+pub fn install<T: __TRAIT__ + Default>() {
+    fn ensure_impl<T: __TRAIT__ + Default>(require_emit: bool) {
+        let inst = {
+            let mut guard = INSTANCE.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(std::sync::Arc::new(T::default()));
+            }
+            guard.clone()
+        };
+        if HOOK_FIRED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(ctx) = context() else { return; };
+        if require_emit && EMIT.lock().unwrap().cb.is_none() {
+            return;
+        }
+        if let Some(inst) = inst {
+            if let Ok(imp) = inst.downcast::<T>() {
+                HOOK_FIRED.store(true, std::sync::atomic::Ordering::SeqCst);
+                imp.on_context_ready(&ctx);
+            }
+        }
+    }
+    fn dispatch_impl<T: __TRAIT__ + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
+        let inst = {
+            let mut guard = INSTANCE.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(std::sync::Arc::new(T::default()));
+            }
+            guard.clone()
+        };
+        let imp: std::sync::Arc<T> = inst?.downcast::<T>().ok()?;
+        match method {
+"##;
+
+// concurrency:"multi" extra C ABI export: async dispatch. Appended (multi only)
+// after the common exports. No placeholders.
+const MULTI_ASYNC_EXPORT: &str = r##"
+/// Async dispatch (concurrency: "multi"). Returns immediately; runs the handler
+/// on a worker thread and invokes `reply(result_json, ctx)` exactly once on
+/// completion. `result_json` is owned by this cdylib and valid only for the
+/// duration of the reply call — the host must parse/copy it synchronously. It is
+/// null when the method is unknown or produced no value.
+#[no_mangle]
+pub extern "C" fn logos_module_dispatch_async(
+    method: *const c_char,
+    args_json: *const c_char,
+    reply: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    ctx: *mut c_void,
+) {
+    fn fire(
+        reply: Option<extern "C" fn(*const c_char, *mut c_void)>,
+        ctx: *mut c_void,
+        json: Option<String>,
+    ) {
+        if let Some(cb) = reply {
+            match json {
+                Some(s) => {
+                    let c = CString::new(s).unwrap_or_default();
+                    cb(c.as_ptr(), ctx);
+                }
+                None => cb(std::ptr::null(), ctx),
+            }
+        }
+    }
+    if method.is_null() {
+        fire(reply, ctx, None);
+        return;
+    }
+    let method = unsafe { CStr::from_ptr(method) }.to_string_lossy().into_owned();
+    let args: Vec<serde_json::Value> = if args_json.is_null() {
+        Vec::new()
+    } else {
+        let raw = unsafe { CStr::from_ptr(args_json) }.to_string_lossy();
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Array(a)) => a,
+            _ => {
+                fire(reply, ctx, None);
+                return;
+            }
+        }
+    };
+    ensure_ready(false);
+    let dispatch = REGISTERED.lock().unwrap().as_ref().map(|r| r.dispatch);
+    let Some(dispatch) = dispatch else {
+        fire(reply, ctx, None);
+        return;
+    };
+    // Raw/fn pointers aren't Send; wrap the ctx so it can cross to the worker.
+    struct SendCtx(*mut c_void);
+    unsafe impl Send for SendCtx {}
+    let ctx_s = SendCtx(ctx);
+    std::thread::spawn(move || {
+        let ctx_s = ctx_s;
+        let result = dispatch(&method, &args).map(|v| v.to_string());
+        fire(reply, ctx_s.0, result);
+    });
+}
+"##;
+
 /// Generate the Rust provider scaffold. `protocol_version` is the
 /// logos-protocol semver this module is built against (stamped by the
 /// build, surfaced through logos_module_get_protocol_version).
 pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String {
-    generate_provider_with(module, protocol_version, true)
+    generate_provider_with(module, protocol_version, true, false)
 }
 
-/// Like [`generate_provider`], with control over trait emission. Pass
-/// `emit_trait = false` for the Rust-declared (contract-in-language) flow:
-/// the author hand-writes the trait — including the defaulted
-/// `on_context_ready` hook — and the scaffold only adds context, emitters,
-/// dispatch and the C ABI exports around it (see rust_frontend).
+/// Like [`generate_provider`], with control over trait emission and dispatch
+/// concurrency. Pass `emit_trait = false` for the Rust-declared
+/// (contract-in-language) flow: the author hand-writes the trait — including the
+/// defaulted `on_context_ready` hook — and the scaffold only adds context,
+/// emitters, dispatch and the C ABI exports around it (see rust_frontend).
+///
+/// `multi = true` emits the `concurrency: "multi"` scaffold: the instance is
+/// shared (`Arc<T>`, `T: Send + Sync`), methods take `&self`, the instance mutex
+/// guards CONSTRUCTION only, and an extra `logos_module_dispatch_async` C export
+/// runs each handler on its own worker thread so calls to one module overlap.
+/// The author owns thread-safety (interior mutability). `multi = false`
+/// (default) is the single-threaded event-loop scaffold (`&mut self`, the mutex
+/// held across the handler).
 pub fn generate_provider_with(
     module: &ModuleDecl,
     protocol_version: &str,
     emit_trait: bool,
+    multi: bool,
 ) -> String {
     let pascal_name = pascal(&module.name);
     // sdk_test_provider_module -> SdkTestProviderModule, not ...ModuleModule
@@ -181,6 +312,11 @@ pub fn generate_provider_with(
     } else {
         format!("{}Module", pascal_name)
     };
+    // concurrency:"multi" — methods take &self (shared; the author uses interior
+    // mutability) and the trait is Sync; "single" — &mut self (exclusive, no
+    // author-side locking).
+    let self_recv = if multi { "&self" } else { "&mut self" };
+    let trait_bounds = if multi { "Send + Sync + 'static" } else { "Send + 'static" };
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -283,14 +419,15 @@ pub fn generate_provider_with(
 
     // -- the trait ------------------------------------------------------------
     if emit_trait {
-        out.push_str(&format!("pub trait {}: Send + 'static {{\n", trait_name));
-        out.push_str(
+        out.push_str(&format!("pub trait {}: {} {{\n", trait_name, trait_bounds));
+        out.push_str(&format!(
             "    /// One-time setup hook: fires after the host has stamped the module\n\
              \x20   /// context (path / instance id / persistence path) and before the\n\
              \x20   /// first method dispatch — the Rust analog of C++'s\n\
              \x20   /// LogosModuleContext::onContextReady().\n\
-             \x20   fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}\n\n",
-        );
+             \x20   fn on_context_ready({}, _ctx: &RustModuleContext) {{}}\n\n",
+            self_recv,
+        ));
         for m in &module.methods {
             let params: Vec<String> = m
                 .params
@@ -298,8 +435,9 @@ pub fn generate_provider_with(
                 .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
                 .collect();
             out.push_str(&format!(
-                "    fn {}(&mut self{}{}) -> {};\n",
+                "    fn {}({}{}{}) -> {};\n",
                 snake(&m.name),
+                self_recv,
                 if params.is_empty() { "" } else { ", " },
                 params.join(", "),
                 rust_return_type(&m.return_type)
@@ -315,6 +453,14 @@ pub fn generate_provider_with(
     }
 
     // -- instance + install ----------------------------------------------------
+    if multi {
+        // concurrency:"multi" — the instance is shared across worker threads. The
+        // INSTANCE mutex guards CONSTRUCTION only; each dispatch clones the Arc and
+        // runs the handler on `&self` with NO lock held, so calls to one module
+        // overlap. Emitted as a raw string (no format! escaping) — only the trait
+        // name is substituted.
+        out.push_str(&MULTI_INSTALL_BLOCK.replace("__TRAIT__", &trait_name));
+    } else {
     out.push_str(&format!(
         "type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;\n\
          type EnsureFn = fn(bool);\n\
@@ -362,6 +508,7 @@ pub fn generate_provider_with(
          \x20       match method {{\n",
         trait_name, trait_name, trait_name
     ));
+    }
 
     for m in &module.methods {
         let n = m.params.len();
@@ -501,6 +648,12 @@ pub fn generate_provider_with(
         iface, protocol_version
     ));
 
+    // concurrency:"multi" — the extra async dispatch export (the sync
+    // logos_module_dispatch above stays as the QtRO/serial fallback).
+    if multi {
+        out.push_str(MULTI_ASYNC_EXPORT);
+    }
+
     out
 }
 
@@ -556,5 +709,31 @@ module rust_calc {
         let code = generate_provider(&m, "0.1.0");
         assert!(code.contains("pub trait SdkTestProviderModule:"));
         assert!(!code.contains("SdkTestProviderModuleModule"));
+    }
+
+    #[test]
+    fn multi_mode_emits_shared_self_and_async_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider_with(&m, "0.1.0", true, true);
+        // multi contract: &self receivers + Send + Sync trait bound
+        assert!(code.contains("pub trait RustCalcModule: Send + Sync + 'static"));
+        assert!(code.contains("fn add(&self, a: i64, b: i64) -> i64;"));
+        assert!(code.contains("fn on_context_ready(&self, _ctx: &RustModuleContext)"));
+        // shared instance, no exclusive borrow held across the handler
+        assert!(code.contains("std::sync::Arc<dyn std::any::Any + Send + Sync>"));
+        assert!(code.contains("let imp: std::sync::Arc<T> ="));
+        assert!(!code.contains("downcast_mut::<T>()"));
+        // async C ABI export present; the sync one is retained for the fallback
+        assert!(code.contains("pub extern \"C\" fn logos_module_dispatch_async"));
+        assert!(code.contains("pub extern \"C\" fn logos_module_dispatch("));
+        // the shared per-method arm still calls imp.<method> (same as single)
+        assert!(code.contains("let result = imp.add("));
+
+        // single mode is unchanged: &mut self, Box instance, no async export
+        let single = generate_provider_with(&m, "0.1.0", true, false);
+        assert!(single.contains("fn add(&mut self, a: i64, b: i64) -> i64;"));
+        assert!(single.contains("Box<dyn std::any::Any + Send>"));
+        assert!(!single.contains("logos_module_dispatch_async"));
+        assert!(!single.contains("Send + Sync + 'static"));
     }
 }
