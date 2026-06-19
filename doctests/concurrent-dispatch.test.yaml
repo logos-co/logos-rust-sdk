@@ -278,17 +278,13 @@ sections:
 
             impl FanoutDriverModule for DriverImpl {
                 fn fan_out(&mut self, n: i64, ms: i64) -> i64 {
-                    // Bind the worker handle ONCE and reuse it for the whole
-                    // fan-out. All N async calls then share a single client, so the
-                    // first call's capability handshake covers them all. (A fresh
-                    // `modules()` per call would each open its own client and run its
-                    // own handshake; firing N of those at once is the concurrent
-                    // first-call path — reuse the handle to take it.)
-                    let m = modules();
                     for _ in 0..n.max(0) {
-                        // Async typed client: fire and return immediately. The result
-                        // lands on our event loop later; we don't need it here.
-                        m.slow_worker_module.work_async(ms, |_res| {});
+                        // A fresh `modules()` each iteration — yet the SDK shares ONE
+                        // client per target module, so all N async calls run a single
+                        // coalesced capability handshake and the worker sees them all
+                        // at once. (Async typed client: fire and return immediately;
+                        // the result lands on our event loop later, unused here.)
+                        modules().slow_worker_module.work_async(ms, |_res| {});
                     }
                     n
                 }
