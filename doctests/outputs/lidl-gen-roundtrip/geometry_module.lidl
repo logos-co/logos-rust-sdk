@@ -1,0 +1,17 @@
+module geometry_module {
+  version "1.0.0"
+  description "Composite types: records, arrays-of-records, maps, and optionals"
+
+  type Point {
+    x: float64
+    y: float64
+  }
+
+  method translate(p: Point, dx: float64, dy: float64) -> Point description "Translates a point by an offset."
+  method bounds(points: [Point]) -> Point description "Returns the bounding corner of a set of points."
+  method attributes(tags: {tstr: any}) -> {tstr: any} description "Echoes a string-keyed map of arbitrary values."
+  method nearest(p: Point, limit: ?uint) -> ?Point description "Finds the nearest point within an optional limit; may return nothing."
+  method describe(p: Point) -> any description "Returns an arbitrary JSON description of a point."
+
+  event moved(from: Point, to: Point) description "Fires when a point moves, carrying both record values."
+}
