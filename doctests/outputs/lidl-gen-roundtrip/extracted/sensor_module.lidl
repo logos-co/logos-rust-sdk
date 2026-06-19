@@ -1,0 +1,18 @@
+module sensor_module {
+  version "2.0.0"
+  depends []
+
+  method temperature() -> float64 description "Returns the latest temperature reading in degrees Celsius."
+  method enable(on: bool) -> bool description "Enables or disables the sensor.\nReturns the new enabled state."
+  method rename(id: uint, name: tstr) -> tstr description "Renames the sensor channel."
+  method calibrate(id: uint, offset: float64, label: tstr) -> bool description "Calibrates a channel with an offset and a human-readable label."
+  method record(id: uint, value: float64, note: tstr, valid: bool) -> int description "Records a reading and returns the new sample count."
+  method firmware(image: bstr) -> bstr description "Flashes raw firmware bytes and echoes back the stored image."
+  method labels(ids: [uint]) -> [tstr] description "Resolves a batch of channel ids to their labels."
+  method average(samples: [float64]) -> float64 description "Computes the mean of a batch of samples."
+  method reset(id: tstr) -> result description "Resets a channel; returns a structured success/error result."
+
+  event ready() description "Fires once the sensor has finished warming up."
+  event reading(id: uint, value: float64) description "Fires on each new reading with the channel id and value."
+  event fault(code: int, message: tstr, fatal: bool) description "Fires when a channel faults.\nCarries an error code, a message, and whether the fault is fatal."
+}
