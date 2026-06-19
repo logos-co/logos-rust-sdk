@@ -80,6 +80,7 @@ jobs:
           nix run github:logos-co/logos-doctest -- run \
             doctests/cross-language-composition.test.yaml \
             doctests/concurrent-dispatch.test.yaml \
+            doctests/lidl-gen-roundtrip.test.yaml \
             --verbose \
             --continue-on-fail \
             --report "${{ runner.temp }}/rust-sdk-doctest-report.html"
