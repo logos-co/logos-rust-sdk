@@ -1,9 +1,10 @@
 //! Plugin proxy for method calls and event subscriptions, over the lp_* C ABI.
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::callback::{
     create_event_callback, create_method_callback, event_callback_ptr, json_to_message,
@@ -26,6 +27,48 @@ impl Drop for ClientHandle {
             unsafe { ffi::lp_client_destroy(self.0) };
         }
     }
+}
+
+/// Process-global cache of ONE shared `lp_client` per target module name.
+///
+/// Why: the protocol coalesces concurrent capability handshakes PER client, so
+/// a fan-out that opens a fresh client per call (the old `modules().dep.x()`
+/// behavior) fires N racing `requestModule` handshakes whose per-call tokens
+/// overwrite each other on the target and get the in-flight calls rejected.
+/// Sharing one client per target makes the N calls coalesce to a single
+/// handshake — the rust analog of the C++ SDK's one persistent `LogosModules`.
+///
+/// The value is a `Weak` so the cache never pins a client past its real owners:
+/// live proxies / async-call states / subscriptions hold the strong `Arc`, and
+/// when the last drops, `lp_client_destroy` fires (teardown unchanged) and a
+/// later lookup re-creates. Sharing across threads is sound by the same
+/// per-handle thread-safety contract `EventSubscription` already relies on.
+fn client_cache() -> &'static Mutex<HashMap<String, Weak<ClientHandle>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Weak<ClientHandle>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Get-or-create the shared client for `target` (origin is always "core" here).
+/// Returns None on the same failure surface as before (bad name / null client).
+fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
+    let mut map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = map.get(target).and_then(Weak::upgrade) {
+        return Some(existing); // a live client for this target — reuse it
+    }
+    // None live: create one, cache a Weak, hand back the strong Arc. The lp
+    // call happens here under the (uncontended, I/O-free) map lock; the actual
+    // invoke runs later off the proxy's cloned Arc, outside the lock.
+    let target_c = CString::new(target).ok()?;
+    let origin = CString::new("core").unwrap();
+    let raw = unsafe {
+        ffi::lp_client_create(target_c.as_ptr(), origin.as_ptr(), ptr::null(), ptr::null())
+    };
+    if raw.is_null() {
+        return None;
+    }
+    let handle = Arc::new(ClientHandle(raw));
+    map.insert(target.to_string(), Arc::downgrade(&handle));
+    Some(handle)
 }
 
 /// A live event subscription: the channel of incoming events PLUS ownership
@@ -140,29 +183,13 @@ pub struct PluginProxy {
 impl PluginProxy {
     pub(crate) fn new(plugin_name: impl Into<String>) -> Self {
         let plugin_name = plugin_name.into();
-        // The facade's historical origin identity is "core" (matches the
-        // previous logos_sdk_* behavior inside a module process).
-        let client = CString::new(plugin_name.as_str())
-            .ok()
-            .map(|target| {
-                let origin = CString::new("core").unwrap();
-                unsafe {
-                    ffi::lp_client_create(
-                        target.as_ptr(),
-                        origin.as_ptr(),
-                        ptr::null(),
-                        ptr::null(),
-                    )
-                }
-            })
-            .unwrap_or(ptr::null_mut());
+        // Share ONE lp_client per target (origin "core") across all proxies for
+        // that target, so a concurrent fan-out coalesces to a single capability
+        // handshake instead of racing N. See client_cache()/shared_client().
+        let client = shared_client(&plugin_name);
         PluginProxy {
             plugin_name,
-            client: if client.is_null() {
-                None
-            } else {
-                Some(Arc::new(ClientHandle(client)))
-            },
+            client,
         }
     }
 
