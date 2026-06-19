@@ -522,9 +522,15 @@ pub fn generate_provider_with(
          \x20       }}\n\
          \x20   }};\n\
          \x20   ensure_ready(false);\n\
-         \x20   let guard = REGISTERED.lock().unwrap();\n\
-         \x20   let registered = match guard.as_ref() {{ Some(r) => r, None => return std::ptr::null_mut() }};\n\
-         \x20   match (registered.dispatch)(&method, &args) {{\n\
+         \x20   // Copy the dispatch fn pointer out and RELEASE the REGISTERED\n\
+         \x20   // lock BEFORE running the handler. A concurrency:\"multi\" module's\n\
+         \x20   // glue calls this from worker threads; holding the mutex across\n\
+         \x20   // the handler would serialize every call (peak overlap 1). The\n\
+         \x20   // INSTANCE arc is already cloned + unlocked inside dispatch_impl,\n\
+         \x20   // so concurrent handlers are safe. Same release-before-call shape\n\
+         \x20   // as ensure_ready.\n\
+         \x20   let dispatch = match REGISTERED.lock().unwrap().as_ref() {{ Some(r) => r.dispatch, None => return std::ptr::null_mut() }};\n\
+         \x20   match dispatch(&method, &args) {{\n\
          \x20       Some(value) => to_c_string(value.to_string()),\n\
          \x20       None => std::ptr::null_mut(),\n\
          \x20   }}\n\
@@ -669,6 +675,13 @@ module rust_calc {
         // The provider/host ABI is unchanged in both modes.
         assert!(code.contains("pub extern \"C\" fn logos_module_dispatch("));
         assert!(!code.contains("logos_module_dispatch_async"));
+        // The C-ABI dispatch must RELEASE the REGISTERED lock before running the
+        // handler — otherwise concurrent multi calls (the glue spawns a worker
+        // per call) serialize on that mutex and peak overlap collapses to 1. The
+        // fn pointer is copied out, the lock drops, THEN it's called.
+        assert!(code.contains("let dispatch = match REGISTERED.lock().unwrap().as_ref()"));
+        assert!(code.contains("match dispatch(&method, &args)"));
+        assert!(!code.contains("(registered.dispatch)(&method, &args)"));
 
         // single mode is unchanged: &mut self, Box instance.
         let single = generate_provider_with(&m, "0.1.0", true, false);

@@ -61,11 +61,11 @@ sections:
       module builder runs the Rust generator itself.
     steps:
       - title: "Build logoscore"
-        run: "nix build 'github:logos-co/logos-logoscore-cli' --out-link ./logos"
+        run: "nix build 'github:logos-co/logos-logoscore-cli' --override-input logos-protocol 'github:logos-co/logos-protocol{release}' --override-input logos-liblogos/logos-protocol 'github:logos-co/logos-protocol{release}' --out-link ./logos"
         code_block: |
           nix build 'github:logos-co/logos-logoscore-cli' --out-link ./logos
         check_file: "logos/bin/logoscore"
-        post_text: "This brings in the module-runtime stack plus the bundled `capability_module` (needed for the auth handshake when loading modules in daemon mode)."
+        post_text: "This brings in the module-runtime stack plus the bundled `capability_module` (needed for the auth handshake when loading modules in daemon mode). The daemon resolves a `multi` module's deferred reply on the caller's behalf, so it must be built against logos-protocol ≥ 0.2 — the `--override-input` here pins it to the protocol under test (once 0.2 lands in the published runtime, the plain `nix build` shown above suffices)."
       - title: "Build lgpm"
         run: "nix build 'github:logos-co/logos-package-manager#cli' -o lgpm"
         check_file: "lgpm/bin/lgpm"
@@ -173,7 +173,7 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
+            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "34458a1a378cac1c14bf7fbb312d1bb70d370741", optional = true }
 
             [features]
             default = ["logos_module"]
@@ -278,10 +278,17 @@ sections:
 
             impl FanoutDriverModule for DriverImpl {
                 fn fan_out(&mut self, n: i64, ms: i64) -> i64 {
+                    // Bind the worker handle ONCE and reuse it for the whole
+                    // fan-out. All N async calls then share a single client, so the
+                    // first call's capability handshake covers them all. (A fresh
+                    // `modules()` per call would each open its own client and run its
+                    // own handshake; firing N of those at once is the concurrent
+                    // first-call path — reuse the handle to take it.)
+                    let m = modules();
                     for _ in 0..n.max(0) {
                         // Async typed client: fire and return immediately. The result
                         // lands on our event loop later; we don't need it here.
-                        modules().slow_worker_module.work_async(ms, |_res| {});
+                        m.slow_worker_module.work_async(ms, |_res| {});
                     }
                     n
                 }
@@ -333,7 +340,7 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
+            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "34458a1a378cac1c14bf7fbb312d1bb70d370741", optional = true }
 
             [features]
             default = ["logos_module"]
@@ -423,7 +430,7 @@ sections:
       - title: "Start the daemon"
         run: "sh -c './logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
         code_block: "logoscore -D -m ./modules > logs.txt &"
-      - run: "sleep 3"
+      - run: "sleep 6"
       - title: "Load the modules"
         text: "The driver's concrete dependency (`slow_worker_module`) is auto-loaded with it."
         run: "./logos/bin/logoscore load-module fanout_driver_module"
