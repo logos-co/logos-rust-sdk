@@ -251,7 +251,13 @@ pub fn generate_provider_with(
     // mutability) and the trait is Sync; "single" — &mut self (exclusive, no
     // author-side locking).
     let self_recv = if multi { "&self" } else { "&mut self" };
-    let trait_bounds = if multi { "Send + Sync + 'static" } else { "Send + 'static" };
+    // "multi" must be Send + Sync (shared across worker threads). "single" runs
+    // entirely on the module subprocess's one event-loop thread, so its impl need
+    // not be Send — only `'static` — which lets single-mode modules hold
+    // non-Send state (e.g. an engine whose trait objects aren't Send). The
+    // single-mode INSTANCE static below is made `Sync` via a single-threaded
+    // safety wrapper accordingly.
+    let trait_bounds = if multi { "Send + Sync + 'static" } else { "'static" };
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -404,7 +410,14 @@ pub fn generate_provider_with(
          \x20   ensure: EnsureFn,\n\
          }}\n\
          static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\
-         static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);\n\
+         // A concurrency:\"single\" module runs entirely on one thread (its\n\
+         // subprocess event loop): install / on_context_ready / dispatch all touch\n\
+         // INSTANCE from that thread, so the impl never crosses threads and need\n\
+         // not be Send. This single-threaded Sync wrapper lets a non-Send impl\n\
+         // live in a static (cf. the EmitState unsafe impl above).\n\
+         struct SingleInstance(Mutex<Option<Box<dyn std::any::Any>>>);\n\
+         unsafe impl Sync for SingleInstance {{}}\n\
+         static INSTANCE: SingleInstance = SingleInstance(Mutex::new(None));\n\
          static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\n\n\
          /// Install `T` as the module implementation (Default-constructed once).\n\
          ///\n\
@@ -418,7 +431,7 @@ pub fn generate_provider_with(
          /// callback, the hook still fires before the first dispatch.)\n\
          pub fn install<T: {} + Default>() {{\n\
          \x20   fn ensure_impl<T: {} + Default>(require_emit: bool) {{\n\
-         \x20       let mut guard = INSTANCE.lock().unwrap();\n\
+         \x20       let mut guard = INSTANCE.0.lock().unwrap();\n\
          \x20       if guard.is_none() {{\n\
          \x20           *guard = Some(Box::new(T::default()));\n\
          \x20       }}\n\
@@ -435,7 +448,7 @@ pub fn generate_provider_with(
          \x20       }}\n\
          \x20   }}\n\
          \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
-         \x20       let mut guard = INSTANCE.lock().unwrap();\n\
+         \x20       let mut guard = INSTANCE.0.lock().unwrap();\n\
          \x20       if guard.is_none() {{\n\
          \x20           *guard = Some(Box::new(T::default()));\n\
          \x20       }}\n\
