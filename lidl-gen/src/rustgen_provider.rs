@@ -335,20 +335,22 @@ pub fn generate_provider_with(
             .iter()
             .map(|p| match (&p.ty.kind, p.ty.name.as_str()) {
                 (TypeKind::Primitive, "bstr") => {
-                    format!("payload.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
+                    format!("__event_args.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
                 }
                 (TypeKind::Primitive, _) => {
-                    format!("payload.push(serde_json::Value::from({}));", snake(&p.name))
+                    format!("__event_args.push(serde_json::Value::from({}));", snake(&p.name))
                 }
-                _ => format!("payload.push({}.clone());", snake(&p.name)),
+                _ => format!("__event_args.push({}.clone());", snake(&p.name)),
             })
             .collect();
         out.push_str(&format!(
             "/// Typed emitter for the `{}` event.\n\
              pub fn {}({}) {{\n\
-             \x20   let mut payload: Vec<serde_json::Value> = Vec::new();\n\
+             \x20   // Accumulator uses a reserved name so it can't shadow an event\n\
+             \x20   // param (e.g. a `bstr payload`, as in delivery_module.messageReceived).\n\
+             \x20   let mut __event_args: Vec<serde_json::Value> = Vec::new();\n\
              \x20   {}\n\
-             \x20   emit_event(\"{}\", &serde_json::Value::Array(payload));\n\
+             \x20   emit_event(\"{}\", &serde_json::Value::Array(__event_args));\n\
              }}\n\n",
             e.name,
             fn_name,
