@@ -2,4 +2,6 @@ module sdk_test_provider_module {
   version "0.1.0"
   description "Minimal provider module for logos-rust-sdk integration tests"
   method add(a: int, b: int) -> int
+  method emit_blob(size: int) -> int
+  event blobReady(seq: int, payload: bstr)
 }

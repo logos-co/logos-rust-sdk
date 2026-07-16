@@ -387,6 +387,34 @@ module calc_module {
     }
 
 
+    // A binary EVENT payload, SUBSCRIBE side. The typed payload struct must
+    // carry real bytes (Vec<u8>), and the decoder must run the bstr arg through
+    // the canonical tagged-bytes codec rather than clone the raw JSON. No prior
+    // test covered bstr in an event — the gap the C++ analog (logos-cpp-sdk#99)
+    // fell through. Mirrors delivery_module's messageReceived(..., payload: bstr).
+    #[test]
+    fn decodes_binary_event_payload() {
+        let m = parse(
+            "module delivery_module {\n  \
+             version \"1.0.0\"\n  depends []\n  \
+             event messageReceived(topic: tstr, payload: bstr)\n\
+             }",
+        )
+        .unwrap();
+        let code = generate(&m);
+        // Typed payload struct carries real bytes, not serde_json::Value.
+        assert!(code.contains("pub struct MessageReceivedEvent"));
+        assert!(code.contains("pub payload: Vec<u8>"));
+        // The decoder runs the bstr arg (index 1) through the tagged-bytes codec.
+        assert!(code.contains(
+            "pub fn decode_message_received(ev: &EventData) -> Option<MessageReceivedEvent>"
+        ));
+        assert!(code.contains("logos_rust_sdk::bytes::decode(&arr[1])?"));
+        // A tstr arg in the same event still decodes as a plain string — the
+        // bstr branch is not applied to every param.
+        assert!(code.contains("arr[0].as_str()?.to_string()"));
+    }
+
     #[test]
     fn generates_modules_aggregate() {
         let calc = parse(SAMPLE).unwrap();

@@ -330,25 +330,32 @@ pub fn generate_provider_with(
                 format!("{}: {}", snake(&p.name), t)
             })
             .collect();
+        // The accumulator is named `__logos_args`, not `payload`: an event
+        // parameter is free to be called `payload` (delivery_module's
+        // messageReceived(..., payload: bstr, ...) does exactly that), and a
+        // plainly-named accumulator would shadow it — silently emitting the
+        // accumulator instead of the argument for scalars, and failing to
+        // compile for a bstr param (bytes::encode(&[u8]) handed a Vec). The
+        // `__logos_` prefix is this crate's reserved-internal convention.
         let pushes: Vec<String> = e
             .params
             .iter()
             .map(|p| match (&p.ty.kind, p.ty.name.as_str()) {
                 (TypeKind::Primitive, "bstr") => {
-                    format!("payload.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
+                    format!("__logos_args.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
                 }
                 (TypeKind::Primitive, _) => {
-                    format!("payload.push(serde_json::Value::from({}));", snake(&p.name))
+                    format!("__logos_args.push(serde_json::Value::from({}));", snake(&p.name))
                 }
-                _ => format!("payload.push({}.clone());", snake(&p.name)),
+                _ => format!("__logos_args.push({}.clone());", snake(&p.name)),
             })
             .collect();
         out.push_str(&format!(
             "/// Typed emitter for the `{}` event.\n\
              pub fn {}({}) {{\n\
-             \x20   let mut payload: Vec<serde_json::Value> = Vec::new();\n\
+             \x20   let mut __logos_args: Vec<serde_json::Value> = Vec::new();\n\
              \x20   {}\n\
-             \x20   emit_event(\"{}\", &serde_json::Value::Array(payload));\n\
+             \x20   emit_event(\"{}\", &serde_json::Value::Array(__logos_args));\n\
              }}\n\n",
             e.name,
             fn_name,
@@ -466,14 +473,21 @@ pub fn generate_provider_with(
             .enumerate()
             .map(|(i, p)| arg_from_json(&p.ty, &format!("args.get({}).unwrap_or(&serde_json::Value::Null)", i)))
             .collect();
+        // Only guard the arg count when the method actually takes parameters —
+        // `if args.len() < 0` is a dead check on a zero-arg method.
+        let guard = if n > 0 {
+            format!("                if args.len() < {} {{ return None; }}\n", n)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
             "            \"{}\" => {{\n\
-             \x20               if args.len() < {} {{ return None; }}\n\
+             {}\
              \x20               let result = imp.{}({});\n\
              \x20               Some({})\n\
              \x20           }}\n",
             m.name,
-            n,
+            guard,
             snake(&m.name),
             args.join(", "),
             ret_to_json(&m.return_type, "result")
@@ -538,10 +552,11 @@ pub fn generate_provider_with(
          \x20   // Copy the dispatch fn pointer out and RELEASE the REGISTERED\n\
          \x20   // lock BEFORE running the handler. A concurrency:\"multi\" module's\n\
          \x20   // glue calls this from worker threads; holding the mutex across\n\
-         \x20   // the handler would serialize every call (peak overlap 1). The\n\
-         \x20   // INSTANCE arc is already cloned + unlocked inside dispatch_impl,\n\
-         \x20   // so concurrent handlers are safe. Same release-before-call shape\n\
-         \x20   // as ensure_ready.\n\
+         \x20   // the handler would serialize every call (peak overlap 1).\n\
+         \x20   // dispatch_impl resolves the instance internally (a cloned Arc in\n\
+         \x20   // multi mode, the boxed instance behind the SingleInstance mutex in\n\
+         \x20   // single mode) without holding REGISTERED, so dropping the lock here\n\
+         \x20   // first is safe. Same release-before-call shape as ensure_ready.\n\
          \x20   let dispatch = match REGISTERED.lock().unwrap().as_ref() {{ Some(r) => r.dispatch, None => return std::ptr::null_mut() }};\n\
          \x20   match dispatch(&method, &args) {{\n\
          \x20       Some(value) => to_c_string(value.to_string()),\n\
@@ -656,6 +671,53 @@ module rust_calc {
         assert!(code.contains("totalChanged"));
     }
 
+    // A binary EVENT payload, EMIT side. The typed emitter must take the bstr
+    // param as &[u8] and run it through the canonical tagged-bytes encoder — the
+    // provider analog of the consumer decode covered in rustgen.rs. Uses the
+    // exact shape of delivery_module's messageReceived(..., payload: bstr, ...),
+    // including a bstr param literally named `payload`, which also guards the
+    // accumulator-shadowing regression below.
+    #[test]
+    fn emits_binary_event_payload() {
+        let m = parse(
+            "module delivery_module {\n  \
+             version \"1.0.0\"\n  depends []\n  \
+             event messageReceived(message_hash: tstr, payload: bstr, timestamp: int)\n\
+             }",
+        )
+        .unwrap();
+        let code = generate_provider(&m, "0.1.0");
+        // The bstr param is borrowed as &[u8] and encoded via the tagged codec;
+        // scalars are pushed as-is.
+        assert!(code.contains(
+            "pub fn emit_message_received(message_hash: &str, payload: &[u8], timestamp: i64)"
+        ));
+        assert!(code.contains("logos_rust_sdk::bytes::encode(payload)"));
+        assert!(code.contains("serde_json::Value::from(message_hash)"));
+        assert!(code.contains("serde_json::Value::from(timestamp)"));
+    }
+
+    // Regression: the emitter's local accumulator must NOT be named after a
+    // value a user could pick for a parameter. `payload` is the obvious one
+    // (delivery_module uses it). If the accumulator were `payload`, it would
+    // shadow the &[u8] argument — `bytes::encode(payload)` would then be handed
+    // the Vec<serde_json::Value> accumulator and fail to compile (and a scalar
+    // `payload` would silently emit the accumulator instead of the value).
+    #[test]
+    fn event_emitter_accumulator_does_not_shadow_a_payload_param() {
+        let m = parse(
+            "module m {\n  version \"1.0.0\"\n  depends []\n  \
+             event ev(payload: bstr)\n}",
+        )
+        .unwrap();
+        let code = generate_provider(&m, "0.1.0");
+        // The argument reaches the encoder untouched...
+        assert!(code.contains("logos_rust_sdk::bytes::encode(payload)"));
+        // ...because the accumulator is a reserved-internal name, not `payload`.
+        assert!(!code.contains("let mut payload"));
+        assert!(code.contains("let mut __logos_args"));
+    }
+
     #[test]
     fn trait_name_not_doubled_for_module_suffix() {
         let m = parse(
@@ -696,10 +758,14 @@ module rust_calc {
         assert!(code.contains("match dispatch(&method, &args)"));
         assert!(!code.contains("(registered.dispatch)(&method, &args)"));
 
-        // single mode is unchanged: &mut self, Box instance.
+        // single mode: &mut self, a Box instance (not the Arc multi mode uses).
+        // The Box is `dyn Any` WITHOUT `+ Send` since #22 lifted Send on
+        // single-mode instances (they never leave the subprocess event-loop
+        // thread); it lives behind the SingleInstance Sync wrapper.
         let single = generate_provider_with(&m, "0.1.0", true, false);
         assert!(single.contains("fn add(&mut self, a: i64, b: i64) -> i64;"));
-        assert!(single.contains("Box<dyn std::any::Any + Send>"));
+        assert!(single.contains("Box<dyn std::any::Any>"));
+        assert!(!single.contains("Box<dyn std::any::Any + Send>"));
         assert!(!single.contains("logos_module_dispatch_async"));
         assert!(!single.contains("Send + Sync + 'static"));
     }

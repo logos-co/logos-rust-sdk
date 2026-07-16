@@ -118,7 +118,13 @@
           # canonical frontend, so the published CLI is self-contained).
           buildInputs = [ logos-lidl.packages.${system}.logos-lidl ];
           env.LOGOS_LIDL_ROOT = "${logos-lidl.packages.${system}.logos-lidl}";
-          doCheck = false;
+          # Run the generator's unit tests as part of the build so they gate
+          # `nix flake check` / `ws test`. These are pure codegen + FFI-parse
+          # tests (no network, no daemon) and only need LOGOS_LIDL_ROOT, already
+          # set above; without this they never execute in CI — which is how a
+          # bstr-event codegen bug and a stale assertion both shipped unnoticed.
+          doCheck = true;
+          cargoTestFlags = [ "-p" "logos-lidl-gen" ];
         };
       });
 
@@ -218,7 +224,54 @@
               exit 1
             fi
 
-            echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC" > $out/result.txt
+            # Binary EVENT round trip. The caller subscribed to the provider's
+            # blobReady(seq, payload: bstr) event in on_context_ready; ask the
+            # provider to emit a 4096-byte deterministic blob, then read back what
+            # the subscription actually received. This exercises the generated
+            # bstr-event emitter end-to-end — a payload that dropped or corrupted
+            # in codegen would surface here as size 0 or a wrong checksum. (The
+            # blob is byte i = (i*7+11)&0xff; the caller's checksum is
+            # sum(payload[i] * (i%31 + 1)) = 8354754 for 4096 bytes.)
+            if ! emitted=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
+                 call sdk_test_provider_module emit_blob 4096 2>emit.err); then
+              echo "logoscore emit_blob call failed:" >&2
+              cat emit.err "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2 || true
+              exit 1
+            fi
+            echo "emit_blob result: $emitted"
+            if ! printf '%s' "$emitted" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]'; then
+              echo "IPC test FAILED (expected emit_blob(4096) == 4096): $emitted" >&2
+              exit 1
+            fi
+
+            # The event is delivered to the caller's listener thread off the Qt
+            # event loop, so poll briefly for it rather than assuming it landed.
+            size="" ; checksum=""
+            for _i in $(seq 1 50); do
+              size=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
+                     call sdk_test_caller_module last_blob_size 2>/dev/null || true)
+              printf '%s' "$size" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]' && break
+              sleep 0.2
+            done
+            checksum=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
+                       call sdk_test_caller_module last_blob_checksum 2>/dev/null || true)
+            echo "last_blob_size: $size"
+            echo "last_blob_checksum: $checksum"
+            if ! printf '%s' "$size" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]'; then
+              echo "IPC test FAILED (binary event payload not received intact; expected size 4096): $size" >&2
+              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
+              exit 1
+            fi
+            if ! printf '%s' "$checksum" | grep -qE '"result"[[:space:]]*:[[:space:]]*8354754[[:space:]]*[,}]'; then
+              echo "IPC test FAILED (binary event payload corrupted; expected checksum 8354754): $checksum" >&2
+              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
+              exit 1
+            fi
+
+            {
+              echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC"
+              echo "Binary event passed: blobReady payload received as 4096 bytes, checksum 8354754"
+            } > $out/result.txt
           '';
         }
       );
