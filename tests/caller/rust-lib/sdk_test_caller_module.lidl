@@ -3,4 +3,6 @@ module sdk_test_caller_module {
   description "Minimal caller module for logos-rust-sdk integration tests"
   depends [sdk_test_provider_module]
   method call_add(a: int, b: int) -> int
+  method last_blob_size() -> int
+  method last_blob_checksum() -> int
 }
