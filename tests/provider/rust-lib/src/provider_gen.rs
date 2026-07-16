@@ -180,10 +180,11 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
     // Copy the dispatch fn pointer out and RELEASE the REGISTERED
     // lock BEFORE running the handler. A concurrency:"multi" module's
     // glue calls this from worker threads; holding the mutex across
-    // the handler would serialize every call (peak overlap 1). The
-    // INSTANCE arc is already cloned + unlocked inside dispatch_impl,
-    // so concurrent handlers are safe. Same release-before-call shape
-    // as ensure_ready.
+    // the handler would serialize every call (peak overlap 1).
+    // dispatch_impl resolves the instance internally (a cloned Arc in
+    // multi mode, the boxed instance behind the SingleInstance mutex in
+    // single mode) without holding REGISTERED, so dropping the lock here
+    // first is safe. Same release-before-call shape as ensure_ready.
     let dispatch = match REGISTERED.lock().unwrap().as_ref() { Some(r) => r.dispatch, None => return std::ptr::null_mut() };
     match dispatch(&method, &args) {
         Some(value) => to_c_string(value.to_string()),

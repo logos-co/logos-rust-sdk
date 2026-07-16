@@ -473,14 +473,21 @@ pub fn generate_provider_with(
             .enumerate()
             .map(|(i, p)| arg_from_json(&p.ty, &format!("args.get({}).unwrap_or(&serde_json::Value::Null)", i)))
             .collect();
+        // Only guard the arg count when the method actually takes parameters —
+        // `if args.len() < 0` is a dead check on a zero-arg method.
+        let guard = if n > 0 {
+            format!("                if args.len() < {} {{ return None; }}\n", n)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
             "            \"{}\" => {{\n\
-             \x20               if args.len() < {} {{ return None; }}\n\
+             {}\
              \x20               let result = imp.{}({});\n\
              \x20               Some({})\n\
              \x20           }}\n",
             m.name,
-            n,
+            guard,
             snake(&m.name),
             args.join(", "),
             ret_to_json(&m.return_type, "result")
@@ -545,10 +552,11 @@ pub fn generate_provider_with(
          \x20   // Copy the dispatch fn pointer out and RELEASE the REGISTERED\n\
          \x20   // lock BEFORE running the handler. A concurrency:\"multi\" module's\n\
          \x20   // glue calls this from worker threads; holding the mutex across\n\
-         \x20   // the handler would serialize every call (peak overlap 1). The\n\
-         \x20   // INSTANCE arc is already cloned + unlocked inside dispatch_impl,\n\
-         \x20   // so concurrent handlers are safe. Same release-before-call shape\n\
-         \x20   // as ensure_ready.\n\
+         \x20   // the handler would serialize every call (peak overlap 1).\n\
+         \x20   // dispatch_impl resolves the instance internally (a cloned Arc in\n\
+         \x20   // multi mode, the boxed instance behind the SingleInstance mutex in\n\
+         \x20   // single mode) without holding REGISTERED, so dropping the lock here\n\
+         \x20   // first is safe. Same release-before-call shape as ensure_ready.\n\
          \x20   let dispatch = match REGISTERED.lock().unwrap().as_ref() {{ Some(r) => r.dispatch, None => return std::ptr::null_mut() }};\n\
          \x20   match dispatch(&method, &args) {{\n\
          \x20       Some(value) => to_c_string(value.to_string()),\n\
