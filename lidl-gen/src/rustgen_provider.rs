@@ -344,6 +344,13 @@ pub fn generate_provider_with(
                 (TypeKind::Primitive, "bstr") => {
                     format!("__logos_args.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
                 }
+                // `any` is passed as `&serde_json::Value` (like Array/Map), so it
+                // must be cloned, not fed to `Value::from` (no `From<&Value>`).
+                // The remaining primitives (int/uint/float64/bool by value, tstr
+                // as &str) do convert via `Value::from`.
+                (TypeKind::Primitive, "any") => {
+                    format!("__logos_args.push({}.clone());", snake(&p.name))
+                }
                 (TypeKind::Primitive, _) => {
                     format!("__logos_args.push(serde_json::Value::from({}));", snake(&p.name))
                 }
