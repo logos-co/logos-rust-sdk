@@ -91,7 +91,7 @@ fn arg_from_json(ty: &TypeExpr, expr: &str) -> String {
         (TypeKind::Primitive, "float64") => format!("{}.as_f64().unwrap_or_default()", expr),
         (TypeKind::Primitive, "bool") => format!("{}.as_bool().unwrap_or_default()", expr),
         (TypeKind::Primitive, "bstr") => {
-            format!("logos_rust_sdk::bytes::decode({}).unwrap_or_default()", expr)
+            format!("logos_rust_sdk::bytes::decode_lenient({}).unwrap_or_default()", expr)
         }
         _ => format!("{}.clone()", expr),
     }
