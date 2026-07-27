@@ -34,6 +34,7 @@
 //! `doctests/cross-language-composition.test.yaml`.
 
 mod ffi;
+pub mod args;
 pub mod bytes;
 mod error;
 mod params;

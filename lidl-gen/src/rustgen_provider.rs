@@ -83,17 +83,19 @@ fn qt_type_name(ty: &TypeExpr) -> String {
     }
 }
 
-fn arg_from_json(ty: &TypeExpr, expr: &str) -> String {
+/// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
+/// message. Composites stay a pass-through clone (see args::as_value) — typed
+/// validation of [T]/{tstr: T} is the remaining gap against C++.
+fn arg_accessor(ty: &TypeExpr, index: usize) -> (String, bool) {
+    let call = |f: &str| format!("logos_rust_sdk::args::{}(args, {})", f, index);
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => format!("{}.as_str().unwrap_or_default().to_string()", expr),
-        (TypeKind::Primitive, "int") => format!("{}.as_i64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "uint") => format!("{}.as_u64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "float64") => format!("{}.as_f64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "bool") => format!("{}.as_bool().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "bstr") => {
-            format!("logos_rust_sdk::bytes::decode_lenient({}).unwrap_or_default()", expr)
-        }
-        _ => format!("{}.clone()", expr),
+        (TypeKind::Primitive, "tstr") => (call("as_string"), true),
+        (TypeKind::Primitive, "int") => (call("as_i64"), true),
+        (TypeKind::Primitive, "uint") => (call("as_u64"), true),
+        (TypeKind::Primitive, "float64") => (call("as_f64"), true),
+        (TypeKind::Primitive, "bool") => (call("as_bool"), true),
+        (TypeKind::Primitive, "bstr") => (call("as_bytes"), true),
+        _ => (call("as_value"), false),
     }
 }
 
@@ -474,12 +476,27 @@ pub fn generate_provider_with(
 
     for m in &module.methods {
         let n = m.params.len();
-        let args: Vec<String> = m
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| arg_from_json(&p.ty, &format!("args.get({}).unwrap_or(&serde_json::Value::Null)", i)))
-            .collect();
+        // Each parameter becomes a fallible let-binding, so a wrong-typed
+        // argument returns the canonical dispatch_failed object instead of
+        // silently substituting 0 / "" / false / empty bytes and running the
+        // author's method on it. Matches what the C++ glue does when
+        // logos::CodecError propagates out of a decode.
+        let mut bindings = String::new();
+        let mut idents: Vec<String> = Vec::new();
+        for (i, p) in m.params.iter().enumerate() {
+            let (accessor, fallible) = arg_accessor(&p.ty, i);
+            let ident = format!("__logos_a{}", i);
+            if fallible {
+                bindings.push_str(&format!(
+                    "                let {} = match {} {{ Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", &e)) }};\n",
+                    ident, accessor, module.name
+                ));
+            } else {
+                bindings.push_str(&format!("                let {} = {};\n", ident, accessor));
+            }
+            idents.push(ident);
+        }
+        let args: Vec<String> = idents;
         // Only guard the arg count when the method actually takes parameters —
         // `if args.len() < 0` is a dead check on a zero-arg method.
         let guard = if n > 0 {
@@ -490,11 +507,13 @@ pub fn generate_provider_with(
         out.push_str(&format!(
             "            \"{}\" => {{\n\
              {}\
+             {}\
              \x20               let result = imp.{}({});\n\
              \x20               Some({})\n\
              \x20           }}\n",
             m.name,
             guard,
+            bindings,
             snake(&m.name),
             args.join(", "),
             ret_to_json(&m.return_type, "result")
