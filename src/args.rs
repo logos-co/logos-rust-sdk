@@ -11,10 +11,15 @@
 //! These accessors fail instead, with the message wording and the `argN` path
 //! logos-protocol uses, so the two languages report the same thing.
 //!
-//! Note what is deliberately NOT changed: too-few-arguments still yields a NULL
-//! dispatch reply, because that is what the C++ glue does
-//! (`if (args.size() < N) return nullptr;`). Turning it into a structured error
-//! here would create the mirror image of the bug this module fixes.
+//! A wrong argument COUNT reports `invalid_args` — see [`invalid_args`]. Both
+//! languages changed together, so neither starts rejecting inputs the other
+//! still accepts.
+//!
+//! Unknown method names deliberately keep the NULL reply. The Qt glue maps NULL
+//! to an empty QVariant, and a caller that optimistically calls an optional
+//! lifecycle hook and reads "no value" as "not implemented" would misread a
+//! structured error as a real return value. `logos_module_get_methods` is the
+//! supported way to ask what exists.
 
 use serde_json::Value;
 
@@ -91,6 +96,18 @@ pub fn as_value(args: &[Value], index: usize) -> Value {
     get(args, index).clone()
 }
 
+/// A malformed call: the method exists but the argument count is wrong. Reports
+/// why, instead of the NULL reply this used to be — the Qt glue turns NULL into
+/// an empty QVariant, so "you passed 2 of 4 arguments" looked like a successful
+/// empty answer. Same code and message as the C++ generated glue.
+pub fn invalid_args(origin: &str, expected: usize, got: usize) -> Value {
+    serde_json::json!({
+        "code": "invalid_args",
+        "message": format!("expected {} arguments, got {}", expected, got),
+        "origin": origin,
+    })
+}
+
 /// The canonical structured error a failed dispatch returns, matching the object
 /// C++ generated glue emits.
 pub fn dispatch_failed(origin: &str, message: &str) -> Value {
@@ -149,6 +166,14 @@ mod tests {
             as_bytes(&vec![json!(true)], 0).unwrap_err(),
             "expected bytes at arg0, got boolean"
         );
+    }
+
+    #[test]
+    fn invalid_args_shape_matches_cpp() {
+        let e = invalid_args("my_module", 4, 2);
+        assert_eq!(e["code"], json!("invalid_args"));
+        assert_eq!(e["message"], json!("expected 4 arguments, got 2"));
+        assert_eq!(e["origin"], json!("my_module"));
     }
 
     #[test]

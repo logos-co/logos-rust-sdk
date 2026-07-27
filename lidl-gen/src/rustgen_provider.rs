@@ -500,7 +500,10 @@ pub fn generate_provider_with(
         // Only guard the arg count when the method actually takes parameters —
         // `if args.len() < 0` is a dead check on a zero-arg method.
         let guard = if n > 0 {
-            format!("                if args.len() < {} {{ return None; }}\n", n)
+            format!(
+                "                if args.len() < {} {{ return Some(logos_rust_sdk::args::invalid_args(\"{}\", {}, args.len())); }}\n",
+                n, module.name, n
+            )
         } else {
             String::new()
         };
