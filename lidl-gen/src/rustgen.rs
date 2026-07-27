@@ -1,6 +1,7 @@
 //! Rust code generation: a typed client struct per LIDL module.
 
 use crate::ast::*;
+use std::collections::BTreeSet;
 
 fn pascal(name: &str) -> String {
     name.split('_')
@@ -30,11 +31,27 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// The set of record names the module actually DECLARES.
+///
+/// A `Named` type is not automatically a record: the LIDL front end has no
+/// `void` builtin, so `-> void` parses as `Named("void")` — and pascal-casing
+/// every Named produced `-> Void`, a type that does not exist. Only a name in
+/// `module.types` gets the struct; anything else keeps the untyped fallback it
+/// had before records existed.
+pub(crate) fn record_names(module: &ModuleDecl) -> BTreeSet<String> {
+    module.types.iter().map(|t| t.name.clone()).collect()
+}
+
+/// Whether `ty` names a declared record.
+pub(crate) fn is_record(ty: &TypeExpr, recs: &BTreeSet<String>) -> bool {
+    ty.kind == TypeKind::Named && recs.contains(&ty.name)
+}
+
 /// Rust parameter type for a LIDL type.
 /// The owned Rust type for a LIDL type. Records become their generated struct;
 /// composites recurse, so `[Status]` is `Vec<Status>` and `{tstr: bstr}` is
 /// `BTreeMap<String, Vec<u8>>`.
-pub(crate) fn owned_type(ty: &TypeExpr) -> String {
+pub(crate) fn owned_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "String".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -42,13 +59,13 @@ pub(crate) fn owned_type(ty: &TypeExpr) -> String {
         (TypeKind::Primitive, "float64") => "f64".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
-        (TypeKind::Named, n) => pascal(n),
+        (TypeKind::Named, n) if recs.contains(n) => pascal(n),
         (TypeKind::Array, _) if ty.elements.len() == 1 => {
-            format!("Vec<{}>", owned_type(&ty.elements[0]))
+            format!("Vec<{}>", owned_type(&ty.elements[0], recs))
         }
         (TypeKind::Map, _) if ty.elements.len() == 2 => format!(
             "std::collections::BTreeMap<String, {}>",
-            owned_type(&ty.elements[1])
+            owned_type(&ty.elements[1], recs)
         ),
         _ => "serde_json::Value".into(),
     }
@@ -59,21 +76,21 @@ pub(crate) fn owned_type(ty: &TypeExpr) -> String {
 /// `bstr` goes through the tagged-bytes codec at EVERY depth — a plain serde
 /// encode would emit a number array that no other language decodes as bytes,
 /// which is the bug class of logos-protocol #21/#23.
-fn enc_expr(ty: &TypeExpr, expr: &str) -> String {
+fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => {
             format!("logos_rust_sdk::bytes::encode(&{}[..])", expr)
         }
-        (TypeKind::Named, _) => format!("{}.to_json()", expr),
+        (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", expr),
         (TypeKind::Array, _) if ty.elements.len() == 1 => format!(
             "serde_json::Value::Array({}.iter().map(|__e| {}).collect())",
             expr,
-            enc_expr(&ty.elements[0], "__e")
+            enc_expr(&ty.elements[0], "__e", recs)
         ),
         (TypeKind::Map, _) if ty.elements.len() == 2 => format!(
             "serde_json::Value::Object({}.iter().map(|(__k, __v)| (__k.clone(), {})).collect())",
             expr,
-            enc_expr(&ty.elements[1], "__v")
+            enc_expr(&ty.elements[1], "__v", recs)
         ),
         _ => format!("serde_json::json!({})", expr),
     }
@@ -82,7 +99,7 @@ fn enc_expr(ty: &TypeExpr, expr: &str) -> String {
 /// `expr` (a `&serde_json::Value`) -> the owned type, as an expression using `?`
 /// inside a function returning Option. Mirrors logos_codec.h's acceptance:
 /// bytes take the lenient set, `any` passes through verbatim.
-fn dec_expr(ty: &TypeExpr, expr: &str) -> String {
+fn dec_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => format!("{}.as_str()?.to_string()", expr),
         (TypeKind::Primitive, "int") => format!("{}.as_i64()?", expr),
@@ -92,16 +109,16 @@ fn dec_expr(ty: &TypeExpr, expr: &str) -> String {
         (TypeKind::Primitive, "bstr") => {
             format!("logos_rust_sdk::bytes::decode_lenient({})?", expr)
         }
-        (TypeKind::Named, n) => format!("{}::from_json({})?", pascal(n), expr),
+        (TypeKind::Named, n) if recs.contains(n) => format!("{}::from_json({})?", pascal(n), expr),
         (TypeKind::Array, _) if ty.elements.len() == 1 => format!(
             "{}.as_array()?.iter().map(|__e| Some({})).collect::<Option<Vec<_>>>()?",
             expr,
-            dec_expr(&ty.elements[0], "__e")
+            dec_expr(&ty.elements[0], "__e", recs)
         ),
         (TypeKind::Map, _) if ty.elements.len() == 2 => format!(
             "{}.as_object()?.iter().map(|(__k, __v)| Some((__k.clone(), {}))).collect::<Option<std::collections::BTreeMap<_, _>>>()?",
             expr,
-            dec_expr(&ty.elements[1], "__v")
+            dec_expr(&ty.elements[1], "__v", recs)
         ),
         _ => format!("{}.clone()", expr),
     }
@@ -111,6 +128,7 @@ fn dec_expr(ty: &TypeExpr, expr: &str) -> String {
 /// to_json/from_json rather than a serde derive — a `bstr` field has to ride the
 /// canonical {"_bytes": base64url} form, which derive(Serialize) would not do.
 pub(crate) fn emit_records(module: &ModuleDecl) -> String {
+    let recs = record_names(module);
     let mut out = String::new();
     for t in &module.types {
         let name = pascal(&t.name);
@@ -119,7 +137,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             t.name, module.name, name
         ));
         for f in &t.fields {
-            out.push_str(&format!("    pub {}: {},\n", snake(&f.name), owned_type(&f.ty)));
+            out.push_str(&format!("    pub {}: {},\n", snake(&f.name), owned_type(&f.ty, &recs)));
         }
         out.push_str("}\n\n");
 
@@ -131,7 +149,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             out.push_str(&format!(
                 "        o.insert(\"{}\".to_string(), {});\n",
                 f.name,
-                enc_expr(&f.ty, &format!("self.{}", snake(&f.name)))
+                enc_expr(&f.ty, &format!("self.{}", snake(&f.name)), &recs)
             ));
         }
         out.push_str("        serde_json::Value::Object(o)\n    }\n\n");
@@ -146,7 +164,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             out.push_str(&format!(
                 "            {}: {},\n",
                 snake(&f.name),
-                dec_expr(&f.ty, &format!("o.get(\"{}\")?", f.name))
+                dec_expr(&f.ty, &format!("o.get(\"{}\")?", f.name), &recs)
             ));
         }
         out.push_str("        })\n    }\n}\n\n");
@@ -154,7 +172,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
     out
 }
 
-fn param_type(ty: &TypeExpr) -> String {
+fn param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "&str".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -166,9 +184,9 @@ fn param_type(ty: &TypeExpr) -> String {
         // no existing consumer signature changes. Composites other than
         // [record] deliberately stay &serde_json::Value — retyping them WOULD
         // change every existing call site.
-        (TypeKind::Named, n) => format!("&{}", pascal(n)),
+        (TypeKind::Named, n) if recs.contains(n) => format!("&{}", pascal(n)),
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
         {
             format!("&[{}]", pascal(&ty.elements[0].name))
         }
@@ -177,12 +195,12 @@ fn param_type(ty: &TypeExpr) -> String {
 }
 
 /// Expression converting a parameter into its JSON wire value.
-fn param_to_json(name: &str, ty: &TypeExpr) -> String {
+fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode({})", name),
-        (TypeKind::Named, _) => format!("{}.to_json()", name),
+        (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", name),
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
         {
             format!(
                 "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
@@ -199,7 +217,7 @@ fn param_to_json(name: &str, ty: &TypeExpr) -> String {
 }
 
 /// (return type, conversion-from-json expression over `value`)
-fn return_conv(ty: &TypeExpr) -> (String, String) {
+fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => (
             "String".into(),
@@ -225,7 +243,7 @@ fn return_conv(ty: &TypeExpr) -> (String, String) {
             "Vec<u8>".into(),
             "logos_rust_sdk::bytes::decode(&value).ok_or_else(|| logos_rust_sdk::LogosError::JsonError(\"expected {\\\"_bytes\\\":...} payload\".to_string()))".into(),
         ),
-        (TypeKind::Named, n) => (
+        (TypeKind::Named, n) if recs.contains(n) => (
             pascal(n),
             format!(
                 "{}::from_json(&value).ok_or_else(|| logos_rust_sdk::LogosError::JsonError(\"expected a {} object\".to_string()))",
@@ -234,7 +252,7 @@ fn return_conv(ty: &TypeExpr) -> (String, String) {
             ),
         ),
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
         {
             let rec = pascal(&ty.elements[0].name);
             (
@@ -252,6 +270,7 @@ fn return_conv(ty: &TypeExpr) -> (String, String) {
 /// Generate the typed Rust client for a LIDL module.
 pub fn generate(module: &ModuleDecl) -> String {
     let struct_name = format!("{}Client", pascal(&module.name));
+    let recs = record_names(module);
     let mut out = String::new();
     out.push_str(&format!(
         "// Generated by logos-lidl-gen from the `{}` LIDL contract — do not edit.\n\
@@ -281,14 +300,14 @@ pub fn generate(module: &ModuleDecl) -> String {
         let params_sig: Vec<String> = m
             .params
             .iter()
-            .map(|p| format!("{}: {}", snake(&p.name), param_type(&p.ty)))
+            .map(|p| format!("{}: {}", snake(&p.name), param_type(&p.ty, &recs)))
             .collect();
         let args: Vec<String> = m
             .params
             .iter()
-            .map(|p| param_to_json(&snake(&p.name), &p.ty))
+            .map(|p| param_to_json(&snake(&p.name), &p.ty, &recs))
             .collect();
-        let (ret_ty, conv) = return_conv(&m.return_type);
+        let (ret_ty, conv) = return_conv(&m.return_type, &recs);
         // Carry the contract's doc comment onto the generated method.
         out.push('\n');
         for line in m.description.lines() {
@@ -665,5 +684,30 @@ module info_module {
         let m = parse(SAMPLE).expect("parse");
         let code = generate(&m);
         assert!(code.contains("-> Result<serde_json::Value, LogosError>"), "{}", code);
+    }
+
+    // Consumer-side half of the same trap: `-> void` must not become
+    // `-> Result<Void, LogosError>`.
+    #[test]
+    fn void_is_not_a_record_on_the_client_either() {
+        let src = r#"
+module v_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+  }
+  method doVoid() -> void
+  method getStatus() -> Status
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate(&m);
+        // (a plain contains("Void") would match the method name `doVoid`)
+        assert!(!code.contains("Result<Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("struct Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("Void::from_json"), "void leaked in as a struct:\n{}", code);
+        assert!(code.contains("pub fn do_void(&self) -> Result<serde_json::Value, LogosError>"), "{}", code);
+        assert!(code.contains("pub fn get_status(&self) -> Result<Status, LogosError>"), "{}", code);
     }
 }

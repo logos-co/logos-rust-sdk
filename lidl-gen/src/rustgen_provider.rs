@@ -18,6 +18,7 @@
 //! generated `Default`-based instantiation.
 
 use crate::ast::*;
+use std::collections::BTreeSet;
 
 fn pascal(name: &str) -> String {
     name.split('_')
@@ -47,7 +48,7 @@ fn snake(name: &str) -> String {
     out
 }
 
-fn rust_param_type(ty: &TypeExpr) -> String {
+fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "String".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -55,27 +56,30 @@ fn rust_param_type(ty: &TypeExpr) -> String {
         (TypeKind::Primitive, "float64") => "f64".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
-        // A record the contract declares is a real struct here too — the author
+        // A record the contract DECLARES is a real struct here too — the author
         // gets `s: Status`, not a serde_json::Value to pick apart. Other
         // composites stay Value: retyping THOSE would change existing impls.
-        (TypeKind::Named, n) => crate::rustgen::owned_type(&TypeExpr {
-            kind: TypeKind::Named,
-            name: n.to_string(),
-            elements: vec![],
-        }),
+        //
+        // `recs.contains` is load-bearing, not defensive: the LIDL front end has
+        // no `void` builtin, so `-> void` arrives here as Named("void"). Mapping
+        // every Named to its pascal-cased struct emitted `-> Void` and broke
+        // every provider with a void method.
+        (TypeKind::Named, n) if recs.contains(n) => {
+            crate::rustgen::owned_type(ty, recs)
+        }
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
         {
-            crate::rustgen::owned_type(ty)
+            crate::rustgen::owned_type(ty, recs)
         }
         _ => "serde_json::Value".into(),
     }
 }
 
-fn rust_return_type(ty: &TypeExpr) -> String {
+fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
-        _ => rust_param_type(ty),
+        _ => rust_param_type(ty, recs),
     }
 }
 
@@ -163,11 +167,13 @@ fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bo
 
 /// How to turn a validated serde_json::Value into the record struct the impl
 /// signature asks for. None when the parameter is not record-shaped.
-fn record_decode_for(ty: &TypeExpr) -> Option<String> {
+fn record_decode_for(ty: &TypeExpr, recs: &BTreeSet<String>) -> Option<String> {
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Named, n) => Some(format!("{}::from_json(&__V__)", pascal(n))),
+        (TypeKind::Named, n) if recs.contains(n) => {
+            Some(format!("{}::from_json(&__V__)", pascal(n)))
+        }
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
         {
             Some(format!(
                 "__V__.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>())",
@@ -178,7 +184,7 @@ fn record_decode_for(ty: &TypeExpr) -> Option<String> {
     }
 }
 
-fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
+fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode(&{})", expr),
         (TypeKind::Primitive, "result") => format!(
@@ -186,9 +192,9 @@ fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
              Err(e) => serde_json::json!({{\"success\": false, \"value\": null, \"error\": e}}) }}",
             expr
         ),
-        (TypeKind::Named, _) => format!("{}.to_json()", expr),
+        (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", expr),
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
         {
             format!(
                 "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
@@ -330,6 +336,7 @@ pub fn generate_provider_with(
     emit_trait: bool,
     multi: bool,
 ) -> String {
+    let recs = crate::rustgen::record_names(module);
     let pascal_name = pascal(&module.name);
     // sdk_test_provider_module -> SdkTestProviderModule, not ...ModuleModule
     let trait_name = if pascal_name.ends_with("Module") {
@@ -481,7 +488,7 @@ pub fn generate_provider_with(
             let params: Vec<String> = m
                 .params
                 .iter()
-                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
+                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty, &recs)))
                 .collect();
             out.push_str(&format!(
                 "    fn {}({}{}{}) -> {};\n",
@@ -489,7 +496,7 @@ pub fn generate_provider_with(
                 self_recv,
                 if params.is_empty() { "" } else { ", " },
                 params.join(", "),
-                rust_return_type(&m.return_type)
+                rust_return_type(&m.return_type, &recs)
             ));
         }
         out.push_str("}\n\n");
@@ -577,7 +584,7 @@ pub fn generate_provider_with(
         let mut idents: Vec<String> = Vec::new();
         for (i, p) in m.params.iter().enumerate() {
             let (accessor, fallible) = arg_accessor(&p.ty, i, module);
-            let record_decode = record_decode_for(&p.ty);
+            let record_decode = record_decode_for(&p.ty, &recs);
             let ident = format!("__logos_a{}", i);
             if fallible {
                 bindings.push_str(&format!(
@@ -623,7 +630,7 @@ pub fn generate_provider_with(
             bindings,
             snake(&m.name),
             args.join(", "),
-            ret_to_json(&m.return_type, "result")
+            ret_to_json(&m.return_type, "result", &recs)
         ));
     }
 
@@ -933,5 +940,39 @@ module info_module {
         assert!(code.contains("Status::from_json(&__logos_a0)"), "{}", code);
         // Returns encode through the record's own to_json.
         assert!(code.contains("__e.to_json()"), "{}", code);
+    }
+
+    // `void` is NOT a LIDL builtin — the front end hands it back as
+    // Named("void"), exactly like a record name. Treating every Named as a
+    // record emitted `fn do_void(&mut self) -> Void;`, a type that does not
+    // exist, breaking every provider with a void method (test_fullapi_rust
+    // among them). Only a name the contract DECLARES is a record.
+    #[test]
+    fn void_is_not_a_record() {
+        let src = r#"
+module v_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+  }
+  method doVoid() -> void
+  method takeStatus(s: Status) -> Status
+  method takeUndeclared(u: NotDeclared) -> tstr
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // (a plain contains("Void") would match the method name `doVoid`)
+        assert!(!code.contains("-> Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("struct Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("Void::from_json"), "void leaked in as a struct:\n{}", code);
+        assert!(code.contains("fn do_void(&mut self) -> serde_json::Value;"), "{}", code);
+        // A declared record still gets its struct...
+        assert!(code.contains("fn take_status(&mut self, s: Status) -> Status;"), "{}", code);
+        // ...and an UNDECLARED Named type keeps the untyped fallback rather
+        // than naming a struct nobody emits.
+        assert!(code.contains("fn take_undeclared(&mut self, u: serde_json::Value)"), "{}", code);
     }
 }
