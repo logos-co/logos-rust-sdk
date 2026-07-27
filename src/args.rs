@@ -116,6 +116,9 @@ pub enum Ty {
     Arr(&'static Ty),
     /// `{tstr: T}` — only the value type, since keys are always tstr.
     Map(&'static Ty),
+    /// A record: its declared fields. A field that is absent decodes as null and
+    /// is reported by name, matching the C++ codec's `arg0.field` path.
+    Record(&'static [(&'static str, &'static Ty)]),
 }
 
 fn check(value: &Value, ty: &Ty, path: &str) -> Result<(), String> {
@@ -143,6 +146,16 @@ fn check(value: &Value, ty: &Ty, path: &str) -> Result<(), String> {
             Some(items) => {
                 for (i, item) in items.iter().enumerate() {
                     check(item, elem, &format!("{}[{}]", path, i))?;
+                }
+                Ok(())
+            }
+        },
+        Ty::Record(fields) => match value.as_object() {
+            None => mismatch_at("object"),
+            Some(entries) => {
+                for (name, fty) in *fields {
+                    let v = entries.get(*name).unwrap_or(&Value::Null);
+                    check(v, fty, &format!("{}.{}", path, name))?;
                 }
                 Ok(())
             }
@@ -274,6 +287,30 @@ mod tests {
         assert!(as_value_checked(&vec![json!([true, {"a": 1}])], 0, &Ty::Arr(&Ty::Any)).is_ok());
         // Empty containers are valid.
         assert!(as_value_checked(&vec![json!([])], 0, &Ty::Arr(&Ty::Int)).is_ok());
+    }
+
+    #[test]
+    fn records_are_validated_field_by_field() {
+        static PORT: Ty = Ty::Uint;
+        static BLOB: Ty = Ty::Bstr;
+        static STATUS: Ty = Ty::Record(&[("port", &PORT), ("blob", &BLOB)]);
+
+        assert!(as_value_checked(&vec![json!({"port": 1, "blob": {"_bytes": "gAE"}})], 0, &STATUS).is_ok());
+        // A wrong field type reports the FIELD path, like the C++ codec.
+        assert_eq!(
+            as_value_checked(&vec![json!({"port": "x", "blob": ""})], 0, &STATUS).unwrap_err(),
+            "expected integer at arg0.port, got string"
+        );
+        // A missing field reads as null and is reported by name.
+        assert_eq!(
+            as_value_checked(&vec![json!({"port": 1})], 0, &STATUS).unwrap_err(),
+            "expected bytes at arg0.blob, got null"
+        );
+        // Not an object at all.
+        assert_eq!(
+            as_value_checked(&vec![json!([])], 0, &STATUS).unwrap_err(),
+            "expected object at arg0, got array"
+        );
     }
 
     #[test]

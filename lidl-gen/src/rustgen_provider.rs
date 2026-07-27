@@ -86,7 +86,7 @@ fn qt_type_name(ty: &TypeExpr) -> String {
 /// The LIDL type as a runtime `args::Ty` descriptor, so generated dispatch can
 /// validate a composite argument against its declared shape. `&Ty::Int` and the
 /// nested forms are constant expressions, so they promote to 'static.
-fn ty_descriptor(ty: &TypeExpr) -> String {
+fn ty_descriptor(ty: &TypeExpr, module: &ModuleDecl) -> String {
     let t = |n: &str| format!("logos_rust_sdk::args::Ty::{}", n);
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "int") => t("Int"),
@@ -96,12 +96,26 @@ fn ty_descriptor(ty: &TypeExpr) -> String {
         (TypeKind::Primitive, "tstr") => t("Tstr"),
         (TypeKind::Primitive, "bstr") => t("Bstr"),
         (TypeKind::Array, _) if ty.elements.len() == 1 => {
-            format!("logos_rust_sdk::args::Ty::Arr(&{})", ty_descriptor(&ty.elements[0]))
+            format!("logos_rust_sdk::args::Ty::Arr(&{})", ty_descriptor(&ty.elements[0], module))
         }
         (TypeKind::Map, _) if ty.elements.len() == 2 => {
-            format!("logos_rust_sdk::args::Ty::Map(&{})", ty_descriptor(&ty.elements[1]))
+            format!("logos_rust_sdk::args::Ty::Map(&{})", ty_descriptor(&ty.elements[1], module))
         }
-        // `any`, named records, anything else: stop recursing, as C++ does.
+        // A record declared by this contract expands to its fields, so a bad
+        // field is reported by name (arg0.port) exactly as the C++ codec does.
+        (TypeKind::Named, n) => match module.types.iter().find(|t| t.name == *n) {
+            Some(rec) => {
+                let fields: Vec<String> = rec
+                    .fields
+                    .iter()
+                    .map(|f| format!("(\"{}\", &{})", f.name, ty_descriptor(&f.ty, module)))
+                    .collect();
+                format!("logos_rust_sdk::args::Ty::Record(&[{}])", fields.join(", "))
+            }
+            // An undeclared name has no shape to check against.
+            None => t("Any"),
+        },
+        // `any` and anything else: stop recursing, as C++ does.
         _ => t("Any"),
     }
 }
@@ -109,7 +123,7 @@ fn ty_descriptor(ty: &TypeExpr) -> String {
 /// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
 /// message. Composites stay a pass-through clone (see args::as_value) — typed
 /// validation of [T]/{tstr: T} is the remaining gap against C++.
-fn arg_accessor(ty: &TypeExpr, index: usize) -> (String, bool) {
+fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bool) {
     let call = |f: &str| format!("logos_rust_sdk::args::{}(args, {})", f, index);
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => (call("as_string"), true),
@@ -127,7 +141,7 @@ fn arg_accessor(ty: &TypeExpr, index: usize) -> (String, bool) {
             format!(
                 "logos_rust_sdk::args::as_value_checked(args, {}, &{})",
                 index,
-                ty_descriptor(ty)
+                ty_descriptor(ty, module)
             ),
             true,
         ),
@@ -519,7 +533,7 @@ pub fn generate_provider_with(
         let mut bindings = String::new();
         let mut idents: Vec<String> = Vec::new();
         for (i, p) in m.params.iter().enumerate() {
-            let (accessor, fallible) = arg_accessor(&p.ty, i);
+            let (accessor, fallible) = arg_accessor(&p.ty, i, module);
             let ident = format!("__logos_a{}", i);
             if fallible {
                 bindings.push_str(&format!(
