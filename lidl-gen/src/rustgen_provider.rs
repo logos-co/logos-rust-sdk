@@ -83,6 +83,29 @@ fn qt_type_name(ty: &TypeExpr) -> String {
     }
 }
 
+/// The LIDL type as a runtime `args::Ty` descriptor, so generated dispatch can
+/// validate a composite argument against its declared shape. `&Ty::Int` and the
+/// nested forms are constant expressions, so they promote to 'static.
+fn ty_descriptor(ty: &TypeExpr) -> String {
+    let t = |n: &str| format!("logos_rust_sdk::args::Ty::{}", n);
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "int") => t("Int"),
+        (TypeKind::Primitive, "uint") => t("Uint"),
+        (TypeKind::Primitive, "float64") => t("Float64"),
+        (TypeKind::Primitive, "bool") => t("Bool"),
+        (TypeKind::Primitive, "tstr") => t("Tstr"),
+        (TypeKind::Primitive, "bstr") => t("Bstr"),
+        (TypeKind::Array, _) if ty.elements.len() == 1 => {
+            format!("logos_rust_sdk::args::Ty::Arr(&{})", ty_descriptor(&ty.elements[0]))
+        }
+        (TypeKind::Map, _) if ty.elements.len() == 2 => {
+            format!("logos_rust_sdk::args::Ty::Map(&{})", ty_descriptor(&ty.elements[1]))
+        }
+        // `any`, named records, anything else: stop recursing, as C++ does.
+        _ => t("Any"),
+    }
+}
+
 /// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
 /// message. Composites stay a pass-through clone (see args::as_value) — typed
 /// validation of [T]/{tstr: T} is the remaining gap against C++.
@@ -95,7 +118,19 @@ fn arg_accessor(ty: &TypeExpr, index: usize) -> (String, bool) {
         (TypeKind::Primitive, "float64") => (call("as_f64"), true),
         (TypeKind::Primitive, "bool") => (call("as_bool"), true),
         (TypeKind::Primitive, "bstr") => (call("as_bytes"), true),
-        _ => (call("as_value"), false),
+        // Composites keep arriving as serde_json::Value (retyping them would
+        // change every existing module's trait signatures), but they are now
+        // VALIDATED against the declared LIDL type first — so a [int] carrying a
+        // string fails here exactly as it does in a C++ provider, with the same
+        // arg0[1] path, instead of reaching the module unchecked.
+        _ => (
+            format!(
+                "logos_rust_sdk::args::as_value_checked(args, {}, &{})",
+                index,
+                ty_descriptor(ty)
+            ),
+            true,
+        ),
     }
 }
 

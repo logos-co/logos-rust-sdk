@@ -88,12 +88,84 @@ pub fn as_bytes(args: &[Value], index: usize) -> Result<Vec<u8>, String> {
     crate::bytes::decode_lenient(v).ok_or_else(|| mismatch("bytes", index, v))
 }
 
-/// LIDL `any` / composites: passed through untouched, as before. Typed
-/// validation of `[T]` and `{tstr: T}` is not implemented here yet — a C++
-/// provider validates those recursively and reports `arg1[0]`, so this is the
-/// remaining gap between the two languages.
+/// LIDL `any`: passed through untouched — `any` stops the recursion in
+/// logos_codec.h too, so whatever the peer sent arrives verbatim.
 pub fn as_value(args: &[Value], index: usize) -> Value {
     get(args, index).clone()
+}
+
+/// A LIDL type, as a runtime descriptor.
+///
+/// Rust module authors receive composites as `&serde_json::Value` — retyping them
+/// to `Vec<i64>` / `HashMap<String, Vec<u8>>` would change every existing
+/// module's trait signatures. So instead of decoding INTO a Rust type the way
+/// C++'s `Codec<T>` does, the generated dispatch validates the value against the
+/// declared LIDL type and then passes it through. Same acceptance, same error
+/// messages, no source churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ty {
+    Int,
+    Uint,
+    Float64,
+    Bool,
+    Tstr,
+    Bstr,
+    /// Stops recursion, like `any` in logos_codec.h.
+    Any,
+    /// `[T]`
+    Arr(&'static Ty),
+    /// `{tstr: T}` — only the value type, since keys are always tstr.
+    Map(&'static Ty),
+}
+
+fn check(value: &Value, ty: &Ty, path: &str) -> Result<(), String> {
+    let mismatch_at = |expected: &str| {
+        Err(format!("expected {} at {}, got {}", expected, path, type_name(value)))
+    };
+    match ty {
+        Ty::Any => Ok(()),
+        Ty::Int => {
+            if value.is_i64() || value.is_u64() { Ok(()) } else { mismatch_at("integer") }
+        }
+        Ty::Uint => {
+            if value.is_u64() { Ok(()) } else { mismatch_at("integer") }
+        }
+        // An integral JSON number is a valid float64 — JSON has one number type.
+        Ty::Float64 => if value.is_number() { Ok(()) } else { mismatch_at("number") },
+        Ty::Bool => if value.is_boolean() { Ok(()) } else { mismatch_at("bool") },
+        Ty::Tstr => if value.is_string() { Ok(()) } else { mismatch_at("string") },
+        // Bytes keep the lenient set, exactly as a C++ provider does.
+        Ty::Bstr => {
+            if crate::bytes::decode_lenient(value).is_some() { Ok(()) } else { mismatch_at("bytes") }
+        }
+        Ty::Arr(elem) => match value.as_array() {
+            None => mismatch_at("array"),
+            Some(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    check(item, elem, &format!("{}[{}]", path, i))?;
+                }
+                Ok(())
+            }
+        },
+        Ty::Map(val) => match value.as_object() {
+            None => mismatch_at("object"),
+            Some(entries) => {
+                for (k, v) in entries {
+                    check(v, val, &format!("{}.{}", path, k))?;
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+/// A composite argument, validated against its declared LIDL type before it is
+/// handed to the module. Reports the same path a C++ provider does (`arg1[0]`,
+/// `arg1.key`), so a `[int]` carrying a string fails identically in both.
+pub fn as_value_checked(args: &[Value], index: usize, ty: &Ty) -> Result<Value, String> {
+    let v = get(args, index);
+    check(v, ty, &at(index))?;
+    Ok(v.clone())
 }
 
 /// A malformed call: the method exists but the argument count is wrong. Reports
@@ -166,6 +238,42 @@ mod tests {
             as_bytes(&vec![json!(true)], 0).unwrap_err(),
             "expected bytes at arg0, got boolean"
         );
+    }
+
+    #[test]
+    fn composites_are_validated_recursively_like_cpp() {
+        // [int] with a bad element reports the element's path.
+        let args = vec![json!([1, "x"])];
+        assert_eq!(
+            as_value_checked(&args, 0, &Ty::Arr(&Ty::Int)).unwrap_err(),
+            "expected integer at arg0[1], got string"
+        );
+        // Wrong container shape entirely.
+        assert_eq!(
+            as_value_checked(&vec![json!("nope")], 0, &Ty::Arr(&Ty::Int)).unwrap_err(),
+            "expected array at arg0, got string"
+        );
+        assert_eq!(
+            as_value_checked(&vec![json!([])], 0, &Ty::Map(&Ty::Int)).unwrap_err(),
+            "expected object at arg0, got array"
+        );
+        // {tstr: T} reports the offending key.
+        assert_eq!(
+            as_value_checked(&vec![json!({"k": "x"})], 0, &Ty::Map(&Ty::Int)).unwrap_err(),
+            "expected integer at arg0.k, got string"
+        );
+        // Nesting composes, and bytes keep the lenient set at any depth.
+        assert!(as_value_checked(&vec![json!([[1, 2], []])], 0, &Ty::Arr(&Ty::Arr(&Ty::Int))).is_ok());
+        assert!(as_value_checked(
+            &vec![json!([crate::bytes::encode(&[0x80]), "raw"])],
+            0,
+            &Ty::Arr(&Ty::Bstr)
+        )
+        .is_ok());
+        // `any` stops the recursion — anything goes, as in logos_codec.h.
+        assert!(as_value_checked(&vec![json!([true, {"a": 1}])], 0, &Ty::Arr(&Ty::Any)).is_ok());
+        // Empty containers are valid.
+        assert!(as_value_checked(&vec![json!([])], 0, &Ty::Arr(&Ty::Int)).is_ok());
     }
 
     #[test]
