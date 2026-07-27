@@ -47,21 +47,34 @@ fn snake(name: &str) -> String {
     out
 }
 
-fn rust_param_type(ty: &TypeExpr) -> &'static str {
+fn rust_param_type(ty: &TypeExpr) -> String {
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => "String",
-        (TypeKind::Primitive, "int") => "i64",
-        (TypeKind::Primitive, "uint") => "u64",
-        (TypeKind::Primitive, "float64") => "f64",
-        (TypeKind::Primitive, "bool") => "bool",
-        (TypeKind::Primitive, "bstr") => "Vec<u8>",
-        _ => "serde_json::Value",
+        (TypeKind::Primitive, "tstr") => "String".into(),
+        (TypeKind::Primitive, "int") => "i64".into(),
+        (TypeKind::Primitive, "uint") => "u64".into(),
+        (TypeKind::Primitive, "float64") => "f64".into(),
+        (TypeKind::Primitive, "bool") => "bool".into(),
+        (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
+        // A record the contract declares is a real struct here too — the author
+        // gets `s: Status`, not a serde_json::Value to pick apart. Other
+        // composites stay Value: retyping THOSE would change existing impls.
+        (TypeKind::Named, n) => crate::rustgen::owned_type(&TypeExpr {
+            kind: TypeKind::Named,
+            name: n.to_string(),
+            elements: vec![],
+        }),
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+        {
+            crate::rustgen::owned_type(ty)
+        }
+        _ => "serde_json::Value".into(),
     }
 }
 
-fn rust_return_type(ty: &TypeExpr) -> &'static str {
+fn rust_return_type(ty: &TypeExpr) -> String {
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>",
+        (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
         _ => rust_param_type(ty),
     }
 }
@@ -148,6 +161,23 @@ fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bo
     }
 }
 
+/// How to turn a validated serde_json::Value into the record struct the impl
+/// signature asks for. None when the parameter is not record-shaped.
+fn record_decode_for(ty: &TypeExpr) -> Option<String> {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Named, n) => Some(format!("{}::from_json(&__V__)", pascal(n))),
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+        {
+            Some(format!(
+                "__V__.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>())",
+                pascal(&ty.elements[0].name)
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode(&{})", expr),
@@ -156,6 +186,15 @@ fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
              Err(e) => serde_json::json!({{\"success\": false, \"value\": null, \"error\": e}}) }}",
             expr
         ),
+        (TypeKind::Named, _) => format!("{}.to_json()", expr),
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && ty.elements[0].kind == TypeKind::Named =>
+        {
+            format!(
+                "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
+                expr
+            )
+        }
         _ => format!("serde_json::Value::from({})", expr),
     }
 }
@@ -425,6 +464,10 @@ pub fn generate_provider_with(
 
     // -- the trait ------------------------------------------------------------
     if emit_trait {
+        // The trait signatures name the record structs, so emit them here too.
+        // Same emitter the client generator uses, so both sides agree field for
+        // field and a bstr field rides the tagged form in both.
+        out.push_str(&crate::rustgen::emit_records(module));
         out.push_str(&format!("pub trait {}: {} {{\n", trait_name, trait_bounds));
         out.push_str(&format!(
             "    /// One-time setup hook: fires after the host has stamped the module\n\
@@ -534,12 +577,24 @@ pub fn generate_provider_with(
         let mut idents: Vec<String> = Vec::new();
         for (i, p) in m.params.iter().enumerate() {
             let (accessor, fallible) = arg_accessor(&p.ty, i, module);
+            let record_decode = record_decode_for(&p.ty);
             let ident = format!("__logos_a{}", i);
             if fallible {
                 bindings.push_str(&format!(
                     "                let {} = match {} {{ Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", &e)) }};\n",
                     ident, accessor, module.name
                 ));
+                // as_value_checked validated the shape and reported any bad
+                // field by name; this turns the validated value into the struct.
+                if let Some(dec) = &record_decode {
+                    bindings.push_str(&format!(
+                        "                let {} = match {} {{ Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", \"arg{}: malformed record\")) }};\n",
+                        ident,
+                        dec.replace("__V__", &ident),
+                        module.name,
+                        i
+                    ));
+                }
             } else {
                 bindings.push_str(&format!("                let {} = {};\n", ident, accessor));
             }
@@ -846,5 +901,37 @@ module rust_calc {
         assert!(!single.contains("Box<dyn std::any::Any + Send>"));
         assert!(!single.contains("logos_module_dispatch_async"));
         assert!(!single.contains("Send + Sync + 'static"));
+    }
+
+    // Records on the PROVIDER side: a Rust module author writes `s: Status`,
+    // not a serde_json::Value to pick apart. The dispatch validates the shape
+    // (Ty::Record reports arg0.field) and then materialises the struct.
+    #[test]
+    fn provider_speaks_records() {
+        let src = r#"
+module info_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+    blob: bstr
+  }
+  method describeStatus(s: Status) -> tstr
+  method makeStatuses() -> [Status]
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // The struct is declared here too — the trait signatures name it.
+        assert!(code.contains("pub struct Status"), "{}", code);
+        // Typed trait, in and out, including inside a container.
+        assert!(code.contains("fn describe_status(&mut self, s: Status) -> String;"), "{}", code);
+        assert!(code.contains("fn make_statuses(&mut self) -> Vec<Status>;"), "{}", code);
+        // Validated first (field paths), then decoded into the struct.
+        assert!(code.contains("Ty::Record(&[(\"port\""), "{}", code);
+        assert!(code.contains("Status::from_json(&__logos_a0)"), "{}", code);
+        // Returns encode through the record's own to_json.
+        assert!(code.contains("__e.to_json()"), "{}", code);
     }
 }

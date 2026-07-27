@@ -34,7 +34,7 @@ fn snake(name: &str) -> String {
 /// The owned Rust type for a LIDL type. Records become their generated struct;
 /// composites recurse, so `[Status]` is `Vec<Status>` and `{tstr: bstr}` is
 /// `BTreeMap<String, Vec<u8>>`.
-fn owned_type(ty: &TypeExpr) -> String {
+pub(crate) fn owned_type(ty: &TypeExpr) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "String".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -110,7 +110,7 @@ fn dec_expr(ty: &TypeExpr, expr: &str) -> String {
 /// One Rust struct per `type` decl in the contract, with hand-emitted
 /// to_json/from_json rather than a serde derive — a `bstr` field has to ride the
 /// canonical {"_bytes": base64url} form, which derive(Serialize) would not do.
-fn emit_records(module: &ModuleDecl) -> String {
+pub(crate) fn emit_records(module: &ModuleDecl) -> String {
     let mut out = String::new();
     for t in &module.types {
         let name = pascal(&t.name);
