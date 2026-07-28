@@ -18,6 +18,7 @@
 //! generated `Default`-based instantiation.
 
 use crate::ast::*;
+use std::collections::BTreeSet;
 
 fn pascal(name: &str) -> String {
     name.split('_')
@@ -47,22 +48,38 @@ fn snake(name: &str) -> String {
     out
 }
 
-fn rust_param_type(ty: &TypeExpr) -> &'static str {
+fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => "String",
-        (TypeKind::Primitive, "int") => "i64",
-        (TypeKind::Primitive, "uint") => "u64",
-        (TypeKind::Primitive, "float64") => "f64",
-        (TypeKind::Primitive, "bool") => "bool",
-        (TypeKind::Primitive, "bstr") => "Vec<u8>",
-        _ => "serde_json::Value",
+        (TypeKind::Primitive, "tstr") => "String".into(),
+        (TypeKind::Primitive, "int") => "i64".into(),
+        (TypeKind::Primitive, "uint") => "u64".into(),
+        (TypeKind::Primitive, "float64") => "f64".into(),
+        (TypeKind::Primitive, "bool") => "bool".into(),
+        (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
+        // A record the contract DECLARES is a real struct here too — the author
+        // gets `s: Status`, not a serde_json::Value to pick apart. Other
+        // composites stay Value: retyping THOSE would change existing impls.
+        //
+        // `recs.contains` is load-bearing, not defensive: the LIDL front end has
+        // no `void` builtin, so `-> void` arrives here as Named("void"). Mapping
+        // every Named to its pascal-cased struct emitted `-> Void` and broke
+        // every provider with a void method.
+        (TypeKind::Named, n) if recs.contains(n) => {
+            crate::rustgen::owned_type(ty, recs)
+        }
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
+        {
+            crate::rustgen::owned_type(ty, recs)
+        }
+        _ => "serde_json::Value".into(),
     }
 }
 
-fn rust_return_type(ty: &TypeExpr) -> &'static str {
+fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>",
-        _ => rust_param_type(ty),
+        (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
+        _ => rust_param_type(ty, recs),
     }
 }
 
@@ -83,21 +100,91 @@ fn qt_type_name(ty: &TypeExpr) -> String {
     }
 }
 
-fn arg_from_json(ty: &TypeExpr, expr: &str) -> String {
+/// The LIDL type as a runtime `args::Ty` descriptor, so generated dispatch can
+/// validate a composite argument against its declared shape. `&Ty::Int` and the
+/// nested forms are constant expressions, so they promote to 'static.
+fn ty_descriptor(ty: &TypeExpr, module: &ModuleDecl) -> String {
+    let t = |n: &str| format!("logos_rust_sdk::args::Ty::{}", n);
     match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => format!("{}.as_str().unwrap_or_default().to_string()", expr),
-        (TypeKind::Primitive, "int") => format!("{}.as_i64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "uint") => format!("{}.as_u64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "float64") => format!("{}.as_f64().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "bool") => format!("{}.as_bool().unwrap_or_default()", expr),
-        (TypeKind::Primitive, "bstr") => {
-            format!("logos_rust_sdk::bytes::decode({}).unwrap_or_default()", expr)
+        (TypeKind::Primitive, "int") => t("Int"),
+        (TypeKind::Primitive, "uint") => t("Uint"),
+        (TypeKind::Primitive, "float64") => t("Float64"),
+        (TypeKind::Primitive, "bool") => t("Bool"),
+        (TypeKind::Primitive, "tstr") => t("Tstr"),
+        (TypeKind::Primitive, "bstr") => t("Bstr"),
+        (TypeKind::Array, _) if ty.elements.len() == 1 => {
+            format!("logos_rust_sdk::args::Ty::Arr(&{})", ty_descriptor(&ty.elements[0], module))
         }
-        _ => format!("{}.clone()", expr),
+        (TypeKind::Map, _) if ty.elements.len() == 2 => {
+            format!("logos_rust_sdk::args::Ty::Map(&{})", ty_descriptor(&ty.elements[1], module))
+        }
+        // A record declared by this contract expands to its fields, so a bad
+        // field is reported by name (arg0.port) exactly as the C++ codec does.
+        (TypeKind::Named, n) => match module.types.iter().find(|t| t.name == *n) {
+            Some(rec) => {
+                let fields: Vec<String> = rec
+                    .fields
+                    .iter()
+                    .map(|f| format!("(\"{}\", &{})", f.name, ty_descriptor(&f.ty, module)))
+                    .collect();
+                format!("logos_rust_sdk::args::Ty::Record(&[{}])", fields.join(", "))
+            }
+            // An undeclared name has no shape to check against.
+            None => t("Any"),
+        },
+        // `any` and anything else: stop recursing, as C++ does.
+        _ => t("Any"),
     }
 }
 
-fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
+/// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
+/// message. Composites stay a pass-through clone (see args::as_value) — typed
+/// validation of [T]/{tstr: T} is the remaining gap against C++.
+fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bool) {
+    let call = |f: &str| format!("logos_rust_sdk::args::{}(args, {})", f, index);
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => (call("as_string"), true),
+        (TypeKind::Primitive, "int") => (call("as_i64"), true),
+        (TypeKind::Primitive, "uint") => (call("as_u64"), true),
+        (TypeKind::Primitive, "float64") => (call("as_f64"), true),
+        (TypeKind::Primitive, "bool") => (call("as_bool"), true),
+        (TypeKind::Primitive, "bstr") => (call("as_bytes"), true),
+        // Composites keep arriving as serde_json::Value (retyping them would
+        // change every existing module's trait signatures), but they are now
+        // VALIDATED against the declared LIDL type first — so a [int] carrying a
+        // string fails here exactly as it does in a C++ provider, with the same
+        // arg0[1] path, instead of reaching the module unchecked.
+        _ => (
+            format!(
+                "logos_rust_sdk::args::as_value_checked(args, {}, &{})",
+                index,
+                ty_descriptor(ty, module)
+            ),
+            true,
+        ),
+    }
+}
+
+/// How to turn a validated serde_json::Value into the record struct the impl
+/// signature asks for. None when the parameter is not record-shaped.
+fn record_decode_for(ty: &TypeExpr, recs: &BTreeSet<String>) -> Option<String> {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Named, n) if recs.contains(n) => {
+            Some(format!("{}::from_json(&__V__)", pascal(n)))
+        }
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
+        {
+            Some(format!(
+                "__V__.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>())",
+                pascal(&ty.elements[0].name)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode(&{})", expr),
         (TypeKind::Primitive, "result") => format!(
@@ -105,6 +192,15 @@ fn ret_to_json(ty: &TypeExpr, expr: &str) -> String {
              Err(e) => serde_json::json!({{\"success\": false, \"value\": null, \"error\": e}}) }}",
             expr
         ),
+        (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", expr),
+        (TypeKind::Array, _)
+            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
+        {
+            format!(
+                "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
+                expr
+            )
+        }
         _ => format!("serde_json::Value::from({})", expr),
     }
 }
@@ -240,6 +336,7 @@ pub fn generate_provider_with(
     emit_trait: bool,
     multi: bool,
 ) -> String {
+    let recs = crate::rustgen::record_names(module);
     let pascal_name = pascal(&module.name);
     // sdk_test_provider_module -> SdkTestProviderModule, not ...ModuleModule
     let trait_name = if pascal_name.ends_with("Module") {
@@ -374,6 +471,10 @@ pub fn generate_provider_with(
 
     // -- the trait ------------------------------------------------------------
     if emit_trait {
+        // The trait signatures name the record structs, so emit them here too.
+        // Same emitter the client generator uses, so both sides agree field for
+        // field and a bstr field rides the tagged form in both.
+        out.push_str(&crate::rustgen::emit_records(module));
         out.push_str(&format!("pub trait {}: {} {{\n", trait_name, trait_bounds));
         out.push_str(&format!(
             "    /// One-time setup hook: fires after the host has stamped the module\n\
@@ -387,7 +488,7 @@ pub fn generate_provider_with(
             let params: Vec<String> = m
                 .params
                 .iter()
-                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty)))
+                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty, &recs)))
                 .collect();
             out.push_str(&format!(
                 "    fn {}({}{}{}) -> {};\n",
@@ -395,7 +496,7 @@ pub fn generate_provider_with(
                 self_recv,
                 if params.is_empty() { "" } else { ", " },
                 params.join(", "),
-                rust_return_type(&m.return_type)
+                rust_return_type(&m.return_type, &recs)
             ));
         }
         out.push_str("}\n\n");
@@ -474,30 +575,62 @@ pub fn generate_provider_with(
 
     for m in &module.methods {
         let n = m.params.len();
-        let args: Vec<String> = m
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| arg_from_json(&p.ty, &format!("args.get({}).unwrap_or(&serde_json::Value::Null)", i)))
-            .collect();
+        // Each parameter becomes a fallible let-binding, so a wrong-typed
+        // argument returns the canonical dispatch_failed object instead of
+        // silently substituting 0 / "" / false / empty bytes and running the
+        // author's method on it. Matches what the C++ glue does when
+        // logos::CodecError propagates out of a decode.
+        let mut bindings = String::new();
+        let mut idents: Vec<String> = Vec::new();
+        for (i, p) in m.params.iter().enumerate() {
+            let (accessor, fallible) = arg_accessor(&p.ty, i, module);
+            let record_decode = record_decode_for(&p.ty, &recs);
+            let ident = format!("__logos_a{}", i);
+            if fallible {
+                bindings.push_str(&format!(
+                    "                let {} = match {} {{ Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", &e)) }};\n",
+                    ident, accessor, module.name
+                ));
+                // as_value_checked validated the shape and reported any bad
+                // field by name; this turns the validated value into the struct.
+                if let Some(dec) = &record_decode {
+                    bindings.push_str(&format!(
+                        "                let {} = match {} {{ Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", \"arg{}: malformed record\")) }};\n",
+                        ident,
+                        dec.replace("__V__", &ident),
+                        module.name,
+                        i
+                    ));
+                }
+            } else {
+                bindings.push_str(&format!("                let {} = {};\n", ident, accessor));
+            }
+            idents.push(ident);
+        }
+        let args: Vec<String> = idents;
         // Only guard the arg count when the method actually takes parameters —
         // `if args.len() < 0` is a dead check on a zero-arg method.
         let guard = if n > 0 {
-            format!("                if args.len() < {} {{ return None; }}\n", n)
+            format!(
+                "                if args.len() < {} {{ return Some(logos_rust_sdk::args::invalid_args(\"{}\", {}, args.len())); }}\n",
+                n, module.name, n
+            )
         } else {
             String::new()
         };
         out.push_str(&format!(
             "            \"{}\" => {{\n\
              {}\
+             {}\
              \x20               let result = imp.{}({});\n\
              \x20               Some({})\n\
              \x20           }}\n",
             m.name,
             guard,
+            bindings,
             snake(&m.name),
             args.join(", "),
-            ret_to_json(&m.return_type, "result")
+            ret_to_json(&m.return_type, "result", &recs)
         ));
     }
 
@@ -775,5 +908,71 @@ module rust_calc {
         assert!(!single.contains("Box<dyn std::any::Any + Send>"));
         assert!(!single.contains("logos_module_dispatch_async"));
         assert!(!single.contains("Send + Sync + 'static"));
+    }
+
+    // Records on the PROVIDER side: a Rust module author writes `s: Status`,
+    // not a serde_json::Value to pick apart. The dispatch validates the shape
+    // (Ty::Record reports arg0.field) and then materialises the struct.
+    #[test]
+    fn provider_speaks_records() {
+        let src = r#"
+module info_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+    blob: bstr
+  }
+  method describeStatus(s: Status) -> tstr
+  method makeStatuses() -> [Status]
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // The struct is declared here too — the trait signatures name it.
+        assert!(code.contains("pub struct Status"), "{}", code);
+        // Typed trait, in and out, including inside a container.
+        assert!(code.contains("fn describe_status(&mut self, s: Status) -> String;"), "{}", code);
+        assert!(code.contains("fn make_statuses(&mut self) -> Vec<Status>;"), "{}", code);
+        // Validated first (field paths), then decoded into the struct.
+        assert!(code.contains("Ty::Record(&[(\"port\""), "{}", code);
+        assert!(code.contains("Status::from_json(&__logos_a0)"), "{}", code);
+        // Returns encode through the record's own to_json.
+        assert!(code.contains("__e.to_json()"), "{}", code);
+    }
+
+    // `void` is NOT a LIDL builtin — the front end hands it back as
+    // Named("void"), exactly like a record name. Treating every Named as a
+    // record emitted `fn do_void(&mut self) -> Void;`, a type that does not
+    // exist, breaking every provider with a void method (test_fullapi_rust
+    // among them). Only a name the contract DECLARES is a record.
+    #[test]
+    fn void_is_not_a_record() {
+        let src = r#"
+module v_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+  }
+  method doVoid() -> void
+  method takeStatus(s: Status) -> Status
+  method takeUndeclared(u: NotDeclared) -> tstr
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // (a plain contains("Void") would match the method name `doVoid`)
+        assert!(!code.contains("-> Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("struct Void"), "void leaked in as a struct:\n{}", code);
+        assert!(!code.contains("Void::from_json"), "void leaked in as a struct:\n{}", code);
+        assert!(code.contains("fn do_void(&mut self) -> serde_json::Value;"), "{}", code);
+        // A declared record still gets its struct...
+        assert!(code.contains("fn take_status(&mut self, s: Status) -> Status;"), "{}", code);
+        // ...and an UNDECLARED Named type keeps the untyped fallback rather
+        // than naming a struct nobody emits.
+        assert!(code.contains("fn take_undeclared(&mut self, u: serde_json::Value)"), "{}", code);
     }
 }
