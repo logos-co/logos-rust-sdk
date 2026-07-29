@@ -76,9 +76,23 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     }
 }
 
+fn is_void(ty: &TypeExpr) -> bool {
+    // `void` is not a LIDL builtin, so it arrives as Named("void") and never as
+    // a declared record. Checked by name in exactly the places that need it,
+    // rather than added to the builtin table, so the parser stays the one
+    // authority on what a LIDL type is.
+    matches!(&ty.kind, TypeKind::Named) && ty.name == "void"
+}
+
 fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
+        // A void method returns nothing. It used to fall to the catch-all and
+        // hand the author `-> serde_json::Value`, which is how it ended up
+        // returning JSON null: null is the failure token on the Qt slot above,
+        // so the same void method answered `true` from a C++ provider and
+        // METHOD_FAILED from this one.
+        _ if is_void(ty) => "()".into(),
         _ => rust_param_type(ty, recs),
     }
 }
@@ -94,6 +108,10 @@ fn qt_type_name(ty: &TypeExpr) -> String {
         (TypeKind::Primitive, "float64") => "double".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "result") => "LogosResult".into(),
+        // Matches what the C++ backend advertises. Without this a void method
+        // was published as returnType "QVariant" here and "void" there — a
+        // second divergence, in the interface metadata rather than the value.
+        (TypeKind::Named, "void") => "void".into(),
         (TypeKind::Array, _) => "QVariantList".into(),
         (TypeKind::Map, _) => "QVariantMap".into(),
         _ => "QVariant".into(),
@@ -201,6 +219,11 @@ fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
                 expr
             )
         }
+        // Both edits are required together: serde_json has
+        // `impl From<()> for Value` producing Value::Null, so changing only the
+        // signature to `()` would still emit null and change nothing.
+        // `true` matches what the C++ backend puts on the C ABI.
+        _ if is_void(ty) => format!("{{ {}; serde_json::Value::Bool(true) }}", expr),
         _ => format!("serde_json::Value::from({})", expr),
     }
 }
@@ -490,13 +513,16 @@ pub fn generate_provider_with(
                 .iter()
                 .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty, &recs)))
                 .collect();
+            let ret = rust_return_type(&m.return_type, &recs);
             out.push_str(&format!(
-                "    fn {}({}{}{}) -> {};\n",
+                "    fn {}({}{}{}){};\n",
                 snake(&m.name),
                 self_recv,
                 if params.is_empty() { "" } else { ", " },
                 params.join(", "),
-                rust_return_type(&m.return_type, &recs)
+                // `-> ()` is legal but nobody writes it; a void method should read
+                // like one in the trait the author implements.
+                if ret == "()" { String::new() } else { format!(" -> {}", ret) }
             ));
         }
         out.push_str("}\n\n");
@@ -968,7 +994,10 @@ module v_module {
         assert!(!code.contains("-> Void"), "void leaked in as a struct:\n{}", code);
         assert!(!code.contains("struct Void"), "void leaked in as a struct:\n{}", code);
         assert!(!code.contains("Void::from_json"), "void leaked in as a struct:\n{}", code);
-        assert!(code.contains("fn do_void(&mut self) -> serde_json::Value;"), "{}", code);
+        assert!(code.contains("fn do_void(&mut self);"), "{}", code);
+        // `()` alone is not enough: serde_json's `impl From<()> for Value` yields
+        // Null, so the dispatch must emit the value explicitly.
+        assert!(code.contains("serde_json::Value::Bool(true)"), "void must not dispatch to null:\n{}", code);
         // A declared record still gets its struct...
         assert!(code.contains("fn take_status(&mut self, s: Status) -> Status;"), "{}", code);
         // ...and an UNDECLARED Named type keeps the untyped fallback rather

@@ -219,6 +219,14 @@ fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 /// (return type, conversion-from-json expression over `value`)
 fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
     match (&ty.kind, ty.name.as_str()) {
+        // A void method has nothing to hand back. It used to fall to the
+        // catch-all and return the raw serde_json::Value, which made the caller
+        // inspect a value the contract says does not exist — and made every
+        // consumer decide for itself whether the provider's answer meant
+        // success. The call still fails through `?` if the RPC failed.
+        // A BLOCK, not a bare statement: this conversion is also spliced into an
+        // expression position by the async wrapper, where a `let` is a syntax error.
+        (TypeKind::Named, "void") => ("()".into(), "{ let _ = value; Ok(()) }".into()),
         (TypeKind::Primitive, "tstr") => (
             "String".into(),
             "Ok(value.as_str().unwrap_or_default().to_string())".into(),
@@ -707,7 +715,7 @@ module v_module {
         assert!(!code.contains("Result<Void"), "void leaked in as a struct:\n{}", code);
         assert!(!code.contains("struct Void"), "void leaked in as a struct:\n{}", code);
         assert!(!code.contains("Void::from_json"), "void leaked in as a struct:\n{}", code);
-        assert!(code.contains("pub fn do_void(&self) -> Result<serde_json::Value, LogosError>"), "{}", code);
+        assert!(code.contains("pub fn do_void(&self) -> Result<(), LogosError>"), "{}", code);
         assert!(code.contains("pub fn get_status(&self) -> Result<Status, LogosError>"), "{}", code);
     }
 }
