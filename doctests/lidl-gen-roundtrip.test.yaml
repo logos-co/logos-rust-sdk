@@ -288,6 +288,10 @@ sections:
           grep -E 'trait|translate|attributes|nearest|emit_moved' geometry_gen.rs
         expect_contains:
           - "pub trait GeometryModule"
-          - "fn translate(&mut self, p: serde_json::Value, dx: f64, dy: f64) -> serde_json::Value"
+          # `Point` is a record the contract DECLARES, so the author gets a real
+          # struct rather than a Value to pick apart. This expected
+          # serde_json::Value until records landed; the composites BELOW are the
+          # ones that stay untyped.
+          - "fn translate(&mut self, p: Point, dx: f64, dy: f64) -> Point"
           - "fn attributes(&mut self, tags: serde_json::Value) -> serde_json::Value"
           - "pub fn emit_moved(from: &serde_json::Value, to: &serde_json::Value)"
