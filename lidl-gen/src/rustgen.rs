@@ -47,11 +47,22 @@ pub(crate) fn is_record(ty: &TypeExpr, recs: &BTreeSet<String>) -> bool {
     ty.kind == TypeKind::Named && recs.contains(&ty.name)
 }
 
+/// Whether `ty` is a usable `?T` — an optional that actually carries a value
+/// type. A degenerate Optional with no element (only reachable by hand-building
+/// an AST) keeps the untyped fallback rather than recursing forever.
+fn is_optional(ty: &TypeExpr) -> bool {
+    ty.is_optional() && !ty.elements.is_empty()
+}
+
 /// Rust parameter type for a LIDL type.
 /// The owned Rust type for a LIDL type. Records become their generated struct;
 /// composites recurse, so `[Status]` is `Vec<Status>` and `{tstr: bstr}` is
-/// `BTreeMap<String, Vec<u8>>`.
+/// `BTreeMap<String, Vec<u8>>`. `?T` is `Option<T>` — Rust's single empty
+/// inhabitant, which is why `?T` is two-state and never three.
 pub(crate) fn owned_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+    if is_optional(ty) {
+        return format!("Option<{}>", owned_type(ty.value_type(), recs));
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "String".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -77,6 +88,17 @@ pub(crate) fn owned_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 /// encode would emit a number array that no other language decodes as bytes,
 /// which is the bug class of logos-protocol #21/#23.
 fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
+    // A `?T` reached HERE is a positional slot (an element of a container, a
+    // return, an event param): there is no key to leave out, so empty is spelled
+    // `null`. The one NAMED slot — a record field — is encoded by
+    // `emit_records`, which omits the key instead.
+    if is_optional(ty) {
+        return format!(
+            "match &{} {{ Some(__o) => {}, None => serde_json::Value::Null }}",
+            expr,
+            enc_expr(ty.value_type(), "__o", recs)
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => {
             format!("logos_rust_sdk::bytes::encode(&{}[..])", expr)
@@ -100,6 +122,17 @@ fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
 /// inside a function returning Option. Mirrors logos_codec.h's acceptance:
 /// bytes take the lenient set, `any` passes through verbatim.
 fn dec_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
+    // `?T`: null is the empty state. A PRESENT value still decodes as `T`, and
+    // still fails the whole decode through `?` if it doesn't match — optional
+    // adds one inhabitant, it doesn't stop type checking. (`expr` appears twice,
+    // so callers pass a simple place expression here.)
+    if is_optional(ty) {
+        return format!(
+            "if {}.is_null() {{ None }} else {{ Some({}) }}",
+            expr,
+            dec_expr(ty.value_type(), expr, recs)
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => format!("{}.as_str()?.to_string()", expr),
         (TypeKind::Primitive, "int") => format!("{}.as_i64()?", expr),
@@ -124,6 +157,18 @@ fn dec_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     }
 }
 
+/// The owned Rust type of a record FIELD. Both optional spellings land here:
+/// `? name: T` carries its optionality in the field flag and `name: ?T` in the
+/// type, and `FieldDecl::is_optional` reconciles them, so the two emit the
+/// identical `Option<T>`.
+fn field_type(f: &FieldDecl, recs: &BTreeSet<String>) -> String {
+    if f.is_optional() {
+        format!("Option<{}>", owned_type(f.value_type(), recs))
+    } else {
+        owned_type(&f.ty, recs)
+    }
+}
+
 /// One Rust struct per `type` decl in the contract, with hand-emitted
 /// to_json/from_json rather than a serde derive — a `bstr` field has to ride the
 /// canonical {"_bytes": base64url} form, which derive(Serialize) would not do.
@@ -137,35 +182,81 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             t.name, module.name, name
         ));
         for f in &t.fields {
-            out.push_str(&format!("    pub {}: {},\n", snake(&f.name), owned_type(&f.ty, &recs)));
+            // `? name: T` and `name: ?T` are the SAME field. Only the second
+            // spelling puts the optionality in the TYPE, so the field type must
+            // come from the reconciled pair (is_optional + value_type) — asking
+            // owned_type about `f.ty` alone would type the flag spelling as a
+            // plain `T` while every encoder/decoder below treats it as empty-able.
+            out.push_str(&format!(
+                "    pub {}: {},\n",
+                snake(&f.name),
+                field_type(f, &recs)
+            ));
         }
         out.push_str("}\n\n");
 
         out.push_str(&format!("impl {} {{\n", name));
         out.push_str("    /// The record as its canonical JSON object.\n");
+        if t.fields.iter().any(|f| f.is_optional()) {
+            out.push_str(
+                "    ///\n\
+                 \x20   /// An empty optional field is spelled by OMITTING its key: a record\n\
+                 \x20   /// field is a NAMED slot, so it can simply be left out. Encoding is\n\
+                 \x20   /// canonical (one spelling per state), which makes a round trip\n\
+                 \x20   /// canonicalising rather than byte-identical — `{\"f\": null}` decodes\n\
+                 \x20   /// to the same empty state and re-encodes as `{}`.\n",
+            );
+        }
         out.push_str("    pub fn to_json(&self) -> serde_json::Value {\n");
         out.push_str("        let mut o = serde_json::Map::new();\n");
         for f in &t.fields {
-            out.push_str(&format!(
-                "        o.insert(\"{}\".to_string(), {});\n",
-                f.name,
-                enc_expr(&f.ty, &format!("self.{}", snake(&f.name)), &recs)
-            ));
+            let field = snake(&f.name);
+            if f.is_optional() {
+                out.push_str(&format!(
+                    "        if let Some(__o) = &self.{} {{ o.insert(\"{}\".to_string(), {}); }}\n",
+                    field,
+                    f.name,
+                    enc_expr(f.value_type(), "__o", &recs)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "        o.insert(\"{}\".to_string(), {});\n",
+                    f.name,
+                    enc_expr(&f.ty, &format!("self.{}", field), &recs)
+                ));
+            }
         }
         out.push_str("        serde_json::Value::Object(o)\n    }\n\n");
 
         out.push_str("    /// Decode the canonical JSON object. None if a field is missing or\n");
         out.push_str("    /// has the wrong shape — the provider reports the same mismatch with\n");
         out.push_str("    /// a field path, so this is the consumer-side half of that contract.\n");
+        if t.fields.iter().any(|f| f.is_optional()) {
+            out.push_str(
+                "    ///\n\
+                 \x20   /// An OPTIONAL field is exempt: an absent key and an explicit null are\n\
+                 \x20   /// the same empty state. A present-but-wrong-typed value still fails,\n\
+                 \x20   /// there as everywhere.\n",
+            );
+        }
         out.push_str("    pub fn from_json(v: &serde_json::Value) -> Option<Self> {\n");
         out.push_str("        let o = v.as_object()?;\n");
         out.push_str("        Some(Self {\n");
         for f in &t.fields {
-            out.push_str(&format!(
-                "            {}: {},\n",
-                snake(&f.name),
+            let value = if f.is_optional() {
+                // Both halves of the liberal decode in one expression: `None`
+                // (absent key) and `Some(Null)` (explicit null) are one state.
+                // The `?` inside the decode still short-circuits the whole
+                // from_json when a PRESENT value has the wrong type.
+                format!(
+                    "match o.get(\"{}\") {{ None | Some(serde_json::Value::Null) => None, Some(__v) => Some({}) }}",
+                    f.name,
+                    dec_expr(f.value_type(), "__v", &recs)
+                )
+            } else {
                 dec_expr(&f.ty, &format!("o.get(\"{}\")?", f.name), &recs)
-            ));
+            };
+            out.push_str(&format!("            {}: {},\n", snake(&f.name), value));
         }
         out.push_str("        })\n    }\n}\n\n");
     }
@@ -173,6 +264,11 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
 }
 
 fn param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+    // `?T` borrows exactly as `T` does, wrapped in Rust's one empty inhabitant:
+    // `?tstr` is `Option<&str>`, `?Status` is `Option<&Status>`.
+    if is_optional(ty) {
+        return format!("Option<{}>", param_type(ty.value_type(), recs));
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "&str".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -196,6 +292,17 @@ fn param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 
 /// Expression converting a parameter into its JSON wire value.
 fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+    // An empty `?T` argument is spelled `null`, never a missing element: a
+    // parameter is a POSITIONAL slot, and arity must never change. (The
+    // provider's decode is liberal and accepts a short argument list too, but
+    // this side always sends the full arity.)
+    if is_optional(ty) {
+        return format!(
+            "match {} {{ Some(__o) => {}, None => serde_json::Value::Null }}",
+            name,
+            param_to_json("__o", ty.value_type(), recs)
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode({})", name),
         (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", name),
@@ -218,6 +325,19 @@ fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 
 /// (return type, conversion-from-json expression over `value`)
 fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
+    // `-> ?T` is `Option<T>`: null is the empty state (a return is positional,
+    // so that is how the provider spells empty). A present value still has to
+    // decode as `T` and still fails the call if it doesn't.
+    if is_optional(ty) {
+        let (inner_ty, inner_conv) = return_conv(ty.value_type(), recs);
+        return (
+            format!("Option<{}>", inner_ty),
+            format!(
+                "if value.is_null() {{ Ok(None) }} else {{ ({}).map(Some) }}",
+                inner_conv
+            ),
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         // A void method has nothing to hand back. It used to fall to the
         // catch-all and return the raw serde_json::Value, which made the caller
@@ -272,6 +392,47 @@ fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
             )
         }
         _ => ("serde_json::Value".into(), "Ok(value)".into()),
+    }
+}
+
+/// How many leading positional slots a peer MUST supply: everything up to and
+/// including the last required one. A trailing `?T` may arrive as null or not
+/// at all — absent and null are the same empty state on decode — so it does not
+/// count toward the minimum. (The encoding side always sends the full arity.)
+pub(crate) fn required_arity(params: &[ParamDecl]) -> usize {
+    params.iter().rposition(|p| !p.is_optional()).map_or(0, |i| i + 1)
+}
+
+/// The typed Rust field for one event parameter. Scalars are owned; anything
+/// else keeps the untyped Value, and `?T` wraps whichever it is in `Option`.
+fn event_param_type(ty: &TypeExpr) -> String {
+    if is_optional(ty) {
+        return format!("Option<{}>", event_param_type(ty.value_type()));
+    }
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => "String".into(),
+        (TypeKind::Primitive, "int") => "i64".into(),
+        (TypeKind::Primitive, "uint") => "u64".into(),
+        (TypeKind::Primitive, "float64") => "f64".into(),
+        (TypeKind::Primitive, "bool") => "bool".into(),
+        (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
+        _ => "serde_json::Value".into(),
+    }
+}
+
+/// Decode one event parameter out of the payload element `expr`, as an
+/// expression using `?` inside a function returning Option.
+fn event_param_decode(ty: &TypeExpr, expr: &str) -> String {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => format!("{}.as_str()?.to_string()", expr),
+        (TypeKind::Primitive, "int") => format!("{}.as_i64()?", expr),
+        (TypeKind::Primitive, "uint") => format!("{}.as_u64()?", expr),
+        (TypeKind::Primitive, "float64") => format!("{}.as_f64()?", expr),
+        (TypeKind::Primitive, "bool") => format!("{}.as_bool()?", expr),
+        (TypeKind::Primitive, "bstr") => {
+            format!("logos_rust_sdk::bytes::decode(&{})?", expr)
+        }
+        _ => format!("{}.clone()", expr),
     }
 }
 
@@ -394,7 +555,14 @@ pub fn generate(module: &ModuleDecl) -> String {
                     " of [{}]",
                     e.params
                         .iter()
-                        .map(|p| format!("{}: {}", p.name, p.ty.name))
+                        .map(|p| {
+                            format!(
+                                "{}: {}{}",
+                                p.name,
+                                if p.is_optional() { "?" } else { "" },
+                                p.value_type().name
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -416,21 +584,22 @@ pub fn generate(module: &ModuleDecl) -> String {
             e.name,
             snake(&e.name),
             event_struct,
-            e.params.len(),
+            // Only the REQUIRED prefix has to be there: an optional trailing
+            // parameter may arrive as null or not at all (decode is liberal in
+            // an optional slot, absent and null being the same empty state).
+            required_arity(&e.params),
             event_struct
         ));
         for (i, p) in e.params.iter().enumerate() {
             let field = snake(&p.name);
-            let expr = match (&p.ty.kind, p.ty.name.as_str()) {
-                (TypeKind::Primitive, "tstr") => format!("arr[{}].as_str()?.to_string()", i),
-                (TypeKind::Primitive, "int") => format!("arr[{}].as_i64()?", i),
-                (TypeKind::Primitive, "uint") => format!("arr[{}].as_u64()?", i),
-                (TypeKind::Primitive, "float64") => format!("arr[{}].as_f64()?", i),
-                (TypeKind::Primitive, "bool") => format!("arr[{}].as_bool()?", i),
-                (TypeKind::Primitive, "bstr") => {
-                    format!("logos_rust_sdk::bytes::decode(&arr[{}])?", i)
-                }
-                _ => format!("arr[{}].clone()", i),
+            let expr = if p.is_optional() {
+                format!(
+                    "match arr.get({}) {{ None | Some(serde_json::Value::Null) => None, Some(__v) => Some({}) }}",
+                    i,
+                    event_param_decode(p.value_type(), "__v")
+                )
+            } else {
+                event_param_decode(&p.ty, &format!("arr[{}]", i))
             };
             out.push_str(&format!("            {}: {},\n", field, expr));
         }
@@ -448,16 +617,11 @@ pub fn generate(module: &ModuleDecl) -> String {
             e.name, event_struct
         ));
         for p in &e.params {
-            let field_ty = match (&p.ty.kind, p.ty.name.as_str()) {
-                (TypeKind::Primitive, "tstr") => "String",
-                (TypeKind::Primitive, "int") => "i64",
-                (TypeKind::Primitive, "uint") => "u64",
-                (TypeKind::Primitive, "float64") => "f64",
-                (TypeKind::Primitive, "bool") => "bool",
-                (TypeKind::Primitive, "bstr") => "Vec<u8>",
-                _ => "serde_json::Value",
-            };
-            out.push_str(&format!("    pub {}: {},\n", snake(&p.name), field_ty));
+            out.push_str(&format!(
+                "    pub {}: {},\n",
+                snake(&p.name),
+                event_param_type(&p.ty)
+            ));
         }
         out.push_str("}\n\n");
     }
@@ -637,9 +801,155 @@ module calc_module {
         .unwrap();
         assert_eq!(m.depends, vec!["a", "b"]);
         assert_eq!(m.types[0].fields.len(), 4);
-        assert!(m.types[0].fields[1].optional);
-        assert_eq!(m.methods[0].params[1].ty.kind, TypeKind::Optional);
         assert_eq!(m.events[0].params[0].ty.name, "bstr");
+    }
+
+    // ── Optionality ─────────────────────────────────────────────────────────
+    //
+    // These used to be one assertion that the grammar PARSED `?` — which it
+    // always did — while no backend read the flag at all: every optional slot
+    // came out as a plain `T` or an untyped Value. What has to be true is about
+    // the EMITTED code, so that is what is asserted here.
+
+    const OPTIONALS: &str = r#"
+module opt_module {
+  version "1.0.0"
+  depends []
+  type Account {
+    id: tstr
+    ? label: tstr
+    note: ?bstr
+  }
+  method find(id: ?tstr) -> ?Account
+  method describe(a: Account) -> tstr
+  event changed(id: tstr, label: ?tstr)
+}
+"#;
+
+    // R3: `? name: T` and `name: ?T` are one meaning with two spellings, and
+    // MUST produce byte-identical code. A backend that reads only the type kind
+    // types the flag spelling as a plain `T` — which is exactly what happened
+    // to the struct FIELD while its encoder already treated it as empty-able.
+    #[test]
+    fn both_optional_spellings_emit_identical_code() {
+        let head = "module m { version \"1.0.0\" depends [] type T { ";
+        let tail = " } method f(t: T) -> tstr }";
+        let flag = parse(&format!("{}? label: tstr{}", head, tail)).expect("parse flag spelling");
+        let kind = parse(&format!("{}label: ?tstr{}", head, tail)).expect("parse type spelling");
+        // Different spelling in the AST...
+        assert!(flag.types[0].fields[0].optional);
+        assert_eq!(kind.types[0].fields[0].ty.kind, TypeKind::Optional);
+        // ...one answer, and one emitted result — client and provider alike.
+        assert!(flag.types[0].fields[0].is_optional());
+        assert!(kind.types[0].fields[0].is_optional());
+        assert_eq!(generate(&flag), generate(&kind));
+        assert_eq!(
+            crate::rustgen_provider::generate_provider(&flag, "0.1.0"),
+            crate::rustgen_provider::generate_provider(&kind, "0.1.0")
+        );
+        // And it is the OPTIONAL shape both landed on, not the plain one.
+        assert!(generate(&flag).contains("pub label: Option<String>"), "{}", generate(&flag));
+    }
+
+    // A record field is the one NAMED slot: empty is spelled by omitting the
+    // key. Decode is liberal — absent and null are the same empty state.
+    #[test]
+    fn optional_record_field_omits_the_key_and_decodes_liberally() {
+        let m = parse(OPTIONALS).expect("parse");
+        let code = generate(&m);
+
+        // Rust's single empty inhabitant, for both spellings and for bstr.
+        assert!(code.contains("pub id: String,"), "{}", code);
+        assert!(code.contains("pub label: Option<String>,"), "{}", code);
+        assert!(code.contains("pub note: Option<Vec<u8>>,"), "{}", code);
+
+        // ENCODE: the key is left out entirely when empty — never written null.
+        assert!(
+            code.contains(
+                "if let Some(__o) = &self.label { o.insert(\"label\".to_string(), serde_json::json!(__o)); }"
+            ),
+            "{}",
+            code
+        );
+        // A bstr field still rides the tagged form when it IS present.
+        assert!(
+            code.contains(
+                "if let Some(__o) = &self.note { o.insert(\"note\".to_string(), logos_rust_sdk::bytes::encode(&__o[..])); }"
+            ),
+            "{}",
+            code
+        );
+        // The required field is untouched: still written unconditionally.
+        assert!(code.contains("o.insert(\"id\".to_string(), serde_json::json!(self.id));"), "{}", code);
+
+        // DECODE: absent and null alike are empty; a present value still has to
+        // decode as T (the `?` fails the whole record, as for a required field).
+        assert!(
+            code.contains(
+                "label: match o.get(\"label\") { None | Some(serde_json::Value::Null) => None, Some(__v) => Some(__v.as_str()?.to_string()) },"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "note: match o.get(\"note\") { None | Some(serde_json::Value::Null) => None, Some(__v) => Some(logos_rust_sdk::bytes::decode_lenient(__v)?) },"
+            ),
+            "{}",
+            code
+        );
+        // Required fields keep the strict `?` decode.
+        assert!(code.contains("id: o.get(\"id\")?.as_str()?.to_string(),"), "{}", code);
+    }
+
+    // A parameter, a return and an event payload are POSITIONAL slots: they
+    // have no key to omit, so empty is `null` and the arity never changes.
+    #[test]
+    fn optional_positional_slots_are_spelled_null_on_the_wire() {
+        let m = parse(OPTIONALS).expect("parse");
+        let code = generate(&m);
+
+        // Typed both ways: `Option<&str>` in, `Option<Account>` out.
+        assert!(
+            code.contains("pub fn find(&self, id: Option<&str>) -> Result<Option<Account>, LogosError>"),
+            "{}",
+            code
+        );
+        // The argument is still a slot in the array — arity is never changed.
+        assert!(
+            code.contains(
+                "vec![match id { Some(__o) => serde_json::Value::from(__o), None => serde_json::Value::Null }]"
+            ),
+            "{}",
+            code
+        );
+        // A null return is the empty state; a present one still decodes as the
+        // record and still fails the call if it doesn't.
+        assert!(
+            code.contains("if value.is_null() { Ok(None) } else { (Account::from_json(&value)"),
+            "{}",
+            code
+        );
+        // The async twin agrees with its sync sibling.
+        assert!(
+            code.contains("F: FnOnce(Result<Option<Account>, LogosError>) + Send + 'static,"),
+            "{}",
+            code
+        );
+
+        // Event payloads: typed struct field + a decoder that reads an absent
+        // element and a null element as the same empty state.
+        assert!(code.contains("pub label: Option<String>,"), "{}", code);
+        assert!(
+            code.contains(
+                "label: match arr.get(1) { None | Some(serde_json::Value::Null) => None, Some(__v) => Some(__v.as_str()?.to_string()) },"
+            ),
+            "{}",
+            code
+        );
+        // Only the REQUIRED prefix is demanded of the payload.
+        assert!(code.contains("if arr.len() < 1 { return None; }"), "{}", code);
+        assert!(code.contains("id: arr[0].as_str()?.to_string(),"), "{}", code);
     }
 
     // Records: a `type` decl becomes a real Rust struct, and methods take and

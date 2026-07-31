@@ -75,12 +75,38 @@ jobs:
       # All specs in ONE invocation, one combined report. The workspace
       # tests-and-doctests pipeline parses this block to discover the spec
       # list — keep every spec here.
+      # Resolve the commit under test. For pull requests this is the PR's head
+      # commit (not the synthetic merge commit); for pushes it's the pushed
+      # commit. Passed to --release-for below so the doc-test builds THIS
+      # commit of logos-rust-sdk instead of latest master.
+      #
+      # Without it, `{release}` expands to nothing and every spec builds
+      # `github:logos-co/logos-rust-sdk` — i.e. master. A PR that changes
+      # generator OUTPUT then tests master's generator against the PR's updated
+      # expectations, and fails no matter what the PR does.
+      #
+      # Fork PRs are the exception: their head commit lives in the fork, so nix
+      # could not fetch `github:logos-co/logos-rust-sdk/<sha>`. Blank the SHA
+      # for forks (--release-for repo= → latest), so the spec still runs.
+      - name: Resolve commit under test
+        id: commit
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "Fork PR detected — doc-test will run against latest master."
+          else
+            echo "sha=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run doc-tests
         run: |
           nix run github:logos-co/logos-doctest -- run \
             doctests/cross-language-composition.test.yaml \
             doctests/concurrent-dispatch.test.yaml \
             doctests/lidl-gen-roundtrip.test.yaml \
+            --release-for logos-rust-sdk=${{ steps.commit.outputs.sha }} \
             --verbose \
             --continue-on-fail \
             --report "${{ runner.temp }}/rust-sdk-doctest-report.html"
