@@ -94,6 +94,54 @@ pub fn as_value(args: &[Value], index: usize) -> Value {
     get(args, index).clone()
 }
 
+/// LIDL `?T` in a positional slot (a method argument).
+///
+/// `?T` is TWO-state: a value of T, or empty. Decode is liberal — an ABSENT
+/// argument (which [`get`] already reads as null) and an explicit null are the
+/// same empty state. A PRESENT value must still satisfy `T`: optional widens
+/// the domain by exactly one inhabitant and does not disable type checking, so
+/// `?tstr` given `42` fails exactly as `tstr` given `42` does.
+fn as_opt<T>(
+    args: &[Value],
+    index: usize,
+    decode: fn(&[Value], usize) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    if get(args, index).is_null() {
+        return Ok(None);
+    }
+    decode(args, index).map(Some)
+}
+
+/// LIDL `?int`.
+pub fn as_opt_i64(args: &[Value], index: usize) -> Result<Option<i64>, String> {
+    as_opt(args, index, as_i64)
+}
+
+/// LIDL `?uint`.
+pub fn as_opt_u64(args: &[Value], index: usize) -> Result<Option<u64>, String> {
+    as_opt(args, index, as_u64)
+}
+
+/// LIDL `?float64`.
+pub fn as_opt_f64(args: &[Value], index: usize) -> Result<Option<f64>, String> {
+    as_opt(args, index, as_f64)
+}
+
+/// LIDL `?bool`.
+pub fn as_opt_bool(args: &[Value], index: usize) -> Result<Option<bool>, String> {
+    as_opt(args, index, as_bool)
+}
+
+/// LIDL `?tstr`.
+pub fn as_opt_string(args: &[Value], index: usize) -> Result<Option<String>, String> {
+    as_opt(args, index, as_string)
+}
+
+/// LIDL `?bstr`.
+pub fn as_opt_bytes(args: &[Value], index: usize) -> Result<Option<Vec<u8>>, String> {
+    as_opt(args, index, as_bytes)
+}
+
 /// A LIDL type, as a runtime descriptor.
 ///
 /// Rust module authors receive composites as `&serde_json::Value` — retyping them
@@ -112,12 +160,17 @@ pub enum Ty {
     Bstr,
     /// Stops recursion, like `any` in logos_codec.h.
     Any,
+    /// `?T` — the slot may be EMPTY. Two-state: a value of T, or empty. An
+    /// absent key and an explicit null are the same empty state; a present
+    /// value is still checked against `T`.
+    Opt(&'static Ty),
     /// `[T]`
     Arr(&'static Ty),
     /// `{tstr: T}` — only the value type, since keys are always tstr.
     Map(&'static Ty),
     /// A record: its declared fields. A field that is absent decodes as null and
-    /// is reported by name, matching the C++ codec's `arg0.field` path.
+    /// is reported by name, matching the C++ codec's `arg0.field` path — unless
+    /// the field is `Opt`, which accepts that null as empty.
     Record(&'static [(&'static str, &'static Ty)]),
 }
 
@@ -127,6 +180,15 @@ fn check(value: &Value, ty: &Ty, path: &str) -> Result<(), String> {
     };
     match ty {
         Ty::Any => Ok(()),
+        // Decode is liberal in an optional slot: absent (already null by the
+        // time it reaches here — `get` and the Record arm both coerce a missing
+        // slot to null) and explicit null are the SAME empty state. A PRESENT
+        // value still has to satisfy T, and reports the mismatch at this exact
+        // path: optional widens the domain by one inhabitant, it does not turn
+        // type checking off.
+        Ty::Opt(inner) => {
+            if value.is_null() { Ok(()) } else { check(value, inner, path) }
+        }
         Ty::Int => {
             if value.is_i64() || value.is_u64() { Ok(()) } else { mismatch_at("integer") }
         }
@@ -310,6 +372,84 @@ mod tests {
         assert_eq!(
             as_value_checked(&vec![json!([])], 0, &STATUS).unwrap_err(),
             "expected object at arg0, got array"
+        );
+    }
+
+    // `?T` is TWO-state: a value of T, or empty. Absent and explicit null are
+    // the SAME empty state on decode; a present value is still checked.
+    #[test]
+    fn optional_slots_accept_empty_but_still_check_a_present_value() {
+        static TSTR: Ty = Ty::Tstr;
+        static OPT_TSTR: Ty = Ty::Opt(&TSTR);
+
+        // Explicit null decodes as empty...
+        assert!(as_value_checked(&vec![json!(null)], 0, &OPT_TSTR).is_ok());
+        // ...and so does an absent argument (which `get` reads as null).
+        assert!(as_value_checked(&vec![], 0, &OPT_TSTR).is_ok());
+        // A value of T is fine, of course.
+        assert!(as_value_checked(&vec![json!("hi")], 0, &OPT_TSTR).is_ok());
+        // But a PRESENT wrong-typed value is still an error, with the same
+        // message the required slot gives: optional widens the domain by
+        // exactly one inhabitant, it does not turn type checking off.
+        assert_eq!(
+            as_value_checked(&vec![json!(42)], 0, &OPT_TSTR).unwrap_err(),
+            "expected string at arg0, got number"
+        );
+        // The required twin still rejects both empties.
+        assert_eq!(
+            as_value_checked(&vec![json!(null)], 0, &TSTR).unwrap_err(),
+            "expected string at arg0, got null"
+        );
+
+        // The scalar accessors have the same two-state behaviour, typed.
+        assert_eq!(as_opt_string(&vec![json!("hi")], 0).unwrap(), Some("hi".to_string()));
+        assert_eq!(as_opt_string(&vec![json!(null)], 0).unwrap(), None);
+        assert_eq!(as_opt_string(&vec![], 0).unwrap(), None);
+        assert_eq!(
+            as_opt_string(&vec![json!(42)], 0).unwrap_err(),
+            "expected string at arg0, got number"
+        );
+        assert_eq!(as_opt_i64(&vec![json!(-3)], 0).unwrap(), Some(-3));
+        assert_eq!(as_opt_bytes(&vec![json!(null)], 0).unwrap(), None);
+        assert_eq!(
+            as_opt_bytes(&vec![crate::bytes::encode(&[0x80])], 0).unwrap(),
+            Some(vec![0x80])
+        );
+        assert_eq!(as_opt_bool(&vec![json!(true)], 0).unwrap(), Some(true));
+        assert_eq!(as_opt_u64(&vec![json!(4)], 0).unwrap(), Some(4));
+        assert_eq!(as_opt_f64(&vec![json!(1.5)], 0).unwrap(), Some(1.5));
+    }
+
+    // An optional RECORD FIELD: the missing key that is a mismatch for a
+    // required field is the empty state for an optional one — and nesting
+    // still composes.
+    #[test]
+    fn optional_record_fields_may_be_absent_or_null() {
+        static PORT: Ty = Ty::Uint;
+        static TSTR: Ty = Ty::Tstr;
+        static LABEL: Ty = Ty::Opt(&TSTR);
+        static STATUS: Ty = Ty::Record(&[("port", &PORT), ("label", &LABEL)]);
+
+        // Present, absent and null are all accepted for `label`.
+        assert!(as_value_checked(&vec![json!({"port": 1, "label": "a"})], 0, &STATUS).is_ok());
+        assert!(as_value_checked(&vec![json!({"port": 1})], 0, &STATUS).is_ok());
+        assert!(as_value_checked(&vec![json!({"port": 1, "label": null})], 0, &STATUS).is_ok());
+        // A present wrong-typed value still reports the FIELD path.
+        assert_eq!(
+            as_value_checked(&vec![json!({"port": 1, "label": 7})], 0, &STATUS).unwrap_err(),
+            "expected string at arg0.label, got number"
+        );
+        // The REQUIRED field is unaffected: absent is still a mismatch.
+        assert_eq!(
+            as_value_checked(&vec![json!({"label": "a"})], 0, &STATUS).unwrap_err(),
+            "expected integer at arg0.port, got null"
+        );
+        // Optionality composes inside containers, and reports the element path.
+        static OPT_ARR: Ty = Ty::Arr(&LABEL);
+        assert!(as_value_checked(&vec![json!(["a", null])], 0, &OPT_ARR).is_ok());
+        assert_eq!(
+            as_value_checked(&vec![json!(["a", 7])], 0, &OPT_ARR).unwrap_err(),
+            "expected string at arg0[1], got number"
         );
     }
 

@@ -48,7 +48,18 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// Whether `ty` is a usable `?T`. A degenerate Optional carrying no value type
+/// (only reachable by hand-building an AST) keeps the untyped fallback.
+fn is_optional(ty: &TypeExpr) -> bool {
+    ty.is_optional() && !ty.elements.is_empty()
+}
+
 fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+    // `?T` is `Option<T>` — Rust's single empty inhabitant, so the author gets
+    // the two states the contract declares and no third one.
+    if is_optional(ty) {
+        return format!("Option<{}>", rust_param_type(ty.value_type(), recs));
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "String".into(),
         (TypeKind::Primitive, "int") => "i64".into(),
@@ -85,6 +96,9 @@ fn is_void(ty: &TypeExpr) -> bool {
 }
 
 fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+    if is_optional(ty) {
+        return format!("Option<{}>", rust_return_type(ty.value_type(), recs));
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
         // A void method returns nothing. It used to fall to the catch-all and
@@ -123,6 +137,14 @@ fn qt_type_name(ty: &TypeExpr) -> String {
 /// nested forms are constant expressions, so they promote to 'static.
 fn ty_descriptor(ty: &TypeExpr, module: &ModuleDecl) -> String {
     let t = |n: &str| format!("logos_rust_sdk::args::Ty::{}", n);
+    // `?T` widens the slot by exactly one inhabitant: Ty::Opt accepts null (and
+    // an absent key, which reads as null) and otherwise checks T as usual.
+    if is_optional(ty) {
+        return format!(
+            "logos_rust_sdk::args::Ty::Opt(&{})",
+            ty_descriptor(ty.value_type(), module)
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "int") => t("Int"),
         (TypeKind::Primitive, "uint") => t("Uint"),
@@ -143,7 +165,19 @@ fn ty_descriptor(ty: &TypeExpr, module: &ModuleDecl) -> String {
                 let fields: Vec<String> = rec
                     .fields
                     .iter()
-                    .map(|f| format!("(\"{}\", &{})", f.name, ty_descriptor(&f.ty, module)))
+                    // Both spellings of an optional field (`? name: T` and
+                    // `name: ?T`) are reconciled by the frontend, so they emit
+                    // the same Ty::Opt descriptor. An optional field's missing
+                    // key stops being the mismatch it is for a required one.
+                    .map(|f| {
+                        let inner = ty_descriptor(f.value_type(), module);
+                        let slot = if f.is_optional() {
+                            format!("logos_rust_sdk::args::Ty::Opt(&{})", inner)
+                        } else {
+                            inner
+                        };
+                        format!("(\"{}\", &{})", f.name, slot)
+                    })
                     .collect();
                 format!("logos_rust_sdk::args::Ty::Record(&[{}])", fields.join(", "))
             }
@@ -155,24 +189,45 @@ fn ty_descriptor(ty: &TypeExpr, module: &ModuleDecl) -> String {
     }
 }
 
+/// The `args::as_*` suffix that decodes this type into an owned Rust scalar,
+/// or None for a composite (which arrives as a validated `serde_json::Value`).
+/// One place, so the accessor choice and everything keyed off it agree.
+fn scalar_accessor(ty: &TypeExpr) -> Option<&'static str> {
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => Some("string"),
+        (TypeKind::Primitive, "int") => Some("i64"),
+        (TypeKind::Primitive, "uint") => Some("u64"),
+        (TypeKind::Primitive, "float64") => Some("f64"),
+        (TypeKind::Primitive, "bool") => Some("bool"),
+        (TypeKind::Primitive, "bstr") => Some("bytes"),
+        _ => None,
+    }
+}
+
 /// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
 /// message. Composites stay a pass-through clone (see args::as_value) — typed
 /// validation of [T]/{tstr: T} is the remaining gap against C++.
 fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bool) {
-    let call = |f: &str| format!("logos_rust_sdk::args::{}(args, {})", f, index);
-    match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => (call("as_string"), true),
-        (TypeKind::Primitive, "int") => (call("as_i64"), true),
-        (TypeKind::Primitive, "uint") => (call("as_u64"), true),
-        (TypeKind::Primitive, "float64") => (call("as_f64"), true),
-        (TypeKind::Primitive, "bool") => (call("as_bool"), true),
-        (TypeKind::Primitive, "bstr") => (call("as_bytes"), true),
+    // `?T` reads through the `as_opt_*` twin of T's accessor: an absent
+    // argument and an explicit null are the same empty state, and a present
+    // one is checked against T exactly as before.
+    let opt = is_optional(ty);
+    match scalar_accessor(ty.value_type()) {
+        Some(f) => (
+            format!(
+                "logos_rust_sdk::args::{}{}(args, {})",
+                if opt { "as_opt_" } else { "as_" },
+                f,
+                index
+            ),
+            true,
+        ),
         // Composites keep arriving as serde_json::Value (retyping them would
         // change every existing module's trait signatures), but they are now
         // VALIDATED against the declared LIDL type first — so a [int] carrying a
         // string fails here exactly as it does in a C++ provider, with the same
         // arg0[1] path, instead of reaching the module unchecked.
-        _ => (
+        None => (
             format!(
                 "logos_rust_sdk::args::as_value_checked(args, {}, &{})",
                 index,
@@ -183,26 +238,59 @@ fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bo
     }
 }
 
+/// Whether a validated value still has to be lifted into `Option` by hand.
+///
+/// An optional SCALAR arrives already typed (`as_opt_*` returns `Option<T>`)
+/// and an optional RECORD is lifted by its decode, but an optional composite
+/// that stays untyped comes back as a raw `serde_json::Value` whose null IS the
+/// empty state — while the trait signature says `Option<serde_json::Value>`.
+/// Without this step the two disagree and the generated module does not compile.
+fn needs_optional_lift(ty: &TypeExpr, recs: &BTreeSet<String>) -> bool {
+    is_optional(ty)
+        && scalar_accessor(ty.value_type()).is_none()
+        && record_decode_for(ty, recs).is_none()
+}
+
 /// How to turn a validated serde_json::Value into the record struct the impl
 /// signature asks for. None when the parameter is not record-shaped.
 fn record_decode_for(ty: &TypeExpr, recs: &BTreeSet<String>) -> Option<String> {
-    match (&ty.kind, ty.name.as_str()) {
+    let vty = ty.value_type();
+    let decode = match (&vty.kind, vty.name.as_str()) {
         (TypeKind::Named, n) if recs.contains(n) => {
             Some(format!("{}::from_json(&__V__)", pascal(n)))
         }
         (TypeKind::Array, _)
-            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
+            if vty.elements.len() == 1 && crate::rustgen::is_record(&vty.elements[0], recs) =>
         {
             Some(format!(
                 "__V__.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>())",
-                pascal(&ty.elements[0].name)
+                pascal(&vty.elements[0].name)
             ))
         }
         _ => None,
-    }
+    }?;
+    // `?Status` is `Option<Status>`: null (which the Ty::Opt check above has
+    // already accepted) is the empty state; anything else must still decode as
+    // the record. The outer Option is the "malformed" channel the caller
+    // reports on, so empty is a successful `Some(None)`.
+    Some(if is_optional(ty) {
+        format!("if __V__.is_null() {{ Some(None) }} else {{ ({}).map(Some) }}", decode)
+    } else {
+        decode
+    })
 }
 
 fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
+    // A return is a POSITIONAL slot: it has no key to omit, so an empty `?T`
+    // is spelled `null` (the record-field case, the one named slot, omits the
+    // key instead — see rustgen::emit_records).
+    if is_optional(ty) {
+        return format!(
+            "match {} {{ Some(__o) => {}, None => serde_json::Value::Null }}",
+            expr,
+            ret_to_json(ty.value_type(), "__o", recs)
+        );
+    }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode(&{})", expr),
         (TypeKind::Primitive, "result") => format!(
@@ -225,6 +313,46 @@ fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
         // `true` matches what the C++ backend puts on the C ABI.
         _ if is_void(ty) => format!("{{ {}; serde_json::Value::Bool(true) }}", expr),
         _ => format!("serde_json::Value::from({})", expr),
+    }
+}
+
+/// The borrowed Rust type one event parameter is emitted with. `?T` wraps that
+/// borrow in `Option`, so an emitter spells "no value" the one way Rust has.
+fn emit_param_type(ty: &TypeExpr) -> String {
+    if is_optional(ty) {
+        return format!("Option<{}>", emit_param_type(ty.value_type()));
+    }
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "tstr") => "&str".into(),
+        (TypeKind::Primitive, "bstr") => "&[u8]".into(),
+        (TypeKind::Primitive, "int") => "i64".into(),
+        (TypeKind::Primitive, "uint") => "u64".into(),
+        (TypeKind::Primitive, "float64") => "f64".into(),
+        (TypeKind::Primitive, "bool") => "bool".into(),
+        _ => "&serde_json::Value".into(),
+    }
+}
+
+/// The JSON value one event argument contributes to the payload array. An
+/// event parameter is a POSITIONAL slot, so an empty `?T` is `null` and the
+/// payload keeps its arity.
+fn emit_param_value(ty: &TypeExpr, name: &str) -> String {
+    if is_optional(ty) {
+        return format!(
+            "match {} {{ Some(__o) => {}, None => serde_json::Value::Null }}",
+            name,
+            emit_param_value(ty.value_type(), "__o")
+        );
+    }
+    match (&ty.kind, ty.name.as_str()) {
+        (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode({})", name),
+        // `any` is passed as `&serde_json::Value` (like Array/Map), so it must
+        // be cloned, not fed to `Value::from` (no `From<&Value>`). The
+        // remaining primitives (int/uint/float64/bool by value, tstr as &str)
+        // do convert via `Value::from`.
+        (TypeKind::Primitive, "any") => format!("{}.clone()", name),
+        (TypeKind::Primitive, _) => format!("serde_json::Value::from({})", name),
+        _ => format!("{}.clone()", name),
     }
 }
 
@@ -435,20 +563,7 @@ pub fn generate_provider_with(
         let params_sig: Vec<String> = e
             .params
             .iter()
-            .map(|p| {
-                let t = match (&p.ty.kind, p.ty.name.as_str()) {
-                    (TypeKind::Primitive, "tstr") => "&str",
-                    (TypeKind::Primitive, "bstr") => "&[u8]",
-                    other => match other {
-                        (TypeKind::Primitive, "int") => "i64",
-                        (TypeKind::Primitive, "uint") => "u64",
-                        (TypeKind::Primitive, "float64") => "f64",
-                        (TypeKind::Primitive, "bool") => "bool",
-                        _ => "&serde_json::Value",
-                    },
-                };
-                format!("{}: {}", snake(&p.name), t)
-            })
+            .map(|p| format!("{}: {}", snake(&p.name), emit_param_type(&p.ty)))
             .collect();
         // The accumulator is named `__logos_args`, not `payload`: an event
         // parameter is free to be called `payload` (delivery_module's
@@ -460,21 +575,8 @@ pub fn generate_provider_with(
         let pushes: Vec<String> = e
             .params
             .iter()
-            .map(|p| match (&p.ty.kind, p.ty.name.as_str()) {
-                (TypeKind::Primitive, "bstr") => {
-                    format!("__logos_args.push(logos_rust_sdk::bytes::encode({}));", snake(&p.name))
-                }
-                // `any` is passed as `&serde_json::Value` (like Array/Map), so it
-                // must be cloned, not fed to `Value::from` (no `From<&Value>`).
-                // The remaining primitives (int/uint/float64/bool by value, tstr
-                // as &str) do convert via `Value::from`.
-                (TypeKind::Primitive, "any") => {
-                    format!("__logos_args.push({}.clone());", snake(&p.name))
-                }
-                (TypeKind::Primitive, _) => {
-                    format!("__logos_args.push(serde_json::Value::from({}));", snake(&p.name))
-                }
-                _ => format!("__logos_args.push({}.clone());", snake(&p.name)),
+            .map(|p| {
+                format!("__logos_args.push({});", emit_param_value(&p.ty, &snake(&p.name)))
             })
             .collect();
         out.push_str(&format!(
@@ -600,7 +702,12 @@ pub fn generate_provider_with(
     }
 
     for m in &module.methods {
-        let n = m.params.len();
+        // Only the REQUIRED prefix of the parameter list has to be present. A
+        // trailing `?T` may arrive as null or not at all: absent and null are
+        // the same empty state on decode, and `args::get` already reads a
+        // missing slot as null. Callers still SEND the full arity — encode is
+        // canonical, decode is liberal.
+        let n = crate::rustgen::required_arity(&m.params);
         // Each parameter becomes a fallible let-binding, so a wrong-typed
         // argument returns the canonical dispatch_failed object instead of
         // silently substituting 0 / "" / false / empty bytes and running the
@@ -626,6 +733,14 @@ pub fn generate_provider_with(
                         dec.replace("__V__", &ident),
                         module.name,
                         i
+                    ));
+                } else if needs_optional_lift(&p.ty, &recs) {
+                    // The value was validated as `?T` above, so null here is the
+                    // empty state and nothing else needs checking — just give it
+                    // the shape the trait declares.
+                    bindings.push_str(&format!(
+                        "                let {0} = if {0}.is_null() {{ None }} else {{ Some({0}) }};\n",
+                        ident
                     ));
                 }
             } else {
@@ -966,6 +1081,125 @@ module info_module {
         assert!(code.contains("Status::from_json(&__logos_a0)"), "{}", code);
         // Returns encode through the record's own to_json.
         assert!(code.contains("__e.to_json()"), "{}", code);
+    }
+
+    // Optionality on the PROVIDER side. `?T` is two-state, so the author's
+    // trait speaks `Option<T>` — Rust's one empty inhabitant — and the dispatch
+    // validates against Ty::Opt, which accepts the empty state and nothing else
+    // extra.
+    #[test]
+    fn provider_speaks_optionals() {
+        let src = r#"
+module opt_module {
+  version "1.0.0"
+  depends []
+  type Account {
+    id: tstr
+    ? label: tstr
+    note: ?bstr
+  }
+  method find(id: ?tstr) -> ?Account
+  method rename(id: tstr, label: ?tstr) -> bool
+  method describe(a: Account) -> tstr
+  method tagsOf(tags: ?[tstr]) -> bool
+  event changed(id: tstr, label: ?tstr)
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // The trait the author implements: Option<T> in and out.
+        assert!(code.contains("fn find(&mut self, id: Option<String>) -> Option<Account>;"), "{}", code);
+        assert!(
+            code.contains("fn rename(&mut self, id: String, label: Option<String>) -> bool;"),
+            "{}",
+            code
+        );
+        // The record struct agrees, for BOTH spellings of an optional field.
+        assert!(code.contains("pub label: Option<String>,"), "{}", code);
+        assert!(code.contains("pub note: Option<Vec<u8>>,"), "{}", code);
+
+        // The argument reads through the as_opt_* twin: absent and null are the
+        // same empty state, a present value is still checked against T.
+        assert!(
+            code.contains("logos_rust_sdk::args::as_opt_string(args, 0)"),
+            "{}",
+            code
+        );
+        // A record's optional fields become Ty::Opt in the runtime descriptor —
+        // again for both spellings — so a missing key stops being the mismatch
+        // it still is for `id`.
+        assert!(code.contains("(\"id\", &logos_rust_sdk::args::Ty::Tstr)"), "{}", code);
+        assert!(
+            code.contains("(\"label\", &logos_rust_sdk::args::Ty::Opt(&logos_rust_sdk::args::Ty::Tstr))"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains("(\"note\", &logos_rust_sdk::args::Ty::Opt(&logos_rust_sdk::args::Ty::Bstr))"),
+            "{}",
+            code
+        );
+
+        // A return is positional: empty is null, never a missing value.
+        assert!(
+            code.contains("Some(match result { Some(__o) => __o.to_json(), None => serde_json::Value::Null })"),
+            "{}",
+            code
+        );
+
+        // Arity: only the REQUIRED prefix is demanded. `find`'s one parameter is
+        // optional, so its arm carries no guard at all — the binding follows the
+        // arm directly...
+        assert!(
+            code.contains(
+                "\"find\" => {\n                let __logos_a0 = match logos_rust_sdk::args::as_opt_string(args, 0)"
+            ),
+            "an all-optional method must not demand arguments:\n{}",
+            code
+        );
+        // ...while `rename` still demands its one REQUIRED parameter, and lets
+        // the trailing optional be omitted rather than insisting on 2.
+        assert!(
+            code.contains(
+                "\"rename\" => {\n                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args(\"opt_module\", 1, args.len())); }"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            !code.contains("invalid_args(\"opt_module\", 2, args.len())"),
+            "a trailing optional must not count toward the minimum arity:\n{}",
+            code
+        );
+
+        // An optional composite that stays UNTYPED still has to reach the trait
+        // as the `Option<Value>` the signature declares — `as_value_checked`
+        // hands back the raw value, whose null is the empty state. Emitting the
+        // Option in the signature without this lift does not compile.
+        assert!(
+            code.contains("fn tags_of(&mut self, tags: Option<serde_json::Value>) -> bool;"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "let __logos_a0 = if __logos_a0.is_null() { None } else { Some(__logos_a0) };"
+            ),
+            "an optional untyped composite must be lifted into Option:\n{}",
+            code
+        );
+
+        // The typed emitter takes Option and spells empty as null, keeping the
+        // payload's arity.
+        assert!(code.contains("pub fn emit_changed(id: &str, label: Option<&str>)"), "{}", code);
+        assert!(
+            code.contains(
+                "__logos_args.push(match label { Some(__o) => serde_json::Value::from(__o), None => serde_json::Value::Null });"
+            ),
+            "{}",
+            code
+        );
     }
 
     // `void` is NOT a LIDL builtin — the front end hands it back as
