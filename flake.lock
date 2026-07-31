@@ -8520,11 +8520,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1781653473,
-        "narHash": "sha256-8l2tE2K5nY1grcFROQHC1By1jVI0NrfkS3k2v2y6R2I=",
+        "lastModified": 1785470541,
+        "narHash": "sha256-5fVAbSGMRhEfRXfhaoq26LZeJuziRT/NMFsfhtd0ogA=",
         "owner": "logos-co",
         "repo": "logos-lidl",
-        "rev": "8c95d4f0cc6a10195c70ed71e85b7a4cddca02f8",
+        "rev": "35f33d87b7d6c22d9d4658c58855ae887ce515f1",
         "type": "github"
       },
       "original": {
