@@ -464,6 +464,36 @@ pub fn generate(module: &ModuleDecl) -> String {
         module.name, module.name
     ));
 
+    // Per-call timeout, exposed ONCE per client rather than as an extra
+    // parameter on every method. The lp_* ABI has carried `timeout_ms` all
+    // along; adding it to the generated signatures would have broken every
+    // existing `client.method(a, b)` call site (Rust has no default
+    // arguments), and would have needed a second entry point for the async
+    // twin as well. A timeout-scoped VIEW covers both surfaces and every
+    // method at once, and leaves `self` — and therefore every existing call
+    // site — on the protocol default.
+    out.push_str(
+        "\n    /// The same typed surface with a per-call timeout: EVERY method on\n\
+         \x20   /// the returned client — sync and async alike — gives up after\n\
+         \x20   /// `timeout` instead of waiting for the protocol default (20s).\n\
+         \x20   ///\n\
+         \x20   /// `self` is unchanged and keeps the default, so scoping a timeout\n\
+         \x20   /// here can never leak into a call that did not ask for one:\n\
+         \x20   ///\n\
+         \x20   /// ```ignore\n\
+         \x20   /// let quick = client.with_timeout(std::time::Duration::from_millis(500))?;\n\
+         \x20   /// quick.slow_thing()?;      // fails after ~500ms\n\
+         \x20   /// client.slow_thing()?;     // still the 20s default\n\
+         \x20   /// ```\n\
+         \x20   ///\n\
+         \x20   /// Fails with `LogosError::InvalidTimeout` if the duration cannot be\n\
+         \x20   /// expressed on the protocol ABI (sub-millisecond, or longer than\n\
+         \x20   /// ~24.8 days). It is refused, never clamped.\n\
+         \x20   pub fn with_timeout(&self, timeout: std::time::Duration) -> Result<Self, LogosError> {\n\
+         \x20       Ok(Self { proxy: self.proxy.with_timeout(timeout)? })\n\
+         \x20   }\n",
+    );
+
     for m in &module.methods {
         let fn_name = snake(&m.name);
         let params_sig: Vec<String> = m
@@ -767,6 +797,54 @@ module calc_module {
         // A tstr arg in the same event still decodes as a plain string — the
         // bstr branch is not applied to every param.
         assert!(code.contains("arr[0].as_str()?.to_string()"));
+    }
+
+    /// Per-call timeout on the generated client. The lp_* ABI has always taken
+    /// `timeout_ms`; the Rust surface hardcoded 0. It is exposed as ONE
+    /// timeout-scoped view per client instead of an extra parameter per method,
+    /// because Rust has no default arguments — see `with_timeout` in rustgen.
+    #[test]
+    fn generates_timeout_scoped_view() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate(&m);
+        assert!(code.contains(
+            "pub fn with_timeout(&self, timeout: std::time::Duration) -> Result<Self, LogosError>"
+        ));
+        // It must FORWARD to the proxy, which is what actually reaches the ABI.
+        // A view that stored a timeout nobody passed to lp_invoke would read as
+        // a guarantee and be none.
+        assert!(code.contains("Ok(Self { proxy: self.proxy.with_timeout(timeout)? })"));
+        // Exactly one per client — not one per method.
+        assert_eq!(code.matches("pub fn with_timeout(").count(), 1);
+    }
+
+    /// The point of the scoped view: NOTHING about the existing entry points
+    /// changed. Every signature a caller already writes must be emitted
+    /// byte-for-byte as before, with no timeout parameter anywhere in it.
+    #[test]
+    fn existing_call_sites_keep_their_signatures() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate(&m);
+        // Sync: unchanged arity and types.
+        assert!(code.contains("pub fn add(&self, a: i64, b: i64) -> Result<i64, LogosError>"));
+        assert!(code.contains("pub fn dump(&self) -> Result<serde_json::Value, LogosError>"));
+        // Async: unchanged — still just the args plus the callback.
+        assert!(code.contains("pub fn add_async<F>(&self, a: i64, b: i64, callback: F)"));
+        assert!(code.contains("pub fn dump_async<F>(&self, callback: F)"));
+        // No method grew a timeout parameter, and no parallel per-method entry
+        // point was minted.
+        assert!(!code.contains("timeout: std::time::Duration, callback"));
+        assert!(!code.contains("_with_timeout("));
+        for line in code.lines() {
+            let sig = line.trim_start();
+            if sig.starts_with("pub fn ") && !sig.starts_with("pub fn with_timeout(") {
+                assert!(
+                    !sig.contains("Duration"),
+                    "a timeout parameter leaked into an existing entry point: {}",
+                    sig
+                );
+            }
+        }
     }
 
     #[test]

@@ -5,4 +5,8 @@ module sdk_test_caller_module {
   method call_add(a: int, b: int) -> int
   method last_blob_size() -> int
   method last_blob_checksum() -> int
+  method timed_call(sleep_ms: int, timeout_ms: int) -> int description "Call the provider's sleep(sleep_ms) through the generated SYNC wrapper, optionally under a per-call timeout of timeout_ms (<= 0 means no timeout: the protocol default). Returns the elapsed milliseconds, negated if the call actually completed."
+  method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description "Same, through the generated ASYNC wrapper. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok."
+  method last_async_elapsed_ms() -> int description "Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight."
+  method last_async_ok() -> int description "1 if the last async call completed, 0 if it failed, -1 while still in flight."
 }

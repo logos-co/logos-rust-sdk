@@ -59,6 +59,37 @@ fn hello(&mut self, name: String) -> String {
 }
 ```
 
+### Per-call timeouts — `with_timeout(duration)`
+
+Every call has a timeout; by default it is the protocol's own, **20 seconds**. To
+bound a call more tightly, take a **timeout-scoped view** of the client — every
+method on it, sync and async alike, carries that timeout instead:
+
+```rust
+fn quote(&mut self) -> String {
+    let slow = modules().price_oracle;
+    let quick = match slow.with_timeout(std::time::Duration::from_millis(500)) {
+        Ok(c) => c,
+        Err(e) => return format!("bad timeout: {}", e),
+    };
+
+    quick.fetch("ETH")                  // gives up after ~500ms
+        .unwrap_or_else(|e| format!("no quote: {}", e))
+}
+```
+
+`with_timeout` returns a *new* client over the same connection; the original is
+untouched and keeps the default, so a tight bound can never leak into a call that
+did not ask for one. That is also why the timeout is not a parameter on each
+method: Rust has no default arguments, so `client.fetch("ETH")` keeps compiling
+and keeps its current behaviour, and the async twin needs no second entry point.
+
+The `Duration` is converted to the ABI's millisecond `c_int` at the boundary and
+**refused rather than clamped** if it does not fit — sub-millisecond (which the
+ABI would read as "use the default", i.e. 20s) and anything past `c_int::MAX` ms
+(~24.8 days) both yield `LogosError::InvalidTimeout` at the point the bad value
+was supplied.
+
 ### Typed events — `on_<event>()` / `decode_<event>()`
 
 Each `event` in a dependency's contract generates a typed subscription. The returned `EventSubscription` owns its client share, so it keeps receiving after the proxy is dropped — move it into a listener thread and iterate it:
@@ -122,6 +153,7 @@ Every typed call and subscription returns `Result<_, LogosError>`:
 |---------|-------|
 | `PluginCallFailed` | Method call returned an error from the remote module |
 | `EventListenerFailed` | Event registration failed |
+| `InvalidTimeout` | A `with_timeout` duration the protocol ABI cannot express (sub-millisecond, or > ~24.8 days) |
 | `InvalidString` | A string argument contained a null byte |
 | `JsonError` | Parameter serialization failed |
 | `ChannelClosed` | The callback channel was dropped unexpectedly |

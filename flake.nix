@@ -171,107 +171,14 @@
           logoscore = logos-logoscore-cli.packages.${system}.default;
         in
         {
+          # The assertions live in tests/ipc-test.sh, shared with tests/flake.nix
+          # (the CI job) so the two cannot drift.
           ipc-test = pkgs.runCommand "rust-sdk-ipc-test" {
-            nativeBuildInputs = [ logoscore ]
+            nativeBuildInputs = [ logoscore pkgs.bash ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            MODULES_DIR = modulesDir;
           } ''
-            mkdir -p $out
-            export QT_QPA_PLATFORM=offscreen
-
-            # Inline (`-c`) mode is legacy; drive a logoscore daemon and call via
-            # the `call` client subcommand. A persistent daemon keeps the Qt event
-            # loop running so the cross-module IPC reply is delivered reliably.
-            export LOGOSCORE_CONFIG_DIR="$(mktemp -d)"
-            DAEMON_PID=""
-            cleanup() {
-              logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" stop >/dev/null 2>&1 || true
-              [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
-              rm -rf "$LOGOSCORE_CONFIG_DIR"
-            }
-            trap cleanup EXIT
-
-            logoscore -D --config-dir "$LOGOSCORE_CONFIG_DIR" -m ${modulesDir} \
-              >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
-            DAEMON_PID=$!
-            # `status` is the definitive readiness probe; no need to poke at the
-            # daemon's internal state file.
-            ready=0
-            for _i in $(seq 1 100); do
-              if logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" status >/dev/null 2>&1; then
-                ready=1; break
-              fi
-              kill -0 "$DAEMON_PID" 2>/dev/null || break
-              sleep 0.2
-            done
-            [ "$ready" = 1 ] || { echo "logoscore daemon failed to start:" >&2; cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2; exit 1; }
-
-            # load-module does not auto-resolve dependencies; load provider, then caller.
-            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_provider_module
-            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_caller_module
-
-            # Fail loudly if the call errors (don't swallow its exit code), and
-            # match the value exactly so "8" isn't satisfied by e.g. "80".
-            if ! result=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-                 call sdk_test_caller_module call_add 5 3 2>caller.err); then
-              echo "logoscore call failed:" >&2
-              cat caller.err "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2 || true
-              exit 1
-            fi
-            echo "call result: $result"
-            if ! printf '%s' "$result" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[,}]'; then
-              echo "IPC test FAILED (expected sdk_test_caller_module.call_add(5,3) == 8): $result" >&2
-              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
-              exit 1
-            fi
-
-            # Binary EVENT round trip. The caller subscribed to the provider's
-            # blobReady(seq, payload: bstr) event in on_context_ready; ask the
-            # provider to emit a 4096-byte deterministic blob, then read back what
-            # the subscription actually received. This exercises the generated
-            # bstr-event emitter end-to-end — a payload that dropped or corrupted
-            # in codegen would surface here as size 0 or a wrong checksum. (The
-            # blob is byte i = (i*7+11)&0xff; the caller's checksum is
-            # sum(payload[i] * (i%31 + 1)) = 8354754 for 4096 bytes.)
-            if ! emitted=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-                 call sdk_test_provider_module emit_blob 4096 2>emit.err); then
-              echo "logoscore emit_blob call failed:" >&2
-              cat emit.err "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2 || true
-              exit 1
-            fi
-            echo "emit_blob result: $emitted"
-            if ! printf '%s' "$emitted" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]'; then
-              echo "IPC test FAILED (expected emit_blob(4096) == 4096): $emitted" >&2
-              exit 1
-            fi
-
-            # The event is delivered to the caller's listener thread off the Qt
-            # event loop, so poll briefly for it rather than assuming it landed.
-            size="" ; checksum=""
-            for _i in $(seq 1 50); do
-              size=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-                     call sdk_test_caller_module last_blob_size 2>/dev/null || true)
-              printf '%s' "$size" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]' && break
-              sleep 0.2
-            done
-            checksum=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-                       call sdk_test_caller_module last_blob_checksum 2>/dev/null || true)
-            echo "last_blob_size: $size"
-            echo "last_blob_checksum: $checksum"
-            if ! printf '%s' "$size" | grep -qE '"result"[[:space:]]*:[[:space:]]*4096[[:space:]]*[,}]'; then
-              echo "IPC test FAILED (binary event payload not received intact; expected size 4096): $size" >&2
-              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
-              exit 1
-            fi
-            if ! printf '%s' "$checksum" | grep -qE '"result"[[:space:]]*:[[:space:]]*8354754[[:space:]]*[,}]'; then
-              echo "IPC test FAILED (binary event payload corrupted; expected checksum 8354754): $checksum" >&2
-              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
-              exit 1
-            fi
-
-            {
-              echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC"
-              echo "Binary event passed: blobReady payload received as 4096 bytes, checksum 8354754"
-            } > $out/result.txt
+            bash ${./tests/ipc-test.sh}
           '';
         }
       );

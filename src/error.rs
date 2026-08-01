@@ -2,6 +2,7 @@
 
 use std::ffi::NulError;
 use std::fmt;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum LogosError {
@@ -14,6 +15,15 @@ pub enum LogosError {
         plugin: String,
         event: String,
         message: String,
+    },
+    /// A per-call timeout that cannot be expressed on the `lp_*` C ABI, whose
+    /// `timeout_ms` is a `c_int` in which any value `<= 0` MEANS "use the
+    /// protocol default" (20s). Rather than clamp — which would answer a
+    /// different question than the caller asked, silently — the conversion
+    /// refuses. See `PluginProxy::with_timeout`.
+    InvalidTimeout {
+        timeout: Duration,
+        reason: String,
     },
     InvalidString(NulError),
     JsonError(String),
@@ -29,6 +39,9 @@ impl fmt::Display for LogosError {
             }
             LogosError::EventListenerFailed { plugin, event, message } => {
                 write!(f, "Failed to register event listener {}.{}: {}", plugin, event, message)
+            }
+            LogosError::InvalidTimeout { timeout, reason } => {
+                write!(f, "Invalid call timeout {:?}: {}", timeout, reason)
             }
             LogosError::InvalidString(e) => {
                 write!(f, "Invalid string (contains null byte): {}", e)

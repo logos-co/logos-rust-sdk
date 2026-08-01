@@ -5,6 +5,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use crate::callback::{
     create_event_callback, create_method_callback, event_callback_ptr, json_to_message,
@@ -13,6 +14,76 @@ use crate::callback::{
 use crate::error::LogosError;
 use crate::ffi;
 use crate::params::{params_to_lp_args, Param, ToParam};
+
+/// The `timeout_ms` argument of `lp_invoke` / `lp_invoke_async`, in the ABI's
+/// own units and type.
+///
+/// `logos_protocol.h` spells the contract out: *"timeout_ms <= 0 selects the
+/// default timeout, currently 20s"*. So the ABI has exactly one sentinel and
+/// one real range, and this type is the single place the Rust surface converts
+/// into them — every `lp_invoke*` call in this crate passes `as_abi()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TimeoutMs(c_int);
+
+impl TimeoutMs {
+    /// "Let the protocol decide." This is the literal `0` every call in this
+    /// crate passed unconditionally before per-call timeouts were surfaced, so
+    /// a call site that asks for no timeout still reaches the ABI byte-for-byte
+    /// as it always did.
+    pub(crate) const DEFAULT: TimeoutMs = TimeoutMs(0);
+
+    /// Convert an idiomatic `Duration` into the ABI's millisecond `c_int`.
+    ///
+    /// Both ends of the range are REFUSED rather than quietly reinterpreted,
+    /// because at both ends the reinterpretation would be a different answer
+    /// wearing the caller's request as a disguise:
+    ///
+    /// * **Sub-millisecond** (`as_millis() == 0`, which includes
+    ///   `Duration::ZERO`): the ABI reads `0` as "use the default", so a 500µs
+    ///   timeout would become **20 seconds** — four orders of magnitude the
+    ///   wrong way, and in the one direction a timeout exists to prevent.
+    /// * **Longer than `c_int::MAX` ms** (~24.8 days): truncating to 32 bits
+    ///   wraps (and can land `<= 0`, i.e. the default again), and saturating
+    ///   would silently shorten a caller's stated bound.
+    ///
+    /// The valid range is therefore `1ms..=c_int::MAX ms`, and everything
+    /// outside it is a `LogosError::InvalidTimeout` at the point the bad value
+    /// was supplied.
+    pub(crate) fn from_duration(timeout: Duration) -> Result<Self, LogosError> {
+        let ms = timeout.as_millis();
+        if ms == 0 {
+            return Err(LogosError::InvalidTimeout {
+                timeout,
+                reason: "shorter than 1ms; the lp_* ABI's millisecond resolution \
+                         cannot express it, and rounding to 0 would select the \
+                         protocol DEFAULT (20s) instead"
+                    .to_string(),
+            });
+        }
+        if ms > c_int::MAX as u128 {
+            return Err(LogosError::InvalidTimeout {
+                timeout,
+                reason: format!(
+                    "longer than the lp_* ABI's maximum of {}ms (~24.8 days); \
+                     it is refused rather than clamped",
+                    c_int::MAX
+                ),
+            });
+        }
+        Ok(TimeoutMs(ms as c_int))
+    }
+
+    /// The value handed to `lp_invoke` / `lp_invoke_async`.
+    pub(crate) fn as_abi(self) -> c_int {
+        self.0
+    }
+
+    /// The timeout as a `Duration`, or `None` when it defers to the protocol
+    /// default (the `<= 0` sentinel).
+    pub(crate) fn as_duration(self) -> Option<Duration> {
+        (self.0 > 0).then(|| Duration::from_millis(self.0 as u64))
+    }
+}
 
 /// Shared ownership of the underlying `lp_client`. The client is destroyed
 /// when the LAST owner drops — the proxy itself or any live subscription.
@@ -178,6 +249,10 @@ extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *
 pub struct PluginProxy {
     plugin_name: String,
     client: Option<Arc<ClientHandle>>,
+    /// The timeout every call through THIS proxy carries.
+    /// [`TimeoutMs::DEFAULT`] unless a timeout-scoped view was taken with
+    /// [`PluginProxy::with_timeout`].
+    timeout: TimeoutMs,
 }
 
 impl PluginProxy {
@@ -190,11 +265,49 @@ impl PluginProxy {
         PluginProxy {
             plugin_name,
             client,
+            timeout: TimeoutMs::DEFAULT,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.plugin_name
+    }
+
+    /// A **timeout-scoped view** of this proxy: every call made through the
+    /// returned proxy — sync and async, typed and untyped — carries `timeout`
+    /// instead of the protocol default (20s).
+    ///
+    /// The returned proxy shares the SAME underlying `lp_client` (no second
+    /// capability handshake, no second connection); only the timeout differs.
+    /// `self` is left untouched, so a scoped timeout can never leak into a call
+    /// that did not ask for one:
+    ///
+    /// ```ignore
+    /// let quick = dep.with_timeout(Duration::from_millis(500))?;
+    /// quick.call_json("slow", &args);   // gives up after ~500ms
+    /// dep.call_json("slow", &args);     // still the 20s default
+    /// ```
+    ///
+    /// This is how a per-call timeout reaches every entry point without adding
+    /// a parameter to any of them — existing call sites keep compiling and keep
+    /// the default.
+    ///
+    /// Fails with [`LogosError::InvalidTimeout`] if `timeout` cannot be
+    /// expressed on the ABI (sub-millisecond, or longer than ~24.8 days). It is
+    /// never silently clamped, and the error is raised where the bad value was
+    /// supplied rather than on some later call.
+    pub fn with_timeout(&self, timeout: Duration) -> Result<PluginProxy, LogosError> {
+        Ok(PluginProxy {
+            plugin_name: self.plugin_name.clone(),
+            client: self.client.clone(),
+            timeout: TimeoutMs::from_duration(timeout)?,
+        })
+    }
+
+    /// The timeout in force for calls made through this proxy, or `None` when
+    /// it defers to the protocol default.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout.as_duration()
     }
 
     fn client(&self) -> Result<*mut ffi::LpClient, LogosError> {
@@ -228,7 +341,14 @@ impl PluginProxy {
 
         let (rx, user_data, callback) = create_method_callback();
         unsafe {
-            ffi::lp_invoke_async(client, method_c.as_ptr(), args.as_ptr(), 0, callback, user_data);
+            ffi::lp_invoke_async(
+                client,
+                method_c.as_ptr(),
+                args.as_ptr(),
+                self.timeout.as_abi(),
+                callback,
+                user_data,
+            );
         }
         Ok(rx)
     }
@@ -246,7 +366,14 @@ impl PluginProxy {
 
         let (rx, user_data, callback) = create_method_callback();
         unsafe {
-            ffi::lp_invoke_async(client, method_c.as_ptr(), args.as_ptr(), 0, callback, user_data);
+            ffi::lp_invoke_async(
+                client,
+                method_c.as_ptr(),
+                args.as_ptr(),
+                self.timeout.as_abi(),
+                callback,
+                user_data,
+            );
         }
         Ok(rx)
     }
@@ -272,7 +399,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args.as_ptr(),
-                0,
+                self.timeout.as_abi(),
                 &mut result_json,
                 &mut error_json,
             )
@@ -321,7 +448,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args_c.as_ptr(),
-                0,
+                self.timeout.as_abi(),
                 &mut result_json,
                 &mut error_json,
             )
@@ -378,6 +505,9 @@ impl PluginProxy {
     where
         F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
     {
+        // Read before the callback is moved into the boxed state — Copy, so
+        // this is just the proxy's timeout captured for the ABI call below.
+        let timeout = self.timeout.as_abi();
         let client_handle = match &self.client {
             Some(h) => Arc::clone(h),
             None => {
@@ -413,7 +543,7 @@ impl PluginProxy {
                 client_handle.0,
                 method_c.as_ptr(),
                 args_c.as_ptr(),
-                0,
+                timeout,
                 async_call_trampoline,
                 user_data,
             );
@@ -457,5 +587,90 @@ impl PluginProxy {
             _callback: callback_data,
             _client: client_handle,
         })
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    /// The claim the whole default path rests on: a call site that asks for no
+    /// timeout hands the ABI the same `0` it always did, which
+    /// `logos_protocol.cpp`'s `lpTimeout()` maps to `Timeout()` — the 20s
+    /// default. If this ever became a positive number, every existing caller
+    /// would silently acquire a bound it never asked for.
+    #[test]
+    fn default_is_the_abi_default_sentinel() {
+        assert_eq!(TimeoutMs::DEFAULT.as_abi(), 0);
+        assert!(TimeoutMs::DEFAULT.as_abi() <= 0, "must select the protocol default");
+        assert_eq!(TimeoutMs::DEFAULT.as_duration(), None);
+    }
+
+    #[test]
+    fn duration_becomes_whole_milliseconds() {
+        for (d, ms) in [
+            (Duration::from_millis(1), 1),
+            (Duration::from_millis(500), 500),
+            (Duration::from_secs(1), 1000),
+            (Duration::from_secs(90), 90_000),
+        ] {
+            let t = TimeoutMs::from_duration(d).expect("in range");
+            assert_eq!(t.as_abi(), ms, "{:?}", d);
+            assert_eq!(t.as_duration(), Some(Duration::from_millis(ms as u64)));
+        }
+        // Sub-millisecond remainders truncate toward the whole millisecond the
+        // ABI can carry; only a value that truncates to ZERO is refused.
+        assert_eq!(
+            TimeoutMs::from_duration(Duration::from_micros(1_500)).unwrap().as_abi(),
+            1
+        );
+    }
+
+    /// A sub-millisecond timeout must NOT round to 0 — on this ABI 0 means
+    /// "use the default", so rounding would turn a 500µs bound into 20s.
+    #[test]
+    fn sub_millisecond_is_refused_not_rounded_into_the_default() {
+        for d in [Duration::ZERO, Duration::from_nanos(1), Duration::from_micros(999)] {
+            match TimeoutMs::from_duration(d) {
+                Err(LogosError::InvalidTimeout { timeout, .. }) => assert_eq!(timeout, d),
+                other => panic!("expected InvalidTimeout for {:?}, got {:?}", d, other.map(|t| t.as_abi())),
+            }
+        }
+    }
+
+    /// Anything past `c_int::MAX` ms must be refused, not saturated and not
+    /// truncated: `(i32::MAX as u64 + 1) as i32` is `i32::MIN`, i.e. negative,
+    /// i.e. the 20s default — the exact quiet wrong answer.
+    #[test]
+    fn out_of_range_is_refused_not_saturated_or_wrapped() {
+        let max_ok = Duration::from_millis(c_int::MAX as u64);
+        assert_eq!(TimeoutMs::from_duration(max_ok).unwrap().as_abi(), c_int::MAX);
+
+        for d in [
+            Duration::from_millis(c_int::MAX as u64 + 1),
+            Duration::from_secs(60 * 60 * 24 * 30), // 30 days
+            Duration::MAX,
+        ] {
+            match TimeoutMs::from_duration(d) {
+                Err(LogosError::InvalidTimeout { timeout, .. }) => assert_eq!(timeout, d),
+                other => panic!(
+                    "expected InvalidTimeout for {:?}, got {:?}",
+                    d,
+                    other.map(|t| t.as_abi())
+                ),
+            }
+        }
+    }
+
+    /// The refusal has to say what went wrong; an opaque error would just move
+    /// the surprise from runtime to the log.
+    #[test]
+    fn refusal_explains_itself() {
+        let too_small = TimeoutMs::from_duration(Duration::from_micros(1)).unwrap_err().to_string();
+        assert!(too_small.contains("1ms"), "{}", too_small);
+        assert!(too_small.contains("DEFAULT"), "{}", too_small);
+
+        let too_big = TimeoutMs::from_duration(Duration::MAX).unwrap_err().to_string();
+        assert!(too_big.contains("clamped"), "{}", too_big);
     }
 }

@@ -30,6 +30,19 @@ impl SdkTestProviderModule for ProviderImpl {
         emit_blob_ready(0, &payload);
         payload.len() as i64
     }
+
+    /// Block this dispatch for `ms` milliseconds, then echo `ms` back.
+    ///
+    /// The measuring stick for a per-call timeout: the caller asks for a call
+    /// it KNOWS will outlive its timeout, so "did the timeout take effect" has
+    /// an unambiguous answer in the clock. A timeout that is accepted and then
+    /// ignored returns here at `ms`; one that is honoured returns at the
+    /// timeout. Nothing about the module is special — an ordinary
+    /// single-dispatch module whose handler is simply slow.
+    fn sleep(&mut self, ms: i64) -> i64 {
+        std::thread::sleep(std::time::Duration::from_millis(ms.max(0) as u64));
+        ms
+    }
 }
 
 #[no_mangle]
