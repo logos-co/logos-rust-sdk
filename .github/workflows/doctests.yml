@@ -9,10 +9,14 @@ name: Doc-Tests
 #     event subscription, and concrete + interface dependencies.
 #
 # These exercise the Rust-module build + IPC pipeline that logos-rust-sdk is
-# built on. They do NOT pin logos-rust-sdk to the commit under test (the tutorial
-# modules consume the SDK as cargo git dependencies at a pinned rev, like any
-# real module repo would). The SDK itself is verified against the working tree
-# by the separate IPC integration test in ci.yml.
+# built on. Every Rust module in them takes the SDK as
+# `path = "../logos-rust-sdk-src"` (the form real modules use), staged from
+# `logos-module-builder#rust-sdk-src` before `cargo generate-lockfile` — so the
+# generator and the runtime crate always come from the SAME commit. For
+# concurrent-dispatch that commit is the one under test (--release-for below);
+# cross-language-composition takes module-builder's own pin, since it
+# demonstrates the published authoring surface. The SDK working tree itself is
+# verified by the separate IPC integration test in ci.yml.
 #
 # ──────────────────────────────────────────────────────────────────────────────
 # One-time setup required for the clickable report links to work:

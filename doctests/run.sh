@@ -11,11 +11,19 @@
 #       context, sync + async typed calls, event subscription, and concrete +
 #       interface dependencies.
 #
-# Unlike a module repo's own doc-test, this spec does NOT pin logos-rust-sdk to
-# the commit under test: the tutorial module consumes the SDK + lidl-gen as
-# cargo git dependencies at a pinned rev (the published authoring surface, like
-# any real module repo would). To verify the SDK against the working tree, run
-# the integration test instead:
+# No spec writes an SDK revision into a Cargo.toml. Every Rust module here takes
+# the SDK as `path = "../logos-rust-sdk-src"` — the form real modules use — and
+# stages that directory from `logos-module-builder#rust-sdk-src` before running
+# `cargo generate-lockfile`, so the runtime the crate compiles against is the
+# same tree the builder links and runs the generator from. An independently
+# pinned `rev` is a second copy of that decision and drifts from it; a path dep
+# cannot.
+#
+# Which commit that is depends on the spec: concurrent-dispatch overrides the
+# staging build to `{release}` (the commit under test, via --release-for), while
+# cross-language-composition takes module-builder's own pin — it demonstrates the
+# published authoring surface. To verify the SDK working tree directly, run the
+# integration test instead:
 #   nix build 'path:../tests#checks.x86_64-linux.ipc-test' --override-input logos-rust-sdk path:..
 #
 # The runner is the shared `doctest` CLI

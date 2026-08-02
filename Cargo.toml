@@ -1,6 +1,13 @@
 [package]
 name = "logos-rust-sdk"
-version = "0.2.0"
+# 0.2.0 -> 0.3.0. Under cargo's 0.x rules the minor is the breaking position, and
+# this release breaks in two ways:
+#   * generated code now calls `PluginProxy::with_timeout`, which 0.2.0 does not
+#     have — a 0.3 generator against a 0.2 runtime is E0599, so the two must move
+#     together and the version is what says so;
+#   * `LogosError` gained `InvalidTimeout` and is not `#[non_exhaustive]`, so a
+#     downstream exhaustive `match` on it stops compiling.
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Logos Team"]

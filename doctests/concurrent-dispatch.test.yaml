@@ -173,20 +173,33 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            # A pinned rev, NOT the `path = "../logos-rust-sdk-src"` form real
-            # modules use. This walkthrough builds a module from scratch and runs
-            # `cargo generate-lockfile` before the first nix build, and the
-            # builder only stages that source DURING a build — so a path dep has
-            # nothing to resolve against yet. In-tree modules avoid this by
-            # committing a Cargo.lock, which a from-scratch walkthrough has no way
-            # to do.
+            # The SDK as a PATH dependency — the form every real module uses.
             #
-            # The cost is that this rev must be bumped whenever generated code
-            # starts using a new SDK item. It went stale exactly that way once:
-            # dispatch began emitting `logos_rust_sdk::args::Ty::…`, `src/args.rs`
-            # arrived in 2eabc95, and the old pin predated it — E0433 on every
-            # module in this spec.
-            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "2eabc95c602424c4df8df868757900738dcd2aea", optional = true }
+            # `../logos-rust-sdk-src` is not in this tree, and the ordering
+            # problem that creates is real: `cargo generate-lockfile` runs before
+            # the first nix build, and the builder only stages the SDK DURING a
+            # build, so at lockfile time there is nothing for a path dep to
+            # resolve against. In-tree modules satisfy that requirement by
+            # committing a Cargo.lock; a walkthrough that writes the crate from
+            # scratch cannot. So the build step below satisfies it the other way
+            # — it materialises the directory FIRST, with
+            #
+            #   nix build 'github:logos-co/logos-module-builder{release}#rust-sdk-src' \
+            #     --override-input logos-rust-sdk 'github:logos-co/logos-rust-sdk{release}' \
+            #     -o logos-rust-sdk-src
+            #
+            # What that buys over a pinned `rev`: the crate links the SAME SDK
+            # commit the builder runs the generator from. Generated code and the
+            # runtime it calls into are then one decision, not two that can drift
+            # apart — and they must move together, because the generator emits
+            # calls to SDK items the generated code cannot carry itself. A rev
+            # pin is the second, independent copy of that decision, and it went
+            # stale exactly that way twice: once when dispatch began emitting
+            # `logos_rust_sdk::args::Ty::…` (E0433) and again when the typed
+            # client began emitting `PluginProxy::with_timeout` (E0599) — each
+            # time against a pin that predated the item, breaking every module in
+            # this spec. There is no rev here left to go stale.
+            logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
 
             [features]
             default = ["logos_module"]
@@ -241,14 +254,24 @@ sections:
             }
       - title: "Build it"
         text: |
-          Generate the lockfile, init git so the flake sees the files, and build
-          the `.lgx`. The `{release}` overrides point the builder's SDK +
-          module-builder at the commits under test (locally: this checkout's HEAD;
-          in CI: the pinned commit). The Rust scaffold and the Qt glue come from
-          there, so the concurrent-dispatch codegen is the one being exercised.
-        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+          Stage the SDK source, generate the lockfile against it, init git so the
+          flake sees the files, and build the `.lgx`.
+
+          The first command is what makes the crate's
+          `path = "../logos-rust-sdk-src"` resolvable: `rust-sdk-src` is a
+          module-builder output that just materialises the SDK tree as a
+          directory, so it exists *before* `cargo generate-lockfile` runs. The
+          `{release}` overrides point the builder's SDK + module-builder at the
+          commits under test (locally: this checkout's HEAD; in CI: the pinned
+          commit) — the same override on the staging build, so the source the
+          lockfile is generated against is the same commit the builder later
+          links and runs the generator from.
+        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd slow-worker
+          nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
+            --override-input logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
+            -o logos-rust-sdk-src
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A && nix flake update && git add flake.lock
           nix build .#lgx -o worker-lgx \
@@ -349,20 +372,33 @@ sections:
 
             [dependencies]
             serde_json = "1"
-            # A pinned rev, NOT the `path = "../logos-rust-sdk-src"` form real
-            # modules use. This walkthrough builds a module from scratch and runs
-            # `cargo generate-lockfile` before the first nix build, and the
-            # builder only stages that source DURING a build — so a path dep has
-            # nothing to resolve against yet. In-tree modules avoid this by
-            # committing a Cargo.lock, which a from-scratch walkthrough has no way
-            # to do.
+            # The SDK as a PATH dependency — the form every real module uses.
             #
-            # The cost is that this rev must be bumped whenever generated code
-            # starts using a new SDK item. It went stale exactly that way once:
-            # dispatch began emitting `logos_rust_sdk::args::Ty::…`, `src/args.rs`
-            # arrived in 2eabc95, and the old pin predated it — E0433 on every
-            # module in this spec.
-            logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "2eabc95c602424c4df8df868757900738dcd2aea", optional = true }
+            # `../logos-rust-sdk-src` is not in this tree, and the ordering
+            # problem that creates is real: `cargo generate-lockfile` runs before
+            # the first nix build, and the builder only stages the SDK DURING a
+            # build, so at lockfile time there is nothing for a path dep to
+            # resolve against. In-tree modules satisfy that requirement by
+            # committing a Cargo.lock; a walkthrough that writes the crate from
+            # scratch cannot. So the build step below satisfies it the other way
+            # — it materialises the directory FIRST, with
+            #
+            #   nix build 'github:logos-co/logos-module-builder{release}#rust-sdk-src' \
+            #     --override-input logos-rust-sdk 'github:logos-co/logos-rust-sdk{release}' \
+            #     -o logos-rust-sdk-src
+            #
+            # What that buys over a pinned `rev`: the crate links the SAME SDK
+            # commit the builder runs the generator from. Generated code and the
+            # runtime it calls into are then one decision, not two that can drift
+            # apart — and they must move together, because the generator emits
+            # calls to SDK items the generated code cannot carry itself. A rev
+            # pin is the second, independent copy of that decision, and it went
+            # stale exactly that way twice: once when dispatch began emitting
+            # `logos_rust_sdk::args::Ty::…` (E0433) and again when the typed
+            # client began emitting `PluginProxy::with_timeout` (E0599) — each
+            # time against a pin that predated the item, breaking every module in
+            # this spec. There is no rev here left to go stale.
+            logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
 
             [features]
             default = ["logos_module"]
@@ -419,12 +455,18 @@ sections:
             }
       - title: "Build it"
         text: |
-          Same shape as the worker, with the dependency locked to the sibling
-          checkout and the SDK + module-builder overridden to the commits under
-          test (in both this builder and the worker's):
-        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+          Same shape as the worker — stage the SDK source, lock against it, then
+          build — with the dependency locked to the sibling checkout and the SDK +
+          module-builder overridden to the commits under test (in both this
+          builder and the worker's). This is the module whose *generated typed
+          client* calls into the SDK, so it is the one that would break first if
+          the staged source and the generator ever came from different commits:
+        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd fanout-driver
+          nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
+            --override-input logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
+            -o logos-rust-sdk-src
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A
           nix flake update --override-input slow_worker_module path:$PWD/../slow-worker
