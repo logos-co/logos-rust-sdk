@@ -161,7 +161,14 @@ done
 #   --also calc-lgx      the rust_calc_module .lgx out-link
 #   --also greeter-lgx   the cpp_greeter_module .lgx out-link
 #   --also orch-lgx      the rust_orchestrator_module .lgx out-link
+#   --also worker-lgx    the slow_worker_module .lgx out-link
+#   --also driver-lgx    the fanout_driver_module .lgx out-link
 #   --also logs.txt      the daemon log (default glob is *.log, not logs.txt)
+#   --also logos-rust-sdk-src
+#                        the staged SDK source out-link (a symlink into the nix
+#                        store; the specs .gitignore it, but clean should not
+#                        leave a dangling link in the committed tree)
+#   --also .logoscore    the per-spec daemon config/state dir
 # Module dirs are copied out of the read-only nix store, so they land read-only
 # (r-x); restore write permission first or `clean` can't delete inside them.
 chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
@@ -172,7 +179,11 @@ echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + 
   --also calc-lgx \
   --also greeter-lgx \
   --also orch-lgx \
+  --also worker-lgx \
+  --also driver-lgx \
   --also logs.txt \
+  --also logos-rust-sdk-src \
+  --also .logoscore \
   --verbose
 
 # If we staged the build off-tree, copy the cleaned result back into ./outputs.
