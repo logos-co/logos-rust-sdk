@@ -257,12 +257,16 @@ sections:
                            ${CMAKE_CURRENT_BINARY_DIR}/metadata.json COPYONLY)
 
             logos_module(NAME rust_calc_module)
-      - title: "flake.nix — trivial, plus the logos-rust-sdk input"
+      - title: "flake.nix — trivial, exactly like a C++ module's"
         text: |
-          The builder reads `logos-lidl-gen` from the module's
-          `flakeInputs.logos-rust-sdk`, so a Rust module lists one extra input
-          beyond a C++ module — `logos-rust-sdk`. Everything else is the
-          standard `mkLogosModule` shape; there is no `buildRustPackage` here:
+          A Rust module's flake is **identical to a C++ one**: `logos-module-builder`
+          and nothing else. Both `logos-lidl-gen` and the SDK source the crate links
+          come from the *builder's own* `logos-rust-sdk` input
+          (`mkLogosModule.nix:332`, `rustSdk = logos-rust-sdk`), which is what keeps
+          the generator and the runtime SDK on one revision. Listing `logos-rust-sdk`
+          here would be inert — `mkLogosModule` reads `flakeInputs` by DEPENDENCY
+          name — and would invite exactly the skew the builder exists to prevent.
+          There is no `buildRustPackage` either:
         file:
           path: rust-calc/flake.nix
           language: nix
@@ -271,12 +275,6 @@ sections:
               description = "Basic Rust provider with a typed event";
               inputs = {
                 logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-                # Declared for documentation only. mkLogosModule reads `flakeInputs`
-                # by DEPENDENCY name, so this input is never consulted: both
-                # logos-lidl-gen and the SDK source the crate links come from the
-                # BUILDER's own logos-rust-sdk input, which is what keeps the
-                # generator and the runtime SDK on one rev.
-                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
               };
               outputs = inputs@{ self, logos-module-builder, ... }:
                 let
@@ -680,7 +678,6 @@ sections:
               description = "Rust consumer: concrete + interface deps, context, sync/async, events";
               inputs = {
                 logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-                logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
                 # The concrete dependency's flake (its published .lidl drives
                 # modules().rust_calc_module). Placeholder — locked to the real checkout
                 # at build time via --override-input (nix rejects relative paths here).
