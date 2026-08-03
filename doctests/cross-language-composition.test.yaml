@@ -271,8 +271,11 @@ sections:
               description = "Basic Rust provider with a typed event";
               inputs = {
                 logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-                # Provides logos-lidl-gen (the contract->scaffold generator the builder
-                # runs) and the SDK the crate links. One extra input vs a C++ module.
+                # Declared for documentation only. mkLogosModule reads `flakeInputs`
+                # by DEPENDENCY name, so this input is never consulted: both
+                # logos-lidl-gen and the SDK source the crate links come from the
+                # BUILDER's own logos-rust-sdk input, which is what keeps the
+                # generator and the runtime SDK on one rev.
                 logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
               };
               outputs = inputs@{ self, logos-module-builder, ... }:
@@ -301,10 +304,18 @@ sections:
           the builder pins — the same one it will stage inside the build — as a
           plain directory, which is what lets `cargo generate-lockfile` run before
           any nix build has happened.
-        run: "sh -c 'cd rust-calc && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder#rust-sdk-src\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o calc-lgx'"
+
+          Note the rev on that URL: it must match the `logos-module-builder` rev in
+          the flake above. This step decides which SDK the LOCKFILE resolves
+          against; the flake decides which SDK is actually COMPILED; nothing checks
+          that they agree. They previously did not — staging ran from
+          module-builder master while the flake pinned an older rev — which was
+          harmless only because both happened to carry the same SDK version with
+          byte-identical dependencies.
+        run: "sh -c 'cd rust-calc && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o calc-lgx'"
         code_block: |
           cd rust-calc
-          nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
+          nix build 'github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src' -o logos-rust-sdk-src
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A && nix flake update && git add flake.lock
           nix build .#lgx -o calc-lgx
@@ -696,10 +707,10 @@ sections:
           scaffold — including the typed `modules().rust_calc_module` client (from
           the calc module's published contract) and the `greeter` client (from
           the local interface) — compiles the crate, and links it into the glue:
-        run: "sh -c 'cd rust-orchestrator && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder#rust-sdk-src\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input rust_calc_module path:$PWD/../rust-calc && git add flake.lock && nix build .#lgx -o orch-lgx --override-input rust_calc_module path:$PWD/../rust-calc'"
+        run: "sh -c 'cd rust-orchestrator && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input rust_calc_module path:$PWD/../rust-calc && git add flake.lock && nix build .#lgx -o orch-lgx --override-input rust_calc_module path:$PWD/../rust-calc'"
         code_block: |
           cd rust-orchestrator
-          nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
+          nix build 'github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src' -o logos-rust-sdk-src
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A
           nix flake update --override-input rust_calc_module path:$PWD/../rust-calc
