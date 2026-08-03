@@ -196,7 +196,8 @@ sections:
             # pin is the second, independent copy of that decision, and it went
             # stale exactly that way twice: once when dispatch began emitting
             # `logos_rust_sdk::args::Ty::…` (E0433) and again when the typed
-            # client began emitting `PluginProxy::with_timeout` (E0599) — each
+            # client began emitting `PluginProxy::call_json_with_timeout`
+            # (E0599) — each
             # time against a pin that predated the item, breaking every module in
             # this spec. There is no rev here left to go stale.
             logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
@@ -395,7 +396,8 @@ sections:
             # pin is the second, independent copy of that decision, and it went
             # stale exactly that way twice: once when dispatch began emitting
             # `logos_rust_sdk::args::Ty::…` (E0433) and again when the typed
-            # client began emitting `PluginProxy::with_timeout` (E0599) — each
+            # client began emitting `PluginProxy::call_json_with_timeout`
+            # (E0599) — each
             # time against a pin that predated the item, breaking every module in
             # this spec. There is no rev here left to go stale.
             logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }

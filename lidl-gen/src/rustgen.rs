@@ -464,36 +464,24 @@ pub fn generate(module: &ModuleDecl) -> String {
         module.name, module.name
     ));
 
-    // Per-call timeout, exposed ONCE per client rather than as an extra
-    // parameter on every method. The lp_* ABI has carried `timeout_ms` all
-    // along; adding it to the generated signatures would have broken every
-    // existing `client.method(a, b)` call site (Rust has no default
-    // arguments), and would have needed a second entry point for the async
-    // twin as well. A timeout-scoped VIEW covers both surfaces and every
-    // method at once, and leaves `self` — and therefore every existing call
-    // site — on the protocol default.
-    out.push_str(
-        "\n    /// The same typed surface with a per-call timeout: EVERY method on\n\
-         \x20   /// the returned client — sync and async alike — gives up after\n\
-         \x20   /// `timeout` instead of waiting for the protocol default (20s).\n\
-         \x20   ///\n\
-         \x20   /// `self` is unchanged and keeps the default, so scoping a timeout\n\
-         \x20   /// here can never leak into a call that did not ask for one:\n\
-         \x20   ///\n\
-         \x20   /// ```ignore\n\
-         \x20   /// let quick = client.with_timeout(std::time::Duration::from_millis(500))?;\n\
-         \x20   /// quick.slow_thing()?;      // fails after ~500ms\n\
-         \x20   /// client.slow_thing()?;     // still the 20s default\n\
-         \x20   /// ```\n\
-         \x20   ///\n\
-         \x20   /// Fails with `LogosError::InvalidTimeout` if the duration cannot be\n\
-         \x20   /// expressed on the protocol ABI (sub-millisecond, or longer than\n\
-         \x20   /// ~24.8 days). It is refused, never clamped.\n\
-         \x20   pub fn with_timeout(&self, timeout: std::time::Duration) -> Result<Self, LogosError> {\n\
-         \x20       Ok(Self { proxy: self.proxy.with_timeout(timeout)? })\n\
-         \x20   }\n",
-    );
-
+    // Per-call timeout. The lp_* ABI has carried `timeout_ms` all along; the
+    // Rust surface hardcoded 0 ("use the protocol default", 20s).
+    //
+    // It is emitted as a PARALLEL entry point per method — `add_with_timeout`
+    // beside `add`, `add_async_with_timeout` beside `add_async` — rather than
+    // as a parameter on the existing ones or as a timeout-scoped view of the
+    // whole client. How long a call may reasonably take is a fact about the
+    // METHOD, not about the module hosting it: `fetch_price` and
+    // `rebuild_index` do not want the same bound, and a client-wide setting
+    // cannot say so. Rust has no overloading and no default arguments, so a
+    // distinct NAME is the only way to add the parameter without breaking
+    // every existing call site — the same conclusion the C++ SDK reached for
+    // `fooAsyncResult`, where overloading was available and still not used.
+    //
+    // This doubles the generated surface, and that is a deliberate STOPGAP:
+    // the eventual fix is a breaking change that makes the timeout a
+    // first-class parameter of the ONE entry point per method, at which point
+    // these twins collapse back into their originals.
     for m in &module.methods {
         let fn_name = snake(&m.name);
         let params_sig: Vec<String> = m
@@ -518,6 +506,41 @@ pub fn generate(module: &ModuleDecl) -> String {
              \x20       let value = self.proxy.call_json(\"{}\", &args)?;\n\
              \x20       {}\n\
              \x20   }}\n",
+            fn_name,
+            if params_sig.is_empty() { "" } else { ", " },
+            params_sig.join(", "),
+            ret_ty,
+            args.join(", "),
+            m.name,
+            conv
+        ));
+
+        // Bounded twin of the sync method. Same body, one extra argument, and
+        // it reaches `call_json_with_timeout` instead of `call_json` — the
+        // timeout is threaded down to lp_invoke as a parameter and stored
+        // nowhere, so it cannot outlive this call.
+        out.push_str(&format!(
+            "\n    /// [`Self::{}`] with a per-call timeout: THIS call gives up after\n\
+             \x20   /// `timeout` instead of waiting for the protocol default (20s).\n\
+             \x20   /// The bound is threaded down to the call and stored nowhere, so\n\
+             \x20   /// the next call through the same client — with a different\n\
+             \x20   /// timeout, or with none — is unaffected.\n\
+             \x20   ///\n\
+             \x20   /// Fails with `LogosError::InvalidTimeout` if the duration cannot be\n\
+             \x20   /// expressed on the protocol ABI (sub-millisecond, or longer than\n\
+             \x20   /// ~24.8 days). It is refused, never clamped.\n\
+             \x20   ///\n\
+             \x20   /// A parallel entry point rather than a parameter on [`Self::{}`]:\n\
+             \x20   /// Rust has neither overloading nor default arguments, so the\n\
+             \x20   /// parameter would break every existing call site. STOPGAP — a later\n\
+             \x20   /// breaking release folds this back into the single entry point.\n\
+             \x20   pub fn {}_with_timeout(&self{}{}, timeout: std::time::Duration) -> Result<{}, LogosError> {{\n\
+             \x20       let args = serde_json::Value::Array(vec![{}]);\n\
+             \x20       let value = self.proxy.call_json_with_timeout(\"{}\", &args, timeout)?;\n\
+             \x20       {}\n\
+             \x20   }}\n",
+            fn_name,
+            fn_name,
             fn_name,
             if params_sig.is_empty() { "" } else { ", " },
             params_sig.join(", "),
@@ -555,6 +578,51 @@ pub fn generate(module: &ModuleDecl) -> String {
             m.name,
             fn_name,
             async_params,
+            ret_ty,
+            args.join(", "),
+            m.name,
+            conv
+        ));
+
+        // Bounded twin of the async method. `timeout` goes AFTER the arguments
+        // and BEFORE the callback: the callback stays last so the closure can
+        // still be written in trailing position, and the timeout sits with the
+        // other call inputs.
+        let async_timeout_params = if params_sig.is_empty() {
+            "&self, timeout: std::time::Duration, callback: F".to_string()
+        } else {
+            format!(
+                "&self, {}, timeout: std::time::Duration, callback: F",
+                params_sig.join(", ")
+            )
+        };
+        out.push_str(&format!(
+            "\n    /// [`Self::{}_async`] with a per-call timeout — the async half of\n\
+             \x20   /// [`Self::{}_with_timeout`]. The bound applies to THIS call only;\n\
+             \x20   /// nothing is stored on the client.\n\
+             \x20   ///\n\
+             \x20   /// A duration the protocol ABI cannot express (sub-millisecond, or\n\
+             \x20   /// longer than ~24.8 days) is delivered to `callback` as\n\
+             \x20   /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,\n\
+             \x20   /// which is how every other undispatchable async call is reported.\n\
+             \x20   ///\n\
+             \x20   /// STOPGAP, like its sync twin: Rust cannot overload\n\
+             \x20   /// [`Self::{}_async`], so the bounded form needs its own name until a\n\
+             \x20   /// breaking release makes `timeout` a parameter of the one entry point.\n\
+             \x20   pub fn {}_async_with_timeout<F>({})\n\
+             \x20   where\n\
+             \x20       F: FnOnce(Result<{}, LogosError>) + Send + 'static,\n\
+             \x20   {{\n\
+             \x20       let args = serde_json::Value::Array(vec![{}]);\n\
+             \x20       self.proxy.call_json_async_with_timeout(\"{}\", &args, timeout, move |result| {{\n\
+             \x20           callback(result.and_then(|value| {}));\n\
+             \x20       }});\n\
+             \x20   }}\n",
+            fn_name,
+            fn_name,
+            fn_name,
+            fn_name,
+            async_timeout_params,
             ret_ty,
             args.join(", "),
             m.name,
@@ -800,27 +868,58 @@ module calc_module {
     }
 
     /// Per-call timeout on the generated client. The lp_* ABI has always taken
-    /// `timeout_ms`; the Rust surface hardcoded 0. It is exposed as ONE
-    /// timeout-scoped view per client instead of an extra parameter per method,
-    /// because Rust has no default arguments — see `with_timeout` in rustgen.
+    /// `timeout_ms`; the Rust surface hardcoded 0. It is surfaced as a PARALLEL
+    /// entry point per method — `<m>_with_timeout` / `<m>_async_with_timeout` —
+    /// because how long a call may take is a fact about the method, not about
+    /// the client. Rust has no overloading, so a distinct name is the only way
+    /// to spell it.
     #[test]
-    fn generates_timeout_scoped_view() {
+    fn generates_per_method_timeout_entry_points() {
         let m = parse(SAMPLE).unwrap();
         let code = generate(&m);
+
+        // Sync twin: the original signature plus a trailing `timeout`.
         assert!(code.contains(
-            "pub fn with_timeout(&self, timeout: std::time::Duration) -> Result<Self, LogosError>"
+            "pub fn add_with_timeout(&self, a: i64, b: i64, timeout: std::time::Duration) -> Result<i64, LogosError>"
         ));
-        // It must FORWARD to the proxy, which is what actually reaches the ABI.
-        // A view that stored a timeout nobody passed to lp_invoke would read as
-        // a guarantee and be none.
-        assert!(code.contains("Ok(Self { proxy: self.proxy.with_timeout(timeout)? })"));
-        // Exactly one per client — not one per method.
-        assert_eq!(code.matches("pub fn with_timeout(").count(), 1);
+        // …including for a method with no arguments at all.
+        assert!(code.contains(
+            "pub fn dump_with_timeout(&self, timeout: std::time::Duration) -> Result<serde_json::Value, LogosError>"
+        ));
+        // Async twin: `timeout` after the arguments, callback still last so it
+        // can be written in trailing position.
+        assert!(code.contains(
+            "pub fn add_async_with_timeout<F>(&self, a: i64, b: i64, timeout: std::time::Duration, callback: F)"
+        ));
+        assert!(code.contains(
+            "pub fn dump_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)"
+        ));
+
+        // They must reach the proxy's BOUNDED entry points. A twin that took a
+        // Duration and then called plain `call_json` would read as a guarantee
+        // and be none — the exact failure mode these exist to rule out.
+        assert!(code.contains("self.proxy.call_json_with_timeout(\"add\", &args, timeout)?"));
+        assert!(code
+            .contains("self.proxy.call_json_async_with_timeout(\"add\", &args, timeout, move |result|"));
+
+        // Exactly one bounded twin per surface per method — 4 methods in
+        // SAMPLE, so 4 of each, and no leftover client-wide view.
+        assert_eq!(code.matches("_with_timeout(&self").count(), 4);
+        assert_eq!(code.matches("_async_with_timeout<F>(&self").count(), 4);
+        assert!(
+            !code.contains("pub fn with_timeout("),
+            "a client-scoped timeout view survived; the timeout binds to the CALL"
+        );
+
+        // The duplicated surface is a stopgap, and the generated docs have to
+        // say so — otherwise the next reader files it as an accident.
+        assert!(code.contains("STOPGAP"));
     }
 
-    /// The point of the scoped view: NOTHING about the existing entry points
-    /// changed. Every signature a caller already writes must be emitted
-    /// byte-for-byte as before, with no timeout parameter anywhere in it.
+    /// Nothing about the EXISTING entry points changed. Every signature a
+    /// caller already writes must still be emitted byte-for-byte, with no
+    /// timeout parameter anywhere in it: the bounded forms are additions beside
+    /// them, never edits to them.
     #[test]
     fn existing_call_sites_keep_their_signatures() {
         let m = parse(SAMPLE).unwrap();
@@ -831,13 +930,15 @@ module calc_module {
         // Async: unchanged — still just the args plus the callback.
         assert!(code.contains("pub fn add_async<F>(&self, a: i64, b: i64, callback: F)"));
         assert!(code.contains("pub fn dump_async<F>(&self, callback: F)"));
-        // No method grew a timeout parameter, and no parallel per-method entry
-        // point was minted.
-        assert!(!code.contains("timeout: std::time::Duration, callback"));
-        assert!(!code.contains("_with_timeout("));
+        // …and they still reach the UNBOUNDED proxy calls, i.e. the protocol
+        // default. An existing call site must not silently acquire a bound.
+        assert!(code.contains("self.proxy.call_json(\"add\", &args)?"));
+        assert!(code.contains("self.proxy.call_json_async(\"add\", &args, move |result|"));
+        // No pre-existing entry point mentions a Duration; only the `*_with_timeout`
+        // additions may.
         for line in code.lines() {
             let sig = line.trim_start();
-            if sig.starts_with("pub fn ") && !sig.starts_with("pub fn with_timeout(") {
+            if sig.starts_with("pub fn ") && !sig.contains("_with_timeout") {
                 assert!(
                     !sig.contains("Duration"),
                     "a timeout parameter leaked into an existing entry point: {}",

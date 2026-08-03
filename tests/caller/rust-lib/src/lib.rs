@@ -28,6 +28,7 @@ mod provider_client {
 use logos_rust_sdk::LogosModuleSDK;
 use provider_client::SdkTestProviderModuleClient;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 // The bytes the `blobReady` subscription last received, summarised. -1 means the
@@ -42,17 +43,22 @@ static LAST_BLOB_CHECKSUM: std::sync::Mutex<i64> = std::sync::Mutex::new(-1);
 static ASYNC_ELAPSED_MS: AtomicI64 = AtomicI64::new(-1);
 static ASYNC_OK: AtomicI64 = AtomicI64::new(-1);
 
-/// The provider client for one measurement, with `timeout_ms` applied when it
-/// is positive. `timeout_ms <= 0` means "ask for nothing" — the caller keeps
-/// the client exactly as an existing call site would hold it, so the
-/// no-timeout arm exercises the unchanged default path rather than a
-/// timeout-of-20s spelled out by hand.
-fn provider_for(timeout_ms: i64) -> Result<SdkTestProviderModuleClient, logos_rust_sdk::LogosError> {
-    let client = SdkTestProviderModuleClient::new();
-    if timeout_ms <= 0 {
-        return Ok(client);
-    }
-    client.with_timeout(Duration::from_millis(timeout_ms as u64))
+// Elapsed times of the two back-to-back calls made by same_client_two_timeouts,
+// same encoding as `encode` below. -1 = not run yet.
+static PAIR_A_MS: AtomicI64 = AtomicI64::new(-1);
+static PAIR_B_MS: AtomicI64 = AtomicI64::new(-1);
+
+/// ONE provider client for the whole process, held for the module's lifetime —
+/// the way a real module holds `modules().<dep>`.
+///
+/// Every timing measurement below goes through THIS object. That is what makes
+/// the assertions about per-call timeouts mean anything: the client is a fixed
+/// point, so a call that comes back at its own bound can only have got that
+/// bound from the call itself. `provider_client_addr` hands the harness its
+/// address so "same client" is checked rather than asserted.
+fn provider() -> &'static SdkTestProviderModuleClient {
+    static CLIENT: OnceLock<SdkTestProviderModuleClient> = OnceLock::new();
+    CLIENT.get_or_init(SdkTestProviderModuleClient::new)
 }
 
 /// Elapsed milliseconds, negated when the call actually completed. One `int`
@@ -65,6 +71,34 @@ fn encode(elapsed: Duration, completed: bool) -> i64 {
     } else {
         ms
     }
+}
+
+/// One measured `sleep(sleep_ms)` on the shared client.
+///
+/// `timeout_ms > 0` takes the BOUNDED entry point, `sleep_with_timeout`;
+/// `timeout_ms <= 0` takes the untouched `sleep`, exactly as an existing call
+/// site writes it, so the unbounded arm really exercises the default path
+/// rather than a 20s bound spelled out by hand. Same client either way — only
+/// the entry point differs, which is the whole shape of the change.
+fn measure_sync(sleep_ms: i64, timeout_ms: i64) -> i64 {
+    let started = Instant::now();
+    let outcome = if timeout_ms > 0 {
+        provider().sleep_with_timeout(sleep_ms, Duration::from_millis(timeout_ms as u64))
+    } else {
+        provider().sleep(sleep_ms)
+    };
+    let elapsed = started.elapsed();
+    let completed = match &outcome {
+        Ok(v) => *v == sleep_ms,
+        Err(e) => {
+            eprintln!(
+                "sdk_test_caller: sleep({}ms) under timeout={}ms did not complete: {}",
+                sleep_ms, timeout_ms, e
+            );
+            false
+        }
+    };
+    encode(elapsed, completed)
 }
 
 #[derive(Default)]
@@ -101,53 +135,78 @@ impl SdkTestCallerModule for CallerImpl {
     /// SYNC half of the per-call-timeout proof.
     ///
     /// Calls the provider's `sleep(sleep_ms)` through the GENERATED typed
-    /// wrapper. When `timeout_ms > 0` the call goes through a timeout-scoped
-    /// view of the client; otherwise through the client as it has always been
-    /// used. Either way the clock is what answers the question: a timeout that
-    /// is accepted and then dropped on the floor comes back at `sleep_ms`.
+    /// wrapper on the process's ONE provider client — `sleep_with_timeout` when
+    /// `timeout_ms > 0`, plain `sleep` otherwise. The clock is what answers the
+    /// question: a timeout that is accepted and then dropped on the floor comes
+    /// back at `sleep_ms`.
     fn timed_call(&mut self, sleep_ms: i64, timeout_ms: i64) -> i64 {
-        let client = match provider_for(timeout_ms) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("sdk_test_caller: with_timeout({}ms) refused: {}", timeout_ms, e);
-                return i64::MIN;
-            }
-        };
-        let started = Instant::now();
-        let outcome = client.sleep(sleep_ms);
-        let elapsed = started.elapsed();
-        let completed = match &outcome {
-            Ok(v) => *v == sleep_ms,
-            Err(e) => {
-                eprintln!("sdk_test_caller: sleep({}ms) did not complete: {}", sleep_ms, e);
-                false
-            }
-        };
-        encode(elapsed, completed)
+        measure_sync(sleep_ms, timeout_ms)
     }
 
-    /// ASYNC half of the same proof, through the generated `sleep_async`.
-    /// Returns immediately — the result lands on the module's event loop and is
-    /// read back with `last_async_elapsed_ms` / `last_async_ok`.
+    /// TWO calls, ONE client, TWO different bounds, back to back — the thing a
+    /// client-scoped timeout could not express without building a second
+    /// client, and the reason the timeout is an argument to the call.
+    ///
+    /// `drain_ms` is slept between them: the provider is single-dispatch and is
+    /// still serving the first `sleep(sleep_ms)` after call A gives up, so
+    /// without the drain call B would measure the queue rather than its own
+    /// bound. Read the two elapsed times back with `last_pair_a_ms` /
+    /// `last_pair_b_ms`; returns 1 once both have run.
+    fn same_client_two_timeouts(
+        &mut self,
+        sleep_ms: i64,
+        timeout_a_ms: i64,
+        timeout_b_ms: i64,
+        drain_ms: i64,
+    ) -> i64 {
+        PAIR_A_MS.store(-1, Ordering::SeqCst);
+        PAIR_B_MS.store(-1, Ordering::SeqCst);
+        PAIR_A_MS.store(measure_sync(sleep_ms, timeout_a_ms), Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(drain_ms.max(0) as u64));
+        PAIR_B_MS.store(measure_sync(sleep_ms, timeout_b_ms), Ordering::SeqCst);
+        1
+    }
+
+    fn last_pair_a_ms(&mut self) -> i64 {
+        PAIR_A_MS.load(Ordering::SeqCst)
+    }
+
+    fn last_pair_b_ms(&mut self) -> i64 {
+        PAIR_B_MS.load(Ordering::SeqCst)
+    }
+
+    /// Address of the process-wide provider client, so the harness can check
+    /// that every measurement really did go through the same object rather
+    /// than take that on trust.
+    fn provider_client_addr(&mut self) -> i64 {
+        provider() as *const SdkTestProviderModuleClient as i64
+    }
+
+    /// ASYNC half of the same proof, through the generated `sleep_async` /
+    /// `sleep_async_with_timeout` on the same shared client. Returns
+    /// immediately — the result lands on the module's event loop and is read
+    /// back with `last_async_elapsed_ms` / `last_async_ok`.
     fn start_timed_call_async(&mut self, sleep_ms: i64, timeout_ms: i64) -> i64 {
         ASYNC_ELAPSED_MS.store(-1, Ordering::SeqCst);
         ASYNC_OK.store(-1, Ordering::SeqCst);
-        let client = match provider_for(timeout_ms) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("sdk_test_caller: with_timeout({}ms) refused: {}", timeout_ms, e);
-                return i64::MIN;
-            }
-        };
         let started = Instant::now();
-        client.sleep_async(sleep_ms, move |result| {
+        let on_done = move |result: Result<i64, logos_rust_sdk::LogosError>| {
             let completed = matches!(&result, Ok(v) if *v == sleep_ms);
             if let Err(e) = &result {
                 eprintln!("sdk_test_caller: async sleep({}ms) did not complete: {}", sleep_ms, e);
             }
             ASYNC_ELAPSED_MS.store(started.elapsed().as_millis() as i64, Ordering::SeqCst);
             ASYNC_OK.store(i64::from(completed), Ordering::SeqCst);
-        });
+        };
+        if timeout_ms > 0 {
+            provider().sleep_async_with_timeout(
+                sleep_ms,
+                Duration::from_millis(timeout_ms as u64),
+                on_done,
+            );
+        } else {
+            provider().sleep_async(sleep_ms, on_done);
+        }
         0
     }
 
@@ -157,6 +216,18 @@ impl SdkTestCallerModule for CallerImpl {
 
     fn last_async_ok(&mut self) -> i64 {
         ASYNC_OK.load(Ordering::SeqCst)
+    }
+
+    /// A timeout the `lp_*` ABI cannot express must be REFUSED, not clamped —
+    /// and refused where it was supplied, not on some later call. Returns the
+    /// error's Display text (empty if the call was accepted, which is itself
+    /// the failure the harness looks for).
+    fn refused_timeout_reason(&mut self, timeout_us: i64) -> String {
+        match provider().sleep_with_timeout(0, Duration::from_micros(timeout_us.max(0) as u64)) {
+            Err(logos_rust_sdk::LogosError::InvalidTimeout { reason, .. }) => reason,
+            Err(other) => format!("wrong error: {}", other),
+            Ok(_) => String::new(),
+        }
     }
 
     /// Subscribe to the provider's binary `blobReady` event once the host has

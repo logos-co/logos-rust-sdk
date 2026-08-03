@@ -20,7 +20,8 @@ pub enum LogosError {
     /// `timeout_ms` is a `c_int` in which any value `<= 0` MEANS "use the
     /// protocol default" (20s). Rather than clamp — which would answer a
     /// different question than the caller asked, silently — the conversion
-    /// refuses. See `PluginProxy::with_timeout`.
+    /// refuses. Raised by the `*_with_timeout` entry points, at the point the
+    /// bad value was supplied. See `PluginProxy::call_json_with_timeout`.
     InvalidTimeout {
         timeout: Duration,
         reason: String,

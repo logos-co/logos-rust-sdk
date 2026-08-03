@@ -5,8 +5,13 @@ module sdk_test_caller_module {
   method call_add(a: int, b: int) -> int
   method last_blob_size() -> int
   method last_blob_checksum() -> int
-  method timed_call(sleep_ms: int, timeout_ms: int) -> int description "Call the provider's sleep(sleep_ms) through the generated SYNC wrapper, optionally under a per-call timeout of timeout_ms (<= 0 means no timeout: the protocol default). Returns the elapsed milliseconds, negated if the call actually completed."
-  method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description "Same, through the generated ASYNC wrapper. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok."
+  method timed_call(sleep_ms: int, timeout_ms: int) -> int description "Call the provider's sleep(sleep_ms) on the process's ONE provider client, through the generated sleep_with_timeout when timeout_ms > 0 and through plain sleep otherwise. Returns the elapsed milliseconds, negated if the call actually completed."
+  method same_client_two_timeouts(sleep_ms: int, timeout_a_ms: int, timeout_b_ms: int, drain_ms: int) -> int description "Two sleep(sleep_ms) calls back to back on the SAME client, the first bounded at timeout_a_ms and the second at timeout_b_ms, with drain_ms slept between them so the single-dispatch provider is idle again. Read the elapsed times with last_pair_a_ms / last_pair_b_ms."
+  method last_pair_a_ms() -> int description "Elapsed ms of the FIRST call of the last same_client_two_timeouts, negated if it completed; -1 if not run."
+  method last_pair_b_ms() -> int description "Elapsed ms of the SECOND call of the last same_client_two_timeouts, negated if it completed; -1 if not run."
+  method provider_client_addr() -> int description "Address of the process-wide provider client, so a caller can verify that separate measurements really went through the same client object."
+  method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description "Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok."
   method last_async_elapsed_ms() -> int description "Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight."
   method last_async_ok() -> int description "1 if the last async call completed, 0 if it failed, -1 while still in flight."
+  method refused_timeout_reason(timeout_us: int) -> tstr description "Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default."
 }

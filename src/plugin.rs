@@ -22,6 +22,10 @@ use crate::params::{params_to_lp_args, Param, ToParam};
 /// default timeout, currently 20s"*. So the ABI has exactly one sentinel and
 /// one real range, and this type is the single place the Rust surface converts
 /// into them — every `lp_invoke*` call in this crate passes `as_abi()`.
+///
+/// It is an ARGUMENT, not a property of anything: it is threaded down to each
+/// `lp_invoke*` as a parameter and stored nowhere, so no call can inherit a
+/// bound another call asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TimeoutMs(c_int);
 
@@ -76,12 +80,6 @@ impl TimeoutMs {
     /// The value handed to `lp_invoke` / `lp_invoke_async`.
     pub(crate) fn as_abi(self) -> c_int {
         self.0
-    }
-
-    /// The timeout as a `Duration`, or `None` when it defers to the protocol
-    /// default (the `<= 0` sentinel).
-    pub(crate) fn as_duration(self) -> Option<Duration> {
-        (self.0 > 0).then(|| Duration::from_millis(self.0 as u64))
     }
 }
 
@@ -246,13 +244,16 @@ extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *
     // `_client` (the held client share) drops here, after the callback ran.
 }
 
+/// A handle on another module.
+///
+/// Deliberately carries **no call policy**. A timeout is an argument to the
+/// call that wants it (`*_with_timeout`), never a property of the proxy, so
+/// two calls through the same proxy can want different bounds — which is the
+/// normal case, since "how long is too long" is a fact about the method being
+/// called, not about the module hosting it.
 pub struct PluginProxy {
     plugin_name: String,
     client: Option<Arc<ClientHandle>>,
-    /// The timeout every call through THIS proxy carries.
-    /// [`TimeoutMs::DEFAULT`] unless a timeout-scoped view was taken with
-    /// [`PluginProxy::with_timeout`].
-    timeout: TimeoutMs,
 }
 
 impl PluginProxy {
@@ -262,52 +263,11 @@ impl PluginProxy {
         // that target, so a concurrent fan-out coalesces to a single capability
         // handshake instead of racing N. See client_cache()/shared_client().
         let client = shared_client(&plugin_name);
-        PluginProxy {
-            plugin_name,
-            client,
-            timeout: TimeoutMs::DEFAULT,
-        }
+        PluginProxy { plugin_name, client }
     }
 
     pub fn name(&self) -> &str {
         &self.plugin_name
-    }
-
-    /// A **timeout-scoped view** of this proxy: every call made through the
-    /// returned proxy — sync and async, typed and untyped — carries `timeout`
-    /// instead of the protocol default (20s).
-    ///
-    /// The returned proxy shares the SAME underlying `lp_client` (no second
-    /// capability handshake, no second connection); only the timeout differs.
-    /// `self` is left untouched, so a scoped timeout can never leak into a call
-    /// that did not ask for one:
-    ///
-    /// ```ignore
-    /// let quick = dep.with_timeout(Duration::from_millis(500))?;
-    /// quick.call_json("slow", &args);   // gives up after ~500ms
-    /// dep.call_json("slow", &args);     // still the 20s default
-    /// ```
-    ///
-    /// This is how a per-call timeout reaches every entry point without adding
-    /// a parameter to any of them — existing call sites keep compiling and keep
-    /// the default.
-    ///
-    /// Fails with [`LogosError::InvalidTimeout`] if `timeout` cannot be
-    /// expressed on the ABI (sub-millisecond, or longer than ~24.8 days). It is
-    /// never silently clamped, and the error is raised where the bad value was
-    /// supplied rather than on some later call.
-    pub fn with_timeout(&self, timeout: Duration) -> Result<PluginProxy, LogosError> {
-        Ok(PluginProxy {
-            plugin_name: self.plugin_name.clone(),
-            client: self.client.clone(),
-            timeout: TimeoutMs::from_duration(timeout)?,
-        })
-    }
-
-    /// The timeout in force for calls made through this proxy, or `None` when
-    /// it defers to the protocol default.
-    pub fn timeout(&self) -> Option<Duration> {
-        self.timeout.as_duration()
     }
 
     fn client(&self) -> Result<*mut ffi::LpClient, LogosError> {
@@ -334,7 +294,33 @@ impl PluginProxy {
     /// Returns a channel receiver that will yield the result once available.
     /// Requires the Qt event loop to be processing (it runs automatically inside
     /// a loaded Logos module process).
+    ///
+    /// Waits the protocol default (20s). To bound this one call, use
+    /// [`call_with_timeout`](Self::call_with_timeout).
     pub fn call<T: ToParam>(&self, method: &str, params: &[T]) -> Result<Receiver<CallResult>, LogosError> {
+        self.call_inner(method, params, TimeoutMs::DEFAULT)
+    }
+
+    /// [`call`](Self::call), bounded: this call — and only this call — gives up
+    /// after `timeout` instead of the protocol default.
+    ///
+    /// Errors with [`LogosError::InvalidTimeout`] if `timeout` cannot be
+    /// expressed on the ABI; see [`call_json_with_timeout`](Self::call_json_with_timeout).
+    pub fn call_with_timeout<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout: Duration,
+    ) -> Result<Receiver<CallResult>, LogosError> {
+        self.call_inner(method, params, TimeoutMs::from_duration(timeout)?)
+    }
+
+    fn call_inner<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout: TimeoutMs,
+    ) -> Result<Receiver<CallResult>, LogosError> {
         let client = self.client()?;
         let method_c = CString::new(method)?;
         let args = self.args_json(params)?;
@@ -345,7 +331,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args.as_ptr(),
-                self.timeout.as_abi(),
+                timeout.as_abi(),
                 callback,
                 user_data,
             );
@@ -354,10 +340,36 @@ impl PluginProxy {
     }
 
     /// Call a plugin method with explicitly typed `Param` parameters, asynchronously.
+    ///
+    /// Waits the protocol default (20s); see
+    /// [`call_with_params_with_timeout`](Self::call_with_params_with_timeout).
     pub fn call_with_params(
         &self,
         method: &str,
         params: &[Param],
+    ) -> Result<Receiver<CallResult>, LogosError> {
+        self.call_with_params_inner(method, params, TimeoutMs::DEFAULT)
+    }
+
+    /// [`call_with_params`](Self::call_with_params), bounded to `timeout` for
+    /// this call only. (The name stutters because both halves are load-bearing:
+    /// `_with_params` is the argument spelling, `_with_timeout` is the uniform
+    /// suffix every bounded entry point in the SDK and in generated clients
+    /// carries.)
+    pub fn call_with_params_with_timeout(
+        &self,
+        method: &str,
+        params: &[Param],
+        timeout: Duration,
+    ) -> Result<Receiver<CallResult>, LogosError> {
+        self.call_with_params_inner(method, params, TimeoutMs::from_duration(timeout)?)
+    }
+
+    fn call_with_params_inner(
+        &self,
+        method: &str,
+        params: &[Param],
+        timeout: TimeoutMs,
     ) -> Result<Receiver<CallResult>, LogosError> {
         let client = self.client()?;
         let method_c = CString::new(method)?;
@@ -370,7 +382,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args.as_ptr(),
-                self.timeout.as_abi(),
+                timeout.as_abi(),
                 callback,
                 user_data,
             );
@@ -379,6 +391,10 @@ impl PluginProxy {
     }
 
     /// Call a plugin method with no parameters, asynchronously.
+    ///
+    /// A spelling convenience over [`call`](Self::call) with an empty slice, so
+    /// it has no bounded twin of its own — write
+    /// `call_with_timeout(method, &[] as &[&str], timeout)`.
     pub fn call_no_params(&self, method: &str) -> Result<Receiver<CallResult>, LogosError> {
         let empty: &[&str] = &[];
         self.call(method, empty)
@@ -387,7 +403,29 @@ impl PluginProxy {
     /// Call a plugin method synchronously.
     /// Suitable for use inside a `Q_INVOKABLE`-generated Rust function where the
     /// Qt event loop is already running in the module process.
+    ///
+    /// Waits the protocol default (20s); see
+    /// [`call_sync_with_timeout`](Self::call_sync_with_timeout).
     pub fn call_sync<T: ToParam>(&self, method: &str, params: &[T]) -> Result<CallResult, LogosError> {
+        self.call_sync_inner(method, params, TimeoutMs::DEFAULT)
+    }
+
+    /// [`call_sync`](Self::call_sync), bounded to `timeout` for this call only.
+    pub fn call_sync_with_timeout<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout: Duration,
+    ) -> Result<CallResult, LogosError> {
+        self.call_sync_inner(method, params, TimeoutMs::from_duration(timeout)?)
+    }
+
+    fn call_sync_inner<T: ToParam>(
+        &self,
+        method: &str,
+        params: &[T],
+        timeout: TimeoutMs,
+    ) -> Result<CallResult, LogosError> {
         let client = self.client()?;
         let method_c = CString::new(method)?;
         let args = self.args_json(params)?;
@@ -399,7 +437,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args.as_ptr(),
-                self.timeout.as_abi(),
+                timeout.as_abi(),
                 &mut result_json,
                 &mut error_json,
             )
@@ -430,10 +468,42 @@ impl PluginProxy {
     /// returning the raw JSON result value. This is the typed backbone the
     /// LIDL-generated wrappers build on (CallResult's `message` is a
     /// display string; typed callers need the JSON).
+    ///
+    /// Waits the protocol default (20s); the bounded twin is
+    /// [`call_json_with_timeout`](Self::call_json_with_timeout), which is what
+    /// a generated `<method>_with_timeout` calls.
     pub fn call_json(
         &self,
         method: &str,
         args: &serde_json::Value,
+    ) -> Result<serde_json::Value, LogosError> {
+        self.call_json_inner(method, args, TimeoutMs::DEFAULT)
+    }
+
+    /// [`call_json`](Self::call_json), bounded: **this** call gives up after
+    /// `timeout` instead of the protocol default (20s). Nothing is stored, so a
+    /// second call through the same proxy is unaffected — that is the whole
+    /// point of taking the timeout here rather than on the proxy.
+    ///
+    /// Errors with [`LogosError::InvalidTimeout`], before anything is sent, if
+    /// `timeout` cannot be expressed on the `lp_*` ABI: sub-millisecond (where
+    /// the ABI's millisecond `c_int` would round to `0`, its "use the default"
+    /// sentinel — turning a 500µs bound into 20 seconds) or longer than
+    /// `c_int::MAX` ms (~24.8 days). It is refused, never clamped.
+    pub fn call_json_with_timeout(
+        &self,
+        method: &str,
+        args: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, LogosError> {
+        self.call_json_inner(method, args, TimeoutMs::from_duration(timeout)?)
+    }
+
+    fn call_json_inner(
+        &self,
+        method: &str,
+        args: &serde_json::Value,
+        timeout: TimeoutMs,
     ) -> Result<serde_json::Value, LogosError> {
         let client = self.client()?;
         let method_c = CString::new(method)?;
@@ -448,7 +518,7 @@ impl PluginProxy {
                 client,
                 method_c.as_ptr(),
                 args_c.as_ptr(),
-                self.timeout.as_abi(),
+                timeout.as_abi(),
                 &mut result_json,
                 &mut error_json,
             )
@@ -480,6 +550,10 @@ impl PluginProxy {
     }
 
     /// Call a plugin method with no parameters, synchronously.
+    ///
+    /// A spelling convenience over [`call_sync`](Self::call_sync) with an empty
+    /// slice, so it has no bounded twin of its own — write
+    /// `call_sync_with_timeout(method, &[] as &[&str], timeout)`.
     pub fn call_sync_no_params(&self, method: &str) -> Result<CallResult, LogosError> {
         let empty: &[&str] = &[];
         self.call_sync(method, empty)
@@ -501,13 +575,54 @@ impl PluginProxy {
     /// The in-flight call holds its own share of the client, so it completes
     /// even if `self` is a temporary (e.g. `modules().dep`) dropped at the end
     /// of the call statement.
+    ///
+    /// Waits the protocol default (20s); the bounded twin is
+    /// [`call_json_async_with_timeout`](Self::call_json_async_with_timeout),
+    /// which is what a generated `<method>_async_with_timeout` calls.
     pub fn call_json_async<F>(&self, method: &str, args: &serde_json::Value, callback: F)
     where
         F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
     {
+        self.call_json_async_inner(method, args, TimeoutMs::DEFAULT, callback)
+    }
+
+    /// [`call_json_async`](Self::call_json_async), bounded: **this** call gives
+    /// up after `timeout`. Nothing is stored on the proxy, so a second async
+    /// call through it is unaffected.
+    ///
+    /// A `timeout` the ABI cannot express is reported the way every other
+    /// undispatchable call is on this surface — [`LogosError::InvalidTimeout`]
+    /// delivered to `callback`, synchronously, exactly once, with nothing sent.
+    /// (Returning a `Result` here instead would have made this the one async
+    /// entry point with two error channels.)
+    pub fn call_json_async_with_timeout<F>(
+        &self,
+        method: &str,
+        args: &serde_json::Value,
+        timeout: Duration,
+        callback: F,
+    ) where
+        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+    {
+        let timeout = match TimeoutMs::from_duration(timeout) {
+            Ok(t) => t,
+            Err(e) => return callback(Err(e)),
+        };
+        self.call_json_async_inner(method, args, timeout, callback)
+    }
+
+    fn call_json_async_inner<F>(
+        &self,
+        method: &str,
+        args: &serde_json::Value,
+        timeout: TimeoutMs,
+        callback: F,
+    ) where
+        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+    {
         // Read before the callback is moved into the boxed state — Copy, so
-        // this is just the proxy's timeout captured for the ABI call below.
-        let timeout = self.timeout.as_abi();
+        // this is just the call's timeout captured for the ABI call below.
+        let timeout = timeout.as_abi();
         let client_handle = match &self.client {
             Some(h) => Arc::clone(h),
             None => {
@@ -603,7 +718,6 @@ mod timeout_tests {
     fn default_is_the_abi_default_sentinel() {
         assert_eq!(TimeoutMs::DEFAULT.as_abi(), 0);
         assert!(TimeoutMs::DEFAULT.as_abi() <= 0, "must select the protocol default");
-        assert_eq!(TimeoutMs::DEFAULT.as_duration(), None);
     }
 
     #[test]
@@ -616,7 +730,6 @@ mod timeout_tests {
         ] {
             let t = TimeoutMs::from_duration(d).expect("in range");
             assert_eq!(t.as_abi(), ms, "{:?}", d);
-            assert_eq!(t.as_duration(), Some(Duration::from_millis(ms as u64)));
         }
         // Sub-millisecond remainders truncate toward the whole millisecond the
         // ABI can carry; only a value that truncates to ZERO is refused.

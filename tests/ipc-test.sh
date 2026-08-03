@@ -131,9 +131,15 @@ printf '%s' "$checksum" | grep -qE '"result"[[:space:]]*:[[:space:]]*8354754[[:s
 # guarantee. So the question is answered with a clock, not with a getter: the
 # provider's sleep(ms) blocks for a time the caller KNOWS outlives its timeout.
 #
+# The timeout binds to the CALL, not to the client: the caller module holds ONE
+# provider client for the whole process (its address is readable with
+# provider_client_addr, and asserted constant below), and every measurement here
+# goes through that one object. So each result can only have got its bound from
+# the entry point that was called.
+#
 #   timed_call(sleep_ms, timeout_ms) -> elapsed ms, NEGATED if the call
-#   actually completed. timeout_ms <= 0 means the call site asks for nothing
-#   and gets the unchanged default path.
+#   actually completed. timeout_ms > 0 takes the generated
+#   `sleep_with_timeout`; timeout_ms <= 0 takes the untouched `sleep`.
 echo
 echo "--- per-call timeout ---"
 
@@ -144,26 +150,57 @@ warm=$(call_int sdk_test_caller_module timed_call 100 0)
 echo "warm-up timed_call(sleep=100ms, no timeout) -> ${warm}ms (negative = completed)"
 [ "$warm" -lt 0 ] || fail "warm-up call did not complete: ${warm}"
 
-# 3a. SYNC, timeout scoped. A 6s call under an 800ms timeout must come back at
-#     roughly 800ms: not at 6000 (timeout ignored), not at 20000 (default), and
-#     not never.
-sync_scoped=$(call_int sdk_test_caller_module timed_call 6000 800)
-echo "sync  timed_call(sleep=6000ms, timeout=800ms)  -> ${sync_scoped}ms"
-[ "$sync_scoped" -gt 0 ] || fail "a 6s call COMPLETED under an 800ms timeout (elapsed ${sync_scoped}ms) — the timeout was ignored"
-in_range "sync scoped-timeout elapsed" "$sync_scoped" 700 3000
+client_addr=$(call_int sdk_test_caller_module provider_client_addr)
+[ "$client_addr" != "0" ] || fail "no provider client in the caller module"
+
+# 3a. SYNC, bounded. A 6s call under an 800ms timeout must come back at roughly
+#     800ms: not at 6000 (timeout ignored), not at 20000 (default), and not
+#     never.
+sync_bounded=$(call_int sdk_test_caller_module timed_call 6000 800)
+echo "sync  timed_call(sleep=6000ms, timeout=800ms)  -> ${sync_bounded}ms"
+[ "$sync_bounded" -gt 0 ] || fail "a 6s call COMPLETED under an 800ms timeout (elapsed ${sync_bounded}ms) — the timeout was ignored"
+in_range "sync bounded elapsed" "$sync_bounded" 700 3000
 
 sleep 7   # let the provider finish the sleep it is still serving
 
-# 3b. SYNC, default path. The SAME 6s call with no timeout asked for must still
-#     complete — proof that the plumbing did not start imposing a bound where
-#     none was requested.
+# 3b. SYNC, default path, through the SAME client. The same 6s call with no
+#     timeout asked for must still complete — proof that the plumbing did not
+#     start imposing a bound where none was requested, and that the bound from
+#     3a did not stick to the client.
 sync_default=$(call_int sdk_test_caller_module timed_call 6000 0)
 echo "sync  timed_call(sleep=6000ms, no timeout)     -> ${sync_default}ms"
-[ "$sync_default" -lt 0 ] || fail "a 6s call with NO timeout failed after ${sync_default}ms — the default path changed"
+[ "$sync_default" -lt 0 ] || fail "a 6s call with NO timeout failed after ${sync_default}ms — the default path changed, or a previous call's timeout stuck to the client"
 in_range "sync default-path elapsed" $(( -sync_default )) 5000 12000
 
-# 3c. ASYNC, timeout scoped. Same proof on the other surface: the generated
-#     sleep_async under an 800ms timeout must reach its callback at ~800ms.
+# 3c. THE POINT OF THE PER-CALL FORM: two calls, one client, two different
+#     bounds, back to back with no client rebuilt in between. A whole-client
+#     timeout cannot express this — it would need a second client, or would
+#     make the second bound overwrite the first. Here each call carries its own,
+#     and the two land in disjoint bands.
+#
+#     (drain_ms is slept inside the module between them: the provider is
+#     single-dispatch and is still serving call A's sleep after A gives up, so
+#     without it B would measure the queue instead of its own bound.)
+pair_started=$(call_int sdk_test_caller_module same_client_two_timeouts 4000 700 2600 4000)
+[ "$pair_started" = "1" ] || fail "same_client_two_timeouts did not run: ${pair_started}"
+pair_a=$(call_int sdk_test_caller_module last_pair_a_ms)
+pair_b=$(call_int sdk_test_caller_module last_pair_b_ms)
+echo "same-client pair (sleep=4000ms): A timeout=700ms -> ${pair_a}ms, B timeout=2600ms -> ${pair_b}ms"
+[ "$pair_a" -gt 0 ] || fail "call A COMPLETED under a 700ms timeout (elapsed ${pair_a}ms)"
+[ "$pair_b" -gt 0 ] || fail "call B COMPLETED under a 2600ms timeout (elapsed ${pair_b}ms)"
+# Disjoint, and in the right order. Checked BEFORE the individual bands because
+# this is the load-bearing claim: if the timeout bound to the CLIENT rather than
+# the call, both calls would have come back at whichever bound won.
+[ $(( pair_b - pair_a )) -gt 1200 ] || fail "two different timeouts on one client produced the same elapsed time (A=${pair_a}ms, B=${pair_b}ms) — the timeout is binding to the client, not the call"
+echo "  OK  two calls on ONE client took their OWN timeouts (Δ = $(( pair_b - pair_a ))ms)"
+in_range "same-client call A (700ms bound)"  "$pair_a" 500  1800
+in_range "same-client call B (2600ms bound)" "$pair_b" 2200 3900
+
+sleep 3   # the provider is still finishing call B's sleep
+
+# 3d. ASYNC, bounded. Same proof on the other surface: the generated
+#     sleep_async_with_timeout under an 800ms timeout must reach its callback at
+#     ~800ms.
 started=$(call_int sdk_test_caller_module start_timed_call_async 6000 800)
 [ "$started" = "0" ] || fail "start_timed_call_async refused the timeout: ${started}"
 ok=-1
@@ -173,14 +210,33 @@ for _i in $(seq 1 100); do
   sleep 0.2
 done
 [ "$ok" != "-1" ] || fail "async call under an 800ms timeout never reached its callback"
-async_scoped=$(call_int sdk_test_caller_module last_async_elapsed_ms)
-echo "async start_timed_call_async(sleep=6000ms, timeout=800ms) -> ${async_scoped}ms, completed=${ok}"
-[ "$ok" = "0" ] || fail "a 6s async call COMPLETED under an 800ms timeout (elapsed ${async_scoped}ms)"
-in_range "async scoped-timeout elapsed" "$async_scoped" 700 3000
+async_bounded=$(call_int sdk_test_caller_module last_async_elapsed_ms)
+echo "async start_timed_call_async(sleep=6000ms, timeout=800ms) -> ${async_bounded}ms, completed=${ok}"
+[ "$ok" = "0" ] || fail "a 6s async call COMPLETED under an 800ms timeout (elapsed ${async_bounded}ms)"
+in_range "async bounded elapsed" "$async_bounded" 700 3000
 
 sleep 7   # drain the provider again
 
-# 3d. ASYNC, default path, against a call that outlives the DEFAULT. This is the
+# 3e. ASYNC, a DIFFERENT bound on the same client. The async twin of 3c: the
+#     previous call's 800ms must not have stuck to anything.
+started=$(call_int sdk_test_caller_module start_timed_call_async 6000 3000)
+[ "$started" = "0" ] || fail "start_timed_call_async refused the timeout: ${started}"
+ok=-1
+for _i in $(seq 1 100); do
+  ok=$(call_int sdk_test_caller_module last_async_ok)
+  [ "$ok" != "-1" ] && break
+  sleep 0.2
+done
+[ "$ok" != "-1" ] || fail "async call under a 3000ms timeout never reached its callback"
+async_bounded2=$(call_int sdk_test_caller_module last_async_elapsed_ms)
+echo "async start_timed_call_async(sleep=6000ms, timeout=3000ms) -> ${async_bounded2}ms, completed=${ok}"
+[ "$ok" = "0" ] || fail "a 6s async call COMPLETED under a 3000ms timeout (elapsed ${async_bounded2}ms)"
+in_range "async second bound elapsed" "$async_bounded2" 2600 5000
+[ $(( async_bounded2 - async_bounded )) -gt 1200 ] || fail "two different async timeouts on one client produced the same elapsed time (${async_bounded}ms vs ${async_bounded2}ms)"
+
+sleep 5   # drain
+
+# 3f. ASYNC, default path, against a call that outlives the DEFAULT. This is the
 #     other half of "the default is unchanged": a 25s call with no timeout
 #     asked for must fail at the protocol's own 20s, which is what timeout_ms=0
 #     selects. (It has to be async: a 25s synchronous method would itself be cut
@@ -201,20 +257,39 @@ in_range "default-path (20s) elapsed" "$default_elapsed" 18000 24000
 
 sleep 6   # the provider is still finishing its 25s sleep
 
-# 3e. The scoped timeout must not have leaked. After all of the above, an
-#     ordinary call with no timeout still works exactly as it did in step 1.
+# 3g. A duration the ABI cannot express is REFUSED, not clamped. 500µs would
+#     truncate to 0ms, which on this ABI MEANS "use the default" — so accepting
+#     it would silently turn a sub-millisecond bound into 20 seconds.
+refusal=$(call_json sdk_test_caller_module refused_timeout_reason 500)
+echo "refused_timeout_reason(500us) -> $refusal"
+printf '%s' "$refusal" | grep -q "DEFAULT" \
+  || fail "a 500us timeout was not refused with a reason naming the default it would have become: $refusal"
+echo "  OK  sub-millisecond timeout refused rather than rounded into the 20s default"
+
+# 3h. Every measurement above went through the SAME client object. Checked, not
+#     assumed: if the fixture had quietly rebuilt a client per call, "the
+#     timeout binds to the call" would be untested.
+client_addr_after=$(call_int sdk_test_caller_module provider_client_addr)
+[ "$client_addr_after" = "$client_addr" ] \
+  || fail "the caller rebuilt its provider client mid-run (${client_addr} -> ${client_addr_after}); the per-call assertions above prove nothing"
+echo "  OK  all measurements went through one client (addr ${client_addr})"
+
+# 3i. No bound leaked. After all of the above, an ordinary call with no timeout
+#     still works exactly as it did in step 1.
 after=$(call_json sdk_test_caller_module call_add 5 3)
 printf '%s' "$after" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[,}]' \
-  || fail "call_add(5,3) broke after timeout-scoped calls — a scoped timeout leaked: $after"
-echo "  OK  default-path call still works after timeout-scoped calls"
+  || fail "call_add(5,3) broke after bounded calls — a timeout leaked: $after"
+echo "  OK  default-path call still works after bounded calls"
 
 {
   echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC"
   echo "Binary event passed: blobReady payload received as 4096 bytes, checksum 8354754"
   echo "Per-call timeout passed:"
-  echo "  sync  sleep 6000ms under an 800ms timeout failed after ${sync_scoped}ms"
+  echo "  sync  sleep 6000ms under an 800ms timeout failed after ${sync_bounded}ms"
   echo "  sync  sleep 6000ms with NO timeout still completed, after $(( -sync_default ))ms"
-  echo "  async sleep 6000ms under an 800ms timeout failed after ${async_scoped}ms"
+  echo "  one client, two bounds: 700ms -> ${pair_a}ms and 2600ms -> ${pair_b}ms"
+  echo "  async sleep 6000ms under 800ms -> ${async_bounded}ms, under 3000ms -> ${async_bounded2}ms"
   echo "  default path (timeout_ms <= 0) still waits the protocol's 20s: ${default_elapsed}ms"
+  echo "  sub-millisecond timeout refused, not rounded into the default"
 } > "$out/result.txt"
 cat "$out/result.txt"
