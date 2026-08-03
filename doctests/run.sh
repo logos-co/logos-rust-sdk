@@ -11,11 +11,19 @@
 #       context, sync + async typed calls, event subscription, and concrete +
 #       interface dependencies.
 #
-# Unlike a module repo's own doc-test, this spec does NOT pin logos-rust-sdk to
-# the commit under test: the tutorial module consumes the SDK + lidl-gen as
-# cargo git dependencies at a pinned rev (the published authoring surface, like
-# any real module repo would). To verify the SDK against the working tree, run
-# the integration test instead:
+# No spec writes an SDK revision into a Cargo.toml. Every Rust module here takes
+# the SDK as `path = "../logos-rust-sdk-src"` — the form real modules use — and
+# stages that directory from `logos-module-builder#rust-sdk-src` before running
+# `cargo generate-lockfile`, so the runtime the crate compiles against is the
+# same tree the builder links and runs the generator from. An independently
+# pinned `rev` is a second copy of that decision and drifts from it; a path dep
+# cannot.
+#
+# Which commit that is depends on the spec: concurrent-dispatch overrides the
+# staging build to `{release}` (the commit under test, via --release-for), while
+# cross-language-composition takes module-builder's own pin — it demonstrates the
+# published authoring surface. To verify the SDK working tree directly, run the
+# integration test instead:
 #   nix build 'path:../tests#checks.x86_64-linux.ipc-test' --override-input logos-rust-sdk path:..
 #
 # The runner is the shared `doctest` CLI
@@ -153,7 +161,14 @@ done
 #   --also calc-lgx      the rust_calc_module .lgx out-link
 #   --also greeter-lgx   the cpp_greeter_module .lgx out-link
 #   --also orch-lgx      the rust_orchestrator_module .lgx out-link
+#   --also worker-lgx    the slow_worker_module .lgx out-link
+#   --also driver-lgx    the fanout_driver_module .lgx out-link
 #   --also logs.txt      the daemon log (default glob is *.log, not logs.txt)
+#   --also logos-rust-sdk-src
+#                        the staged SDK source out-link (a symlink into the nix
+#                        store; the specs .gitignore it, but clean should not
+#                        leave a dangling link in the committed tree)
+#   --also .logoscore    the per-spec daemon config/state dir
 # Module dirs are copied out of the read-only nix store, so they land read-only
 # (r-x); restore write permission first or `clean` can't delete inside them.
 chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
@@ -164,7 +179,11 @@ echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + 
   --also calc-lgx \
   --also greeter-lgx \
   --also orch-lgx \
+  --also worker-lgx \
+  --also driver-lgx \
   --also logs.txt \
+  --also logos-rust-sdk-src \
+  --also .logoscore \
   --verbose
 
 # If we staged the build off-tree, copy the cleaned result back into ./outputs.

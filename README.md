@@ -59,6 +59,56 @@ fn hello(&mut self, name: String) -> String {
 }
 ```
 
+### Per-call timeouts — `<method>_with_timeout(...)`
+
+Every call has a timeout; by default it is the protocol's own, **20 seconds**. To
+bound one call more tightly, call its `_with_timeout` twin. Each generated method
+has one, on both surfaces:
+
+```rust
+pub fn fetch(&self, sym: &str) -> Result<Quote, LogosError>;
+pub fn fetch_with_timeout(&self, sym: &str, timeout: Duration) -> Result<Quote, LogosError>;
+pub fn fetch_async<F>(&self, sym: &str, callback: F);
+pub fn fetch_async_with_timeout<F>(&self, sym: &str, timeout: Duration, callback: F);
+```
+
+The bound belongs to the **call**, not to the client, so one client can serve
+calls with entirely different expectations — which is the normal case, since how
+long is too long is a fact about the method:
+
+```rust
+fn refresh(&mut self) -> String {
+    let oracle = modules().price_oracle;
+
+    let spot  = oracle.fetch_with_timeout("ETH", Duration::from_millis(500));  // ~500ms
+    let hist  = oracle.backfill_with_timeout(30, Duration::from_secs(10));     // ~10s
+    let other = oracle.fetch("BTC");                                           // 20s default
+
+    format!("{:?} {:?} {:?}", spot, hist, other)
+}
+```
+
+Nothing is stored: the duration is threaded down to `lp_invoke`'s `timeout_ms`
+argument for that one call, so a bound cannot leak into a later call that did not
+ask for one.
+
+The `Duration` is converted to the ABI's millisecond `c_int` at the boundary and
+**refused rather than clamped** if it does not fit — sub-millisecond (which the
+ABI would read as "use the default", i.e. 20s) and anything past `c_int::MAX` ms
+(~24.8 days) both yield `LogosError::InvalidTimeout` at the point the bad value
+was supplied. On the async twins that error is delivered to the callback, the way
+every other undispatchable async call is reported.
+
+Underneath, `PluginProxy` offers the same shape for hand-written calls:
+`call_with_timeout`, `call_with_params_with_timeout`, `call_sync_with_timeout`,
+`call_json_with_timeout`, `call_json_async_with_timeout`.
+
+> **This duplicated surface is a stopgap.** Rust has neither overloading nor
+> default arguments, so a `timeout` parameter on `fetch` itself would break every
+> existing call site. A later breaking release will make the timeout a first-class
+> parameter of the one entry point per method and drop the twins; until then the
+> pair is deliberate, and mirrors what the C++ SDK did for `fooAsyncResult`.
+
 ### Typed events — `on_<event>()` / `decode_<event>()`
 
 Each `event` in a dependency's contract generates a typed subscription. The returned `EventSubscription` owns its client share, so it keeps receiving after the proxy is dropped — move it into a listener thread and iterate it:
@@ -122,6 +172,7 @@ Every typed call and subscription returns `Result<_, LogosError>`:
 |---------|-------|
 | `PluginCallFailed` | Method call returned an error from the remote module |
 | `EventListenerFailed` | Event registration failed |
+| `InvalidTimeout` | A `_with_timeout` duration the protocol ABI cannot express (sub-millisecond, or > ~24.8 days) |
 | `InvalidString` | A string argument contained a null byte |
 | `JsonError` | Parameter serialization failed |
 | `ChannelClosed` | The callback channel was dropped unexpectedly |

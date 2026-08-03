@@ -3,5 +3,6 @@ module sdk_test_provider_module {
   description "Minimal provider module for logos-rust-sdk integration tests"
   method add(a: int, b: int) -> int
   method emit_blob(size: int) -> int
+  method sleep(ms: int) -> int description "Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`."
   event blobReady(seq: int, payload: bstr)
 }

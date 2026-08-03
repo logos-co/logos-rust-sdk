@@ -60,6 +60,7 @@ pub trait SdkTestProviderModule: 'static {
 
     fn add(&mut self, a: i64, b: i64) -> i64;
     fn emit_blob(&mut self, size: i64) -> i64;
+    fn sleep(&mut self, ms: i64) -> i64;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
@@ -115,13 +116,22 @@ pub fn install<T: SdkTestProviderModule + Default>() {
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
             "add" => {
-                if args.len() < 2 { return None; }
-                let result = imp.add(args.get(0).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default(), args.get(1).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
+                if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 2, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
+                let result = imp.add(__logos_a0, __logos_a1);
                 Some(serde_json::Value::from(result))
             }
             "emit_blob" => {
-                if args.len() < 1 { return None; }
-                let result = imp.emit_blob(args.get(0).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
+                let result = imp.emit_blob(__logos_a0);
+                Some(serde_json::Value::from(result))
+            }
+            "sleep" => {
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
+                let result = imp.sleep(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             _ => None,
@@ -194,7 +204,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"isInvokable\":true,\"name\":\"sleep\",\"parameters\":[{\"name\":\"ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"sleep(int)\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
 }
 
 #[no_mangle]

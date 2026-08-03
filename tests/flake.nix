@@ -124,60 +124,14 @@
           modulesDir = self.packages.${system}.modules;
         in
         {
+          # Same assertions as `nix flake check` on the root flake — one script,
+          # two derivations, so CI and the local check cannot drift.
           ipc-test = pkgs.runCommand "rust-sdk-ipc-test" {
-            nativeBuildInputs = [ logoscore ]
+            nativeBuildInputs = [ logoscore pkgs.bash ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            MODULES_DIR = modulesDir;
           } ''
-            mkdir -p $out
-            export QT_QPA_PLATFORM=offscreen
-
-            # Inline (`-c`) mode is legacy; drive a logoscore daemon and call via
-            # the `call` client subcommand. A persistent daemon keeps the Qt event
-            # loop running so the cross-module IPC reply is delivered reliably.
-            export LOGOSCORE_CONFIG_DIR="$(mktemp -d)"
-            DAEMON_PID=""
-            cleanup() {
-              logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" stop >/dev/null 2>&1 || true
-              [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
-              rm -rf "$LOGOSCORE_CONFIG_DIR"
-            }
-            trap cleanup EXIT
-
-            logoscore -D --config-dir "$LOGOSCORE_CONFIG_DIR" -m ${modulesDir} \
-              >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
-            DAEMON_PID=$!
-            # `status` is the definitive readiness probe; no need to poke at the
-            # daemon's internal state file.
-            ready=0
-            for _i in $(seq 1 100); do
-              if logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" status >/dev/null 2>&1; then
-                ready=1; break
-              fi
-              kill -0 "$DAEMON_PID" 2>/dev/null || break
-              sleep 0.2
-            done
-            [ "$ready" = 1 ] || { echo "logoscore daemon failed to start:" >&2; cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2; exit 1; }
-
-            # load-module does not auto-resolve dependencies; load provider, then caller.
-            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_provider_module
-            logoscore --config-dir "$LOGOSCORE_CONFIG_DIR" load-module sdk_test_caller_module
-
-            # Fail loudly if the call errors (don't swallow its exit code), and
-            # match the value exactly so "8" isn't satisfied by e.g. "80".
-            if ! result=$(logoscore --json --config-dir "$LOGOSCORE_CONFIG_DIR" \
-                 call sdk_test_caller_module call_add 5 3 2>caller.err); then
-              echo "logoscore call failed:" >&2
-              cat caller.err "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2 || true
-              exit 1
-            fi
-            echo "call result: $result"
-            if ! printf '%s' "$result" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[,}]'; then
-              echo "IPC test FAILED (expected sdk_test_caller_module.call_add(5,3) == 8): $result" >&2
-              cat "$LOGOSCORE_CONFIG_DIR/daemon.log" >&2
-              exit 1
-            fi
-
-            echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC" > $out/result.txt
+            bash ${./ipc-test.sh}
           '';
         }
       );

@@ -148,11 +148,18 @@ crate-type = ["staticlib"]
 
 [dependencies]
 serde_json = "1"
-logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "8b89e562a52218af6beef6fa6e3cfa12ab52e93e" }
+# A PATH dependency, the form real modules use. The directory is
+# staged by the build step below (module-builder's `rust-sdk-src`
+# output) before `cargo generate-lockfile` runs, so the crate locks
+# against the SAME SDK the builder links and runs the generator from.
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }
 ```
 
-> The `rev` pins a known-good `logos-rust-sdk` master commit; bump it
-> to a newer master or a release tag as the SDK advances.
+> There is no SDK revision written down here. `../logos-rust-sdk-src`
+> is the tree `logos-module-builder` already pins and already links, so
+> the runtime the crate compiles against and the generator that emitted
+> its scaffold are the same commit by construction — they cannot drift
+> apart the way an independently pinned `rev` can.
 
 ### 2.3 The module logic
 
@@ -286,13 +293,20 @@ standard `mkLogosModule` shape; there is no `buildRustPackage` here:
 
 ### 2.7 Build it
 
-Generate the lockfile (network happens here, not inside the sandbox),
+Stage the SDK source so the crate's `path` dependency resolves, generate
+the lockfile against it (network happens here, not inside the sandbox),
 initialise git so the flake sees the files, and build the `.lgx`. The
 builder runs `logos-lidl-gen --provider`, compiles the crate, links
 the archive into the Qt glue plugin, and bundles it.
 
+`rust-sdk-src` is a module-builder output that materialises the SDK tree
+the builder pins — the same one it will stage inside the build — as a
+plain directory, which is what lets `cargo generate-lockfile` run before
+any nix build has happened.
+
 ```bash
 cd rust-calc
+nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
 (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
 git init && git add -A && nix flake update && git add flake.lock
 nix build .#lgx -o calc-lgx
@@ -472,7 +486,11 @@ crate-type = ["staticlib"]
 
 [dependencies]
 serde_json = "1"
-logos-rust-sdk = { git = "https://github.com/logos-co/logos-rust-sdk", rev = "8b89e562a52218af6beef6fa6e3cfa12ab52e93e" }
+# A PATH dependency, the form real modules use. The directory is
+# staged by the build step below (module-builder's `rust-sdk-src`
+# output) before `cargo generate-lockfile` runs, so the crate locks
+# against the SAME SDK the builder links and runs the generator from.
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }
 ```
 
 ### 4.4 The implementation — the whole consumer surface
@@ -685,6 +703,7 @@ the local interface) — compiles the crate, and links it into the glue:
 
 ```bash
 cd rust-orchestrator
+nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
 (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
 git init && git add -A
 nix flake update --override-input rust_calc_module path:$PWD/../rust-calc

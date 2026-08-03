@@ -53,6 +53,15 @@ pub trait SdkTestCallerModule: 'static {
     fn call_add(&mut self, a: i64, b: i64) -> i64;
     fn last_blob_size(&mut self) -> i64;
     fn last_blob_checksum(&mut self) -> i64;
+    fn timed_call(&mut self, sleep_ms: i64, timeout_ms: i64) -> i64;
+    fn same_client_two_timeouts(&mut self, sleep_ms: i64, timeout_a_ms: i64, timeout_b_ms: i64, drain_ms: i64) -> i64;
+    fn last_pair_a_ms(&mut self) -> i64;
+    fn last_pair_b_ms(&mut self) -> i64;
+    fn provider_client_addr(&mut self) -> i64;
+    fn start_timed_call_async(&mut self, sleep_ms: i64, timeout_ms: i64) -> i64;
+    fn last_async_elapsed_ms(&mut self) -> i64;
+    fn last_async_ok(&mut self) -> i64;
+    fn refused_timeout_reason(&mut self, timeout_us: i64) -> String;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
@@ -108,8 +117,10 @@ pub fn install<T: SdkTestCallerModule + Default>() {
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
             "call_add" => {
-                if args.len() < 2 { return None; }
-                let result = imp.call_add(args.get(0).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default(), args.get(1).unwrap_or(&serde_json::Value::Null).as_i64().unwrap_or_default());
+                if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let result = imp.call_add(__logos_a0, __logos_a1);
                 Some(serde_json::Value::from(result))
             }
             "last_blob_size" => {
@@ -118,6 +129,55 @@ pub fn install<T: SdkTestCallerModule + Default>() {
             }
             "last_blob_checksum" => {
                 let result = imp.last_blob_checksum();
+                Some(serde_json::Value::from(result))
+            }
+            "timed_call" => {
+                if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let result = imp.timed_call(__logos_a0, __logos_a1);
+                Some(serde_json::Value::from(result))
+            }
+            "same_client_two_timeouts" => {
+                if args.len() < 4 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 4, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a2 = match logos_rust_sdk::args::as_i64(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a3 = match logos_rust_sdk::args::as_i64(args, 3) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let result = imp.same_client_two_timeouts(__logos_a0, __logos_a1, __logos_a2, __logos_a3);
+                Some(serde_json::Value::from(result))
+            }
+            "last_pair_a_ms" => {
+                let result = imp.last_pair_a_ms();
+                Some(serde_json::Value::from(result))
+            }
+            "last_pair_b_ms" => {
+                let result = imp.last_pair_b_ms();
+                Some(serde_json::Value::from(result))
+            }
+            "provider_client_addr" => {
+                let result = imp.provider_client_addr();
+                Some(serde_json::Value::from(result))
+            }
+            "start_timed_call_async" => {
+                if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let result = imp.start_timed_call_async(__logos_a0, __logos_a1);
+                Some(serde_json::Value::from(result))
+            }
+            "last_async_elapsed_ms" => {
+                let result = imp.last_async_elapsed_ms();
+                Some(serde_json::Value::from(result))
+            }
+            "last_async_ok" => {
+                let result = imp.last_async_ok();
+                Some(serde_json::Value::from(result))
+            }
+            "refused_timeout_reason" => {
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
+                let result = imp.refused_timeout_reason(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             _ => None,
@@ -190,7 +250,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"call_add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"call_add(int,int)\"},{\"isInvokable\":true,\"name\":\"last_blob_size\",\"returnType\":\"int\",\"signature\":\"last_blob_size()\"},{\"isInvokable\":true,\"name\":\"last_blob_checksum\",\"returnType\":\"int\",\"signature\":\"last_blob_checksum()\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"call_add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"call_add(int,int)\"},{\"isInvokable\":true,\"name\":\"last_blob_size\",\"returnType\":\"int\",\"signature\":\"last_blob_size()\"},{\"isInvokable\":true,\"name\":\"last_blob_checksum\",\"returnType\":\"int\",\"signature\":\"last_blob_checksum()\"},{\"isInvokable\":true,\"name\":\"timed_call\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"timed_call(int,int)\"},{\"isInvokable\":true,\"name\":\"same_client_two_timeouts\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_a_ms\",\"type\":\"int\"},{\"name\":\"timeout_b_ms\",\"type\":\"int\"},{\"name\":\"drain_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"same_client_two_timeouts(int,int,int,int)\"},{\"isInvokable\":true,\"name\":\"last_pair_a_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_a_ms()\"},{\"isInvokable\":true,\"name\":\"last_pair_b_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_b_ms()\"},{\"isInvokable\":true,\"name\":\"provider_client_addr\",\"returnType\":\"int\",\"signature\":\"provider_client_addr()\"},{\"isInvokable\":true,\"name\":\"start_timed_call_async\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"start_timed_call_async(int,int)\"},{\"isInvokable\":true,\"name\":\"last_async_elapsed_ms\",\"returnType\":\"int\",\"signature\":\"last_async_elapsed_ms()\"},{\"isInvokable\":true,\"name\":\"last_async_ok\",\"returnType\":\"int\",\"signature\":\"last_async_ok()\"},{\"isInvokable\":true,\"name\":\"refused_timeout_reason\",\"parameters\":[{\"name\":\"timeout_us\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"refused_timeout_reason(int)\"}]".to_string())
 }
 
 #[no_mangle]
