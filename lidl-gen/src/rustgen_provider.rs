@@ -318,9 +318,25 @@ fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
 
 /// The borrowed Rust type one event parameter is emitted with. `?T` wraps that
 /// borrow in `Option`, so an emitter spells "no value" the one way Rust has.
-fn emit_param_type(ty: &TypeExpr) -> String {
+///
+/// Takes `recs` for the same reason `rust_param_type` does: a record the
+/// contract DECLARES is a real struct on this side too. Without it every
+/// non-primitive collapsed to `&serde_json::Value`, so a module whose methods
+/// took `Point` had to hand-build a JSON object to emit `moved(from: Point)` —
+/// a typed API with one untyped hole in it.
+fn emit_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     if is_optional(ty) {
-        return format!("Option<{}>", emit_param_type(ty.value_type()));
+        return format!("Option<{}>", emit_param_type(ty.value_type(), recs));
+    }
+    if crate::rustgen::is_record(ty, recs) {
+        return format!("&{}", crate::rustgen::owned_type(ty, recs));
+    }
+    // `[Record]` borrows as a slice — the emitter never needs to own it.
+    if ty.kind == TypeKind::Array
+        && ty.elements.len() == 1
+        && crate::rustgen::is_record(&ty.elements[0], recs)
+    {
+        return format!("&[{}]", crate::rustgen::owned_type(&ty.elements[0], recs));
     }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "&str".into(),
@@ -336,12 +352,27 @@ fn emit_param_type(ty: &TypeExpr) -> String {
 /// The JSON value one event argument contributes to the payload array. An
 /// event parameter is a POSITIONAL slot, so an empty `?T` is `null` and the
 /// payload keeps its arity.
-fn emit_param_value(ty: &TypeExpr, name: &str) -> String {
+fn emit_param_value(ty: &TypeExpr, name: &str, recs: &BTreeSet<String>) -> String {
     if is_optional(ty) {
         return format!(
             "match {} {{ Some(__o) => {}, None => serde_json::Value::Null }}",
             name,
-            emit_param_value(ty.value_type(), "__o")
+            emit_param_value(ty.value_type(), "__o", recs)
+        );
+    }
+    // A record carries its own encoder — the same `to_json` the dispatch uses
+    // for a record RETURN, so an event payload and a method result serialize a
+    // Point identically.
+    if crate::rustgen::is_record(ty, recs) {
+        return format!("{}.to_json()", name);
+    }
+    if ty.kind == TypeKind::Array
+        && ty.elements.len() == 1
+        && crate::rustgen::is_record(&ty.elements[0], recs)
+    {
+        return format!(
+            "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
+            name
         );
     }
     match (&ty.kind, ty.name.as_str()) {
@@ -563,7 +594,7 @@ pub fn generate_provider_with(
         let params_sig: Vec<String> = e
             .params
             .iter()
-            .map(|p| format!("{}: {}", snake(&p.name), emit_param_type(&p.ty)))
+            .map(|p| format!("{}: {}", snake(&p.name), emit_param_type(&p.ty, &recs)))
             .collect();
         // The accumulator is named `__logos_args`, not `payload`: an event
         // parameter is free to be called `payload` (delivery_module's
@@ -576,7 +607,7 @@ pub fn generate_provider_with(
             .params
             .iter()
             .map(|p| {
-                format!("__logos_args.push({});", emit_param_value(&p.ty, &snake(&p.name)))
+                format!("__logos_args.push({});", emit_param_value(&p.ty, &snake(&p.name), &recs))
             })
             .collect();
         out.push_str(&format!(
@@ -1054,6 +1085,59 @@ module rust_calc {
     // Records on the PROVIDER side: a Rust module author writes `s: Status`,
     // not a serde_json::Value to pick apart. The dispatch validates the shape
     // (Ty::Record reports arg0.field) and then materialises the struct.
+    #[test]
+    fn event_emitters_speak_records_too() {
+        // The gap this closes: methods took `Status` while the emitter for an
+        // event carrying the SAME record still took `&serde_json::Value`, so a
+        // typed API had one untyped hole and the author had to hand-build the
+        // JSON object to fire an event.
+        let src = r#"
+module info_module {
+  version "1.0.0"
+  depends []
+  type Status {
+    port: uint
+    blob: bstr
+  }
+  method describeStatus(s: Status) -> tstr
+  event statusChanged(s: Status, history: [Status], previous: ?Status, note: tstr)
+}
+"#;
+        let m = crate::parse(src).expect("parse");
+        let code = generate_provider(&m, "0.2.0");
+
+        // Borrowed on the emitter — it never needs to own the payload.
+        assert!(
+            code.contains(
+                "pub fn emit_status_changed(s: &Status, history: &[Status], \
+                 previous: Option<&Status>, note: &str)"
+            ),
+            "{}",
+            code
+        );
+        // Encoded by the record's OWN to_json — the same encoder a record
+        // RETURN uses, so an event payload and a method result serialize a
+        // Status identically.
+        assert!(code.contains("__logos_args.push(s.to_json());"), "{}", code);
+        assert!(
+            code.contains("history.iter().map(|__e| __e.to_json()).collect()"),
+            "{}",
+            code
+        );
+        // An empty `?Status` is still null, and the payload keeps its arity.
+        assert!(
+            code.contains("match previous { Some(__o) => __o.to_json(), None => serde_json::Value::Null }"),
+            "{}",
+            code
+        );
+        // A non-record parameter in the same signature is untouched.
+        assert!(
+            code.contains("__logos_args.push(serde_json::Value::from(note));"),
+            "{}",
+            code
+        );
+    }
+
     #[test]
     fn provider_speaks_records() {
         let src = r#"
