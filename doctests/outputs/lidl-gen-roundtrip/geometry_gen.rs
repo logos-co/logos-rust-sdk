@@ -44,10 +44,10 @@ fn emit_event(name: &str, payload: &serde_json::Value) {
 }
 
 /// Typed emitter for the `moved` event.
-pub fn emit_moved(from: &serde_json::Value, to: &serde_json::Value) {
+pub fn emit_moved(from: &Point, to: &Point) {
     let mut __logos_args: Vec<serde_json::Value> = Vec::new();
-    __logos_args.push(from.clone());
-    __logos_args.push(to.clone());
+    __logos_args.push(from.to_json());
+    __logos_args.push(to.to_json());
     emit_event("moved", &serde_json::Value::Array(__logos_args));
 }
 

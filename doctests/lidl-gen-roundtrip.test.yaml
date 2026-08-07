@@ -286,6 +286,12 @@ sections:
           `serde_json::Value`, the untyped carrier for the JSON that crosses the
           process boundary, and plain scalars like `dx: f64` stay typed.
 
+          The same mapping reaches the typed event EMITTER: `emit_moved` takes
+          `&Point`, not a JSON value the author has to assemble, and encodes it
+          through the record's own `to_json` — the same encoder a record return
+          uses, so an event payload and a method result serialize a `Point`
+          identically.
+
           On the wire, empty is spelled by the slot: a record FIELD is left out
           (a named slot can be), while a parameter or return is `null` (a
           positional slot has no key to omit, and the arity must not change).
@@ -308,4 +314,10 @@ sections:
           # "may be nothing" was invisible in Rust.
           - "fn nearest(&mut self, p: Point, limit: Option<u64>) -> Option<Point>"
           - "fn attributes(&mut self, tags: serde_json::Value) -> serde_json::Value"
-          - "pub fn emit_moved(from: &serde_json::Value, to: &serde_json::Value)"
+          # The typed EMITTER carries the record too. This expected
+          # `&serde_json::Value` until the emitter path learned about records:
+          # methods had been typed since records landed, so a contract declaring
+          # `event moved(from: Point, to: Point)` still made the author
+          # hand-build the JSON object to fire it. Borrowed, because an emitter
+          # never needs to own its payload.
+          - "pub fn emit_moved(from: &Point, to: &Point)"
