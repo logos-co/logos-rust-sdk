@@ -21,7 +21,19 @@
 //! Supported types (the std-convertible LIDL subset): `i64`→int, `u64`→uint,
 //! `f64`→float64, `bool`→bool, `String`/`&str`→tstr, `Vec<u8>`/`&[u8]`→bstr,
 //! `serde_json::Value`/`&serde_json::Value`→any,
-//! `Result<serde_json::Value, String>`→result, `()`→void (returns only).
+//! `Result<serde_json::Value, String>`→result, `()`→void (returns only),
+//! `Option<T>`→`?T` in a PARAMETER or an EVENT parameter.
+//!
+//! Optionality is admitted by exactly one rule: the value type must be a FIXED
+//! POINT of the round trip, i.e. `rust_param_type(type_to_lidl(T))` must be the
+//! same spelling the author wrote. A rust-first module is scaffolded
+//! `--no-trait`, so the AUTHOR's trait is the dispatch's call site — anything
+//! that does not map back onto their spelling fails to compile inside generated
+//! code they never wrote, with an error pointing at a file they did not author.
+//! Refusing it here means the error names the real cause instead.
+//!
+//! An optional RETURN is refused for a different reason entirely — see
+//! [`OPTIONAL_RETURN_UNSUPPORTED`].
 
 use crate::ast::*;
 
@@ -67,6 +79,112 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// Why `-> Option<T>` is refused.
+///
+/// The frontend could express it — `?T` is a legal LIDL return and the provider
+/// backend maps it — but the host path cannot yet carry an EMPTY one. An empty
+/// optional is spelled JSON null; the Qt cdylib glue escapes null only for
+/// `void` and `result` (an Optional node has an empty `name` and never sets
+/// `resultReturn`, so it matches neither); logos-protocol's json→QVariant
+/// conversion turns null into an INVALID QVariant, which is the same value that
+/// means "the call failed"; and core_service reports that as METHOD_FAILED. So
+/// "found nothing" would be indistinguishable from "the call failed" for every
+/// non-Rust caller.
+///
+/// Rust→Rust would work (lp_invoke has a separate error channel), which is
+/// exactly why this must be refused at the CONTRACT: a contract that behaves
+/// differently depending on the caller's language is not a contract.
+///
+/// Lifting this gate means giving the reader a way to tell the two apart —
+/// narrowing the null⇒failure rule to methods whose published metadata declares
+/// an optional return, rather than deleting it (deleting it silently converts
+/// every existing failure into a success).
+pub(crate) const OPTIONAL_RETURN_UNSUPPORTED: &str =
+    "an optional RETURN is not supported: an empty `?T` is spelled JSON null, and null is \
+     already how this path reports a FAILED call — logos_json_convert maps it to an invalid \
+     QVariant, which core_service reports as METHOD_FAILED (only `void` and `result` have an \
+     escape). Take `Option<T>` as a parameter, or return Result<serde_json::Value, String>";
+
+/// The admission gate for the value type of an `Option<..>`.
+///
+/// Keyed on the AUTHOR'S SPELLING rather than the mapped LIDL type, because that
+/// is the comparison that decides whether the crate compiles: `i32` and `i64`
+/// both map to `int`, but only `i64` comes back out of `rust_param_type`; `&str`
+/// and `String` both map to `tstr`, but only `String` comes back. Admitting a
+/// non-fixed-point would emit a trait the author's own impl cannot satisfy.
+///
+/// Deliberately conservative — `Option<serde_json::Value>` IS a fixed point and
+/// could be admitted later; it is left out so the first cut of this feature has
+/// the smallest possible surface. Widening is additive and breaks nothing.
+fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
+    let p = match ty {
+        syn::Type::Path(p) => p,
+        // &str / &[u8] inside an Option: the borrowed form never comes back out
+        // of rust_param_type, which yields String / Vec<u8>.
+        syn::Type::Reference(_) => {
+            return Err("Option<&T> has no LIDL type — the generated trait takes the OWNED \
+                        form, so write Option<String> or Option<Vec<u8>>"
+                .into())
+        }
+        syn::Type::Tuple(t) if t.elems.is_empty() => {
+            return Err("Option<()> has no LIDL type — `?void` is not a type".into())
+        }
+        _ => return Err(format!("Option<{}> is not a supported type", render(ty))),
+    };
+    let last = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    match last.as_str() {
+        "String" | "i64" | "u64" | "f64" | "bool" => Ok(()),
+        "Vec" => match generic_arg(p).as_ref().and_then(type_name) {
+            Some(n) if n == "u8" => Ok(()),
+            _ => Err("Option<Vec<T>> has no LIDL type unless T is u8 (which is `?bstr`) — a \
+                      typed array comes back from the generator as an untyped \
+                      serde_json::Value, which will not match your signature"
+                .into()),
+        },
+        "Option" => Err("Option<Option<T>> has no LIDL type — `?T` is TWO-state (a value, or \
+                         empty) and Rust has exactly one empty inhabitant, so there is nowhere \
+                         for a third state to live"
+            .into()),
+        "i32" | "u32" => Err(format!(
+            "Option<{}> has no LIDL type — LIDL numbers are 64-bit, and the generated trait \
+             would take Option<i64>/Option<u64>",
+            last
+        )),
+        // Matched on the last path segment, like the non-optional `Value` arm
+        // above, so the message must not claim WHICH `Value` this is — a
+        // `my_crate::Value` lands here too and would be misdescribed.
+        "Value" => Err("Option<Value> is not admitted yet — as serde_json::Value it is `?any`, \
+                        which round-trips, but it is held back to keep this feature's first \
+                        surface minimal; any other `Value` type has no LIDL spelling at all"
+            .into()),
+        "Result" => Err("Option<Result<..>> has no LIDL type — a result carries its own empty \
+                         discriminant"
+            .into()),
+        other => Err(format!(
+            "Option<{}> has no LIDL type — only String, i64, u64, f64, bool and Vec<u8> may be \
+             optional",
+            other
+        )),
+    }
+}
+
+/// Best-effort rendering of a type for an error message. `quote` is not a
+/// dependency, so fall back to the last path segment when there is one.
+fn render(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "?".into()),
+        syn::Type::Reference(_) => "&_".into(),
+        syn::Type::Slice(_) => "[_]".into(),
+        syn::Type::Tuple(_) => "(..)".into(),
+        _ => "_".into(),
+    }
+}
+
 fn type_to_lidl(ty: &syn::Type, is_return: bool) -> Result<TypeExpr, String> {
     // Unwrap references: &str, &[u8], &serde_json::Value.
     if let syn::Type::Reference(r) = ty {
@@ -105,12 +223,39 @@ fn type_to_lidl(ty: &syn::Type, is_return: bool) -> Result<TypeExpr, String> {
                         Ok(TypeExpr::primitive("bstr"))
                     } else {
                         let elem = type_to_lidl(&inner, false)?;
+                        // Without this guard, adding the Option arm below would
+                        // silently WIDEN Vec<Option<T>> from a clean frontend
+                        // error into `[?T]` — which comes back from the provider
+                        // backend as an untyped serde_json::Value, so the
+                        // published contract would be one the author's own impl
+                        // cannot satisfy.
+                        if elem.is_optional() {
+                            return Err(
+                                "Vec<Option<T>> has no LIDL type: `[?T]` comes back from the \
+                                 generator as an untyped serde_json::Value, which will not \
+                                 match your signature"
+                                    .into(),
+                            );
+                        }
                         Ok(TypeExpr {
                             kind: TypeKind::Array,
                             name: String::new(),
                             elements: vec![elem],
                         })
                     }
+                }
+                // `Option<T>` is `?T` — the Rust-first half of optionality, the
+                // mirror of the C++ header parser's `std::optional<T>`.
+                // Everything the gate refuses is refused HERE, where the reason
+                // is known, rather than as an unexplained `mismatched types`
+                // inside the generated scaffold.
+                "Option" => {
+                    if is_return {
+                        return Err(OPTIONAL_RETURN_UNSUPPORTED.into());
+                    }
+                    let inner = generic_arg(p).ok_or("Option missing type argument")?;
+                    option_value_is_fixed_point(&inner)?;
+                    Ok(TypeExpr::optional(type_to_lidl(&inner, /*is_return=*/ false)?))
                 }
                 "Result" if is_return => Ok(TypeExpr::primitive("result")),
                 other => Err(format!("unsupported type: {}", other)),
@@ -295,5 +440,137 @@ pub trait RustCalcModuleEvents {
     fn rejects_unknown_types() {
         let bad = "pub trait X { fn f(&mut self, p: std::collections::HashMap<String,String>) -> i64; }";
         assert!(extract_from_rust(bad, "X", None, "1.0.0").is_err());
+    }
+
+    // --- optionality ------------------------------------------------------
+
+    const OPT_SRC: &str = r#"
+pub trait OptModule {
+    fn find(&mut self, id: Option<String>, exact: bool) -> String;
+    fn store(&mut self, blob: Option<Vec<u8>>) -> bool;
+    fn tick(&mut self, n: Option<i64>, u: Option<u64>, f: Option<f64>, b: Option<bool>) -> f64;
+    fn borrowed(&mut self, id: &Option<String>) -> bool;
+}
+
+pub trait OptModuleEvents {
+    fn changed(&self, label: Option<String>);
+}
+"#;
+
+    #[test]
+    fn option_maps_to_the_optional_kind_in_a_parameter_and_an_event() {
+        let m = extract_from_rust(OPT_SRC, "OptModule", None, "1.0.0").unwrap();
+
+        // Every optional is a well-formed `?T`: Optional kind, empty name,
+        // exactly one element. A degenerate Optional would be simultaneously
+        // omittable, undecodable, and a serializer panic.
+        let check = |p: &ParamDecl, value: &str| {
+            assert!(p.is_optional(), "{} should be optional", p.name);
+            assert_eq!(p.ty.kind, TypeKind::Optional);
+            assert_eq!(p.ty.name, "", "an Optional node carries no name");
+            assert_eq!(p.ty.elements.len(), 1, "exactly one element");
+            assert_eq!(p.value_type().name, value);
+        };
+
+        let find = &m.methods[0];
+        check(&find.params[0], "tstr");
+        // A non-optional sibling is untouched.
+        assert!(!find.params[1].is_optional());
+        assert_eq!(find.params[1].ty.name, "bool");
+
+        // Option<Vec<u8>> is `?bstr` — NOT an array of uint. The bstr
+        // special-case must survive the Option wrapper.
+        check(&m.methods[1].params[0], "bstr");
+
+        let tick = &m.methods[2];
+        check(&tick.params[0], "int");
+        check(&tick.params[1], "uint");
+        check(&tick.params[2], "float64");
+        check(&tick.params[3], "bool");
+
+        // &Option<T> unwraps to Option<T> via the reference arm.
+        check(&m.methods[3].params[0], "tstr");
+
+        // Event parameters take optionals too.
+        check(&m.events[0].params[0], "tstr");
+    }
+
+    #[test]
+    fn only_a_fixed_point_may_be_optional() {
+        // Each entry must be refused, and the message must name the reason —
+        // these errors are the whole point of the gate, since the alternative
+        // is an unexplained type mismatch inside generated code.
+        let cases: &[(&str, &str)] = &[
+            ("Option<Option<i64>>", "TWO-state"),
+            ("Option<Vec<i64>>", "unless T is u8"),
+            ("Option<&str>", "OWNED"),
+            ("Option<i32>", "64-bit"),
+            ("Option<u32>", "64-bit"),
+            ("Option<()>", "?void"),
+            ("Option<serde_json::Value>", "held back"),
+            ("Option<Result<serde_json::Value, String>>", "discriminant"),
+            ("Option<std::collections::HashMap<String,String>>", "only String"),
+            ("Option<MyStruct>", "only String"),
+            ("Vec<Option<String>>", "Vec<Option<T>>"),
+        ];
+        for (spelling, needle) in cases {
+            let src = format!("pub trait X {{ fn f(&mut self, p: {}) -> bool; }}", spelling);
+            let err = extract_from_rust(&src, "X", None, "1.0.0")
+                .expect_err(&format!("{} must be refused", spelling));
+            assert!(
+                err.contains(needle),
+                "{}: message should explain `{}`, got: {}",
+                spelling,
+                needle,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn an_optional_return_is_refused_with_its_reason() {
+        // TRIPWIRE. This goes red the day someone teaches the host path to tell
+        // an empty optional apart from a failed call. When it does, read
+        // OPTIONAL_RETURN_UNSUPPORTED before deleting it: the fix is to NARROW
+        // the null-means-failure rule to methods that declare an optional
+        // return, never to delete the rule.
+        let src = "pub trait X { fn f(&mut self) -> Option<String>; }";
+        let err = extract_from_rust(src, "X", None, "1.0.0").unwrap_err();
+        assert!(err.contains("METHOD_FAILED"), "got: {}", err);
+        assert!(err.contains("optional RETURN"), "got: {}", err);
+    }
+
+    #[test]
+    fn optionals_survive_rust_to_lidl_to_rust() {
+        // The loop nothing else in the crate closes: the author's trait is the
+        // generated dispatch's call site, so every contract line must come back
+        // out of generate_provider VERBATIM. Derived from SRC rather than
+        // hardcoded, so it cannot be kept green by scoping it to what already
+        // works.
+        const SRC: &str = r#"
+pub trait OptRoundTrip {
+    fn find(&mut self, id: Option<String>) -> String;
+    fn store(&mut self, blob: Option<Vec<u8>>) -> bool;
+    fn tick(&mut self, n: Option<i64>, u: Option<u64>, f: Option<f64>, b: Option<bool>) -> f64;
+    fn plain(&mut self, id: String, n: i64) -> bool;
+}
+"#;
+        let m = extract_from_rust(SRC, "OptRoundTrip", None, "1.0.0").unwrap();
+
+        // logos-lidl's serializer spells a type-kind optional with a space.
+        let text = crate::serialize(&m);
+        assert!(text.contains("method find(id: ? tstr) -> tstr"), "{}", text);
+        assert!(text.contains("method store(blob: ? bstr) -> bool"), "{}", text);
+
+        let reparsed = crate::parse(&text).expect("reparse");
+        let code = crate::generate_provider(&reparsed, "0.3.0");
+
+        for sig in SRC
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("fn ") && l.ends_with(';'))
+        {
+            assert!(code.contains(sig), "not a fixed point: {}\n{}", sig, code);
+        }
     }
 }
