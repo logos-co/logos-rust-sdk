@@ -79,31 +79,37 @@ fn snake(name: &str) -> String {
     out
 }
 
-/// Why `-> Option<T>` is refused.
+/// Why `-> Option<T>` is refused in the Rust-FIRST direction.
 ///
-/// The frontend could express it — `?T` is a legal LIDL return and the provider
-/// backend maps it — but the host path cannot yet carry an EMPTY one. An empty
-/// optional is spelled JSON null; the Qt cdylib glue escapes null only for
-/// `void` and `result` (an Optional node has an empty `name` and never sets
-/// `resultReturn`, so it matches neither); logos-protocol's json→QVariant
-/// conversion turns null into an INVALID QVariant, which is the same value that
-/// means "the call failed"; and core_service reports that as METHOD_FAILED. So
-/// "found nothing" would be indistinguishable from "the call failed" for every
-/// non-Rust caller.
+/// Be precise about the scope, because the platform does NOT ban optional
+/// returns outright: logos-cpp-sdk's cdylib generator keeps them eligible
+/// (`-> ?Point` and `-> ?tstr` are called out by name in its typeSupported), a
+/// hand-written `.lidl` may declare one, and `test_fullapi_ext_{rust,cpp}`
+/// exercise `echoOptional(v: ?tstr) -> ?tstr` as a cross-language conformance
+/// case that the Python client tests too.
 ///
-/// Rust→Rust would work (lp_invoke has a separate error channel), which is
-/// exactly why this must be refused at the CONTRACT: a contract that behaves
-/// differently depending on the caller's language is not a contract.
+/// The problem is confined to the QT path. An empty optional is spelled JSON
+/// null; logos-protocol's json→QVariant conversion turns null into an INVALID
+/// QVariant, which is the same value that means "the call failed", and
+/// core_service reports that as METHOD_FAILED. A Qt consumer of a `?T`-returning
+/// method therefore cannot tell "found nothing" from "the call failed" — which
+/// is why the Qt generators refuse to emit one at all (lidlCheckOptionalReturns
+/// in logos-qt-sdk). Rust, C++-over-the-C-ABI and Python callers are unaffected;
+/// they read the empty value through lp_invoke, which carries failure on a
+/// separate channel.
 ///
-/// Lifting this gate means giving the reader a way to tell the two apart —
-/// narrowing the null⇒failure rule to methods whose published metadata declares
-/// an optional return, rather than deleting it (deleting it silently converts
-/// every existing failure into a success).
+/// This frontend refuses it as a deliberate SCOPE choice for the Rust-first
+/// authoring surface, not because the shape is unrepresentable: a contract
+/// derived here is published for cross-language consumption, and a Qt consumer
+/// of it would hit the collision above. Relaxing this to match cpp-sdk is a
+/// reasonable future change — it is a policy decision, not a bug fix.
 pub(crate) const OPTIONAL_RETURN_UNSUPPORTED: &str =
-    "an optional RETURN is not supported: an empty `?T` is spelled JSON null, and null is \
-     already how this path reports a FAILED call — logos_json_convert maps it to an invalid \
-     QVariant, which core_service reports as METHOD_FAILED (only `void` and `result` have an \
-     escape). Take `Option<T>` as a parameter, or return Result<serde_json::Value, String>";
+    "an optional RETURN is not supported by the Rust-first frontend: an empty `?T` is spelled \
+     JSON null, and a Qt consumer reads null as a FAILED call (logos_json_convert maps it to an \
+     invalid QVariant, which core_service reports as METHOD_FAILED), so it could not tell \
+     \"found nothing\" from \"the call failed\". Rust/C++/Python callers are unaffected. Take \
+     `Option<T>` as a parameter, return Result<serde_json::Value, String>, or hand-write the \
+     .lidl if the contract is not consumed from Qt";
 
 /// The admission gate for the value type of an `Option<..>`.
 ///
@@ -113,9 +119,6 @@ pub(crate) const OPTIONAL_RETURN_UNSUPPORTED: &str =
 /// and `String` both map to `tstr`, but only `String` comes back. Admitting a
 /// non-fixed-point would emit a trait the author's own impl cannot satisfy.
 ///
-/// Deliberately conservative — `Option<serde_json::Value>` IS a fixed point and
-/// could be admitted later; it is left out so the first cut of this feature has
-/// the smallest possible surface. Widening is additive and breaks nothing.
 fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
     let p = match ty {
         syn::Type::Path(p) => p,
@@ -150,18 +153,22 @@ fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
              would take Option<i64>/Option<u64>",
             last
         )),
-        // Matched on the last path segment, like the non-optional `Value` arm
-        // above, so the message must not claim WHICH `Value` this is — a
-        // `my_crate::Value` lands here too and would be misdescribed.
-        "Value" => Err("Option<Value> is not admitted yet — as serde_json::Value it is `?any`, \
-                        which round-trips, but it is held back to keep this feature's first \
-                        surface minimal; any other `Value` type has no LIDL spelling at all"
-            .into()),
+        // `?any`. Matched on the last path segment, like the non-optional
+        // `Value` arm above — a `my_crate::Value` lands here too and is mapped
+        // to `any` just as it would be outside an Option, so the two arms agree.
+        //
+        // VALUE-LOSSY, deliberately: `any` already carries JSON null among its
+        // inhabitants, so `?any` has two spellings of empty and they collapse —
+        // `Some(Value::Null)` comes back as `None`. That is the two-state rule
+        // holding at the type level (`?T` is a value or empty, never a third
+        // thing), not a defect in the mapping.
+        "Value" => Ok(()),
         "Result" => Err("Option<Result<..>> has no LIDL type — a result carries its own empty \
                          discriminant"
             .into()),
         other => Err(format!(
-            "Option<{}> has no LIDL type — only String, i64, u64, f64, bool and Vec<u8> may be \
+            "Option<{}> has no LIDL type — only String, i64, u64, f64, bool, Vec<u8> and \
+             serde_json::Value may be \
              optional",
             other
         )),
@@ -450,6 +457,7 @@ pub trait OptModule {
     fn store(&mut self, blob: Option<Vec<u8>>) -> bool;
     fn tick(&mut self, n: Option<i64>, u: Option<u64>, f: Option<f64>, b: Option<bool>) -> f64;
     fn borrowed(&mut self, id: &Option<String>) -> bool;
+    fn untyped(&mut self, v: Option<serde_json::Value>) -> bool;
 }
 
 pub trait OptModuleEvents {
@@ -491,6 +499,10 @@ pub trait OptModuleEvents {
         // &Option<T> unwraps to Option<T> via the reference arm.
         check(&m.methods[3].params[0], "tstr");
 
+        // `?any` — admitted, and value-lossy by construction: `any` already
+        // carries null, so Some(Value::Null) round-trips as None.
+        check(&m.methods[4].params[0], "any");
+
         // Event parameters take optionals too.
         check(&m.events[0].params[0], "tstr");
     }
@@ -507,7 +519,6 @@ pub trait OptModuleEvents {
             ("Option<i32>", "64-bit"),
             ("Option<u32>", "64-bit"),
             ("Option<()>", "?void"),
-            ("Option<serde_json::Value>", "held back"),
             ("Option<Result<serde_json::Value, String>>", "discriminant"),
             ("Option<std::collections::HashMap<String,String>>", "only String"),
             ("Option<MyStruct>", "only String"),
@@ -552,6 +563,7 @@ pub trait OptRoundTrip {
     fn find(&mut self, id: Option<String>) -> String;
     fn store(&mut self, blob: Option<Vec<u8>>) -> bool;
     fn tick(&mut self, n: Option<i64>, u: Option<u64>, f: Option<f64>, b: Option<bool>) -> f64;
+    fn untyped(&mut self, v: Option<serde_json::Value>) -> bool;
     fn plain(&mut self, id: String, n: i64) -> bool;
 }
 "#;
