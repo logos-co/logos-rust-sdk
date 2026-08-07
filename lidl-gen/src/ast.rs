@@ -32,6 +32,17 @@ impl TypeExpr {
         TypeExpr { kind: TypeKind::Primitive, name: name.into(), elements: vec![] }
     }
 
+    /// `?T` — the ONE construction of an Optional in this crate.
+    ///
+    /// Exactly one element and an empty name, matching what logos-lidl's parser
+    /// builds for `?T`. A degenerate Optional (no element) is simultaneously
+    /// omittable by the arity gate, undecodable by both backends' `is_optional`
+    /// guards, and an unguarded `elements[0]` index in logos-lidl's serializer —
+    /// so build one only through here.
+    pub fn optional(value: TypeExpr) -> Self {
+        TypeExpr { kind: TypeKind::Optional, name: String::new(), elements: vec![value] }
+    }
+
     /// Whether this type expression is itself an optional (`?T`).
     ///
     /// For a record FIELD this is only half the question — see
