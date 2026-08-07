@@ -267,6 +267,12 @@ why `?T` has exactly two states and never three. Maps stay
 `serde_json::Value`, the untyped carrier for the JSON that crosses the
 process boundary, and plain scalars like `dx: f64` stay typed.
 
+The same mapping reaches the typed event EMITTER: `emit_moved` takes
+`&Point`, not a JSON value the author has to assemble, and encodes it
+through the record's own `to_json` — the same encoder a record return
+uses, so an event payload and a method result serialize a `Point`
+identically.
+
 On the wire, empty is spelled by the slot: a record FIELD is left out
 (a named slot can be), while a parameter or return is `null` (a
 positional slot has no key to omit, and the arity must not change).
