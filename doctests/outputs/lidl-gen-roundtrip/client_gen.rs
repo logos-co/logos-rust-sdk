@@ -29,6 +29,26 @@ impl SensorModuleClient {
         value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
     }
 
+    /// [`Self::temperature`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::temperature`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn temperature_with_timeout(&self, timeout: std::time::Duration) -> Result<f64, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("temperature", &args, timeout)?;
+        value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
+    }
+
     /// Async twin of [`Self::temperature`]: fire the call and receive the typed
     /// result in `callback` once it lands — the Rust analog of the C++
     /// client's `temperatureAsync`. The callback runs from the protocol
@@ -44,11 +64,53 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::temperature_async`] with a per-call timeout — the async half of
+    /// [`Self::temperature_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::temperature_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn temperature_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<f64, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("temperature", &args, timeout, move |result| {
+            callback(result.and_then(|value| value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))));
+        });
+    }
+
     /// Enables or disables the sensor.
     /// Returns the new enabled state.
     pub fn enable(&self, on: bool) -> Result<bool, LogosError> {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(on)]);
         let value = self.proxy.call_json("enable", &args)?;
+        value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))
+    }
+
+    /// [`Self::enable`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::enable`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn enable_with_timeout(&self, on: bool, timeout: std::time::Duration) -> Result<bool, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(on)]);
+        let value = self.proxy.call_json_with_timeout("enable", &args, timeout)?;
         value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))
     }
 
@@ -67,10 +129,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::enable_async`] with a per-call timeout — the async half of
+    /// [`Self::enable_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::enable_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn enable_async_with_timeout<F>(&self, on: bool, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<bool, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(on)]);
+        self.proxy.call_json_async_with_timeout("enable", &args, timeout, move |result| {
+            callback(result.and_then(|value| value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))));
+        });
+    }
+
     /// Renames the sensor channel.
     pub fn rename(&self, id: u64, name: &str) -> Result<String, LogosError> {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(name)]);
         let value = self.proxy.call_json("rename", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::rename`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::rename`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn rename_with_timeout(&self, id: u64, name: &str, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(name)]);
+        let value = self.proxy.call_json_with_timeout("rename", &args, timeout)?;
         Ok(value.as_str().unwrap_or_default().to_string())
     }
 
@@ -89,10 +193,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::rename_async`] with a per-call timeout — the async half of
+    /// [`Self::rename_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::rename_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn rename_async_with_timeout<F>(&self, id: u64, name: &str, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(name)]);
+        self.proxy.call_json_async_with_timeout("rename", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
     /// Calibrates a channel with an offset and a human-readable label.
     pub fn calibrate(&self, id: u64, offset: f64, label: &str) -> Result<bool, LogosError> {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(offset), serde_json::Value::from(label)]);
         let value = self.proxy.call_json("calibrate", &args)?;
+        value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))
+    }
+
+    /// [`Self::calibrate`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::calibrate`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn calibrate_with_timeout(&self, id: u64, offset: f64, label: &str, timeout: std::time::Duration) -> Result<bool, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(offset), serde_json::Value::from(label)]);
+        let value = self.proxy.call_json_with_timeout("calibrate", &args, timeout)?;
         value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))
     }
 
@@ -111,10 +257,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::calibrate_async`] with a per-call timeout — the async half of
+    /// [`Self::calibrate_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::calibrate_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn calibrate_async_with_timeout<F>(&self, id: u64, offset: f64, label: &str, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<bool, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(offset), serde_json::Value::from(label)]);
+        self.proxy.call_json_async_with_timeout("calibrate", &args, timeout, move |result| {
+            callback(result.and_then(|value| value.as_bool().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected bool, got {}", value)))));
+        });
+    }
+
     /// Records a reading and returns the new sample count.
     pub fn record(&self, id: u64, value: f64, note: &str, valid: bool) -> Result<i64, LogosError> {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(value), serde_json::Value::from(note), serde_json::Value::from(valid)]);
         let value = self.proxy.call_json("record", &args)?;
+        value.as_i64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected int, got {}", value)))
+    }
+
+    /// [`Self::record`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::record`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn record_with_timeout(&self, id: u64, value: f64, note: &str, valid: bool, timeout: std::time::Duration) -> Result<i64, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(value), serde_json::Value::from(note), serde_json::Value::from(valid)]);
+        let value = self.proxy.call_json_with_timeout("record", &args, timeout)?;
         value.as_i64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected int, got {}", value)))
     }
 
@@ -133,10 +321,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::record_async`] with a per-call timeout — the async half of
+    /// [`Self::record_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::record_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn record_async_with_timeout<F>(&self, id: u64, value: f64, note: &str, valid: bool, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<i64, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id), serde_json::Value::from(value), serde_json::Value::from(note), serde_json::Value::from(valid)]);
+        self.proxy.call_json_async_with_timeout("record", &args, timeout, move |result| {
+            callback(result.and_then(|value| value.as_i64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected int, got {}", value)))));
+        });
+    }
+
     /// Flashes raw firmware bytes and echoes back the stored image.
     pub fn firmware(&self, image: &[u8]) -> Result<Vec<u8>, LogosError> {
         let args = serde_json::Value::Array(vec![logos_rust_sdk::bytes::encode(image)]);
         let value = self.proxy.call_json("firmware", &args)?;
+        logos_rust_sdk::bytes::decode(&value).ok_or_else(|| logos_rust_sdk::LogosError::JsonError("expected {\"_bytes\":...} payload".to_string()))
+    }
+
+    /// [`Self::firmware`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::firmware`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn firmware_with_timeout(&self, image: &[u8], timeout: std::time::Duration) -> Result<Vec<u8>, LogosError> {
+        let args = serde_json::Value::Array(vec![logos_rust_sdk::bytes::encode(image)]);
+        let value = self.proxy.call_json_with_timeout("firmware", &args, timeout)?;
         logos_rust_sdk::bytes::decode(&value).ok_or_else(|| logos_rust_sdk::LogosError::JsonError("expected {\"_bytes\":...} payload".to_string()))
     }
 
@@ -155,10 +385,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::firmware_async`] with a per-call timeout — the async half of
+    /// [`Self::firmware_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::firmware_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn firmware_async_with_timeout<F>(&self, image: &[u8], timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<Vec<u8>, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![logos_rust_sdk::bytes::encode(image)]);
+        self.proxy.call_json_async_with_timeout("firmware", &args, timeout, move |result| {
+            callback(result.and_then(|value| logos_rust_sdk::bytes::decode(&value).ok_or_else(|| logos_rust_sdk::LogosError::JsonError("expected {\"_bytes\":...} payload".to_string()))));
+        });
+    }
+
     /// Resolves a batch of channel ids to their labels.
     pub fn labels(&self, ids: &serde_json::Value) -> Result<serde_json::Value, LogosError> {
         let args = serde_json::Value::Array(vec![ids.clone()]);
         let value = self.proxy.call_json("labels", &args)?;
+        Ok(value)
+    }
+
+    /// [`Self::labels`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::labels`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn labels_with_timeout(&self, ids: &serde_json::Value, timeout: std::time::Duration) -> Result<serde_json::Value, LogosError> {
+        let args = serde_json::Value::Array(vec![ids.clone()]);
+        let value = self.proxy.call_json_with_timeout("labels", &args, timeout)?;
         Ok(value)
     }
 
@@ -177,10 +449,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::labels_async`] with a per-call timeout — the async half of
+    /// [`Self::labels_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::labels_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn labels_async_with_timeout<F>(&self, ids: &serde_json::Value, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![ids.clone()]);
+        self.proxy.call_json_async_with_timeout("labels", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value)));
+        });
+    }
+
     /// Computes the mean of a batch of samples.
     pub fn average(&self, samples: &serde_json::Value) -> Result<f64, LogosError> {
         let args = serde_json::Value::Array(vec![samples.clone()]);
         let value = self.proxy.call_json("average", &args)?;
+        value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
+    }
+
+    /// [`Self::average`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::average`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn average_with_timeout(&self, samples: &serde_json::Value, timeout: std::time::Duration) -> Result<f64, LogosError> {
+        let args = serde_json::Value::Array(vec![samples.clone()]);
+        let value = self.proxy.call_json_with_timeout("average", &args, timeout)?;
         value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
     }
 
@@ -199,10 +513,52 @@ impl SensorModuleClient {
         });
     }
 
+    /// [`Self::average_async`] with a per-call timeout — the async half of
+    /// [`Self::average_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::average_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn average_async_with_timeout<F>(&self, samples: &serde_json::Value, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<f64, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![samples.clone()]);
+        self.proxy.call_json_async_with_timeout("average", &args, timeout, move |result| {
+            callback(result.and_then(|value| value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))));
+        });
+    }
+
     /// Resets a channel; returns a structured success/error result.
     pub fn reset(&self, id: &str) -> Result<serde_json::Value, LogosError> {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(id)]);
         let value = self.proxy.call_json("reset", &args)?;
+        Ok(value)
+    }
+
+    /// [`Self::reset`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::reset`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn reset_with_timeout(&self, id: &str, timeout: std::time::Duration) -> Result<serde_json::Value, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id)]);
+        let value = self.proxy.call_json_with_timeout("reset", &args, timeout)?;
         Ok(value)
     }
 
@@ -217,6 +573,28 @@ impl SensorModuleClient {
     {
         let args = serde_json::Value::Array(vec![serde_json::Value::from(id)]);
         self.proxy.call_json_async("reset", &args, move |result| {
+            callback(result.and_then(|value| Ok(value)));
+        });
+    }
+
+    /// [`Self::reset_async`] with a per-call timeout — the async half of
+    /// [`Self::reset_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::reset_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn reset_async_with_timeout<F>(&self, id: &str, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![serde_json::Value::from(id)]);
+        self.proxy.call_json_async_with_timeout("reset", &args, timeout, move |result| {
             callback(result.and_then(|value| Ok(value)));
         });
     }

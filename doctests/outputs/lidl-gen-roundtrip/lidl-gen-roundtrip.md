@@ -225,11 +225,11 @@ grep -E 'SensorModuleClient|temperature|firmware|reset|on_ready|on_fault' client
 
 Beyond the round-trippable core above, LIDL also has **composite** types:
 named record types (`type`), maps (`{K: V}`), and optionals (`?T`), plus the
-untyped escape hatch `any`. These cross the wire as untyped JSON, so the
-generated Rust carries them as `serde_json::Value` (record/map/optional
-shapes live in the authored contract; a `--from-rust` extraction recovers
-the std-friendly subset shown earlier). Here is a contract that uses all of
-them, taken straight to a provider scaffold.
+untyped escape hatch `any`. A declared record becomes a real struct and `?T`
+becomes `Option<T>`; a map, or an array of anything but a record, crosses as
+untyped JSON and is carried as `serde_json::Value` (a `--from-rust`
+extraction recovers the std-friendly subset shown earlier). Here is a
+contract that uses all of them, taken straight to a provider scaffold.
 
 ### 6.1 geometry_module.lidl
 
@@ -261,9 +261,18 @@ logos-lidl-gen geometry_module.lidl --provider -o geometry_gen.rs
 
 ### 6.3 Inspect the composite signatures
 
-Records, arrays-of-records, maps, and optionals all surface as
-`serde_json::Value` — the untyped carrier for the JSON that crosses the
-process boundary — while plain scalars like `dx: f64` stay typed.
+A declared record (`Point`) is a real struct, and an optional (`?uint`,
+`?Point`) is an `Option` — Rust's one way to spell "no value", which is
+why `?T` has exactly two states and never three. Maps stay
+`serde_json::Value`, the untyped carrier for the JSON that crosses the
+process boundary, and plain scalars like `dx: f64` stay typed.
+
+On the wire, empty is spelled by the slot: a record FIELD is left out
+(a named slot can be), while a parameter or return is `null` (a
+positional slot has no key to omit, and the arity must not change).
+Decoding is liberal in the other direction — absent and `null` both
+read as empty — but a present value of the wrong type is still an
+error, exactly as it is for a required slot.
 
 ```bash
 grep -E 'trait|translate|attributes|nearest|emit_moved' geometry_gen.rs

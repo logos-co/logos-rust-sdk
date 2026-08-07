@@ -45,29 +45,29 @@ fn emit_event(name: &str, payload: &serde_json::Value) {
 
 /// Typed emitter for the `ready` event.
 pub fn emit_ready() {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
+    let mut __logos_args: Vec<serde_json::Value> = Vec::new();
     
-    emit_event("ready", &serde_json::Value::Array(payload));
+    emit_event("ready", &serde_json::Value::Array(__logos_args));
 }
 
 /// Typed emitter for the `reading` event.
 pub fn emit_reading(id: u64, value: f64) {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
-    payload.push(serde_json::Value::from(id));
-    payload.push(serde_json::Value::from(value));
-    emit_event("reading", &serde_json::Value::Array(payload));
+    let mut __logos_args: Vec<serde_json::Value> = Vec::new();
+    __logos_args.push(serde_json::Value::from(id));
+    __logos_args.push(serde_json::Value::from(value));
+    emit_event("reading", &serde_json::Value::Array(__logos_args));
 }
 
 /// Typed emitter for the `fault` event.
 pub fn emit_fault(code: i64, message: &str, fatal: bool) {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
-    payload.push(serde_json::Value::from(code));
-    payload.push(serde_json::Value::from(message));
-    payload.push(serde_json::Value::from(fatal));
-    emit_event("fault", &serde_json::Value::Array(payload));
+    let mut __logos_args: Vec<serde_json::Value> = Vec::new();
+    __logos_args.push(serde_json::Value::from(code));
+    __logos_args.push(serde_json::Value::from(message));
+    __logos_args.push(serde_json::Value::from(fatal));
+    emit_event("fault", &serde_json::Value::Array(__logos_args));
 }
 
-pub trait SensorModule: Send + 'static {
+pub trait SensorModule: 'static {
     /// One-time setup hook: fires after the host has stamped the module
     /// context (path / instance id / persistence path) and before the
     /// first method dispatch — the Rust analog of C++'s
@@ -92,7 +92,14 @@ struct Registered {
     ensure: EnsureFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
-static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
+// A concurrency:"single" module runs entirely on one thread (its
+// subprocess event loop): install / on_context_ready / dispatch all touch
+// INSTANCE from that thread, so the impl never crosses threads and need
+// not be Send. This single-threaded Sync wrapper lets a non-Send impl
+// live in a static (cf. the EmitState unsafe impl above).
+struct SingleInstance(Mutex<Option<Box<dyn std::any::Any>>>);
+unsafe impl Sync for SingleInstance {}
+static INSTANCE: SingleInstance = SingleInstance(Mutex::new(None));
 static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install `T` as the module implementation (Default-constructed once).
@@ -107,7 +114,7 @@ static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// callback, the hook still fires before the first dispatch.)
 pub fn install<T: SensorModule + Default>() {
     fn ensure_impl<T: SensorModule + Default>(require_emit: bool) {
-        let mut guard = INSTANCE.lock().unwrap();
+        let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
             *guard = Some(Box::new(T::default()));
         }
@@ -124,55 +131,68 @@ pub fn install<T: SensorModule + Default>() {
         }
     }
     fn dispatch_impl<T: SensorModule + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
-        let mut guard = INSTANCE.lock().unwrap();
+        let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
             *guard = Some(Box::new(T::default()));
         }
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
             "temperature" => {
-                if args.len() < 0 { return None; }
                 let result = imp.temperature();
                 Some(serde_json::Value::from(result))
             }
             "enable" => {
-                if args.len() < 1 { return None; }
-                let result = imp.enable(args.get(0).unwrap_or(&serde_json::Value::Null).as_bool().unwrap_or_default());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_bool(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.enable(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "rename" => {
-                if args.len() < 2 { return None; }
-                let result = imp.rename(args.get(0).unwrap_or(&serde_json::Value::Null).as_u64().unwrap_or_default(), args.get(1).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
+                if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 2, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_string(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.rename(__logos_a0, __logos_a1);
                 Some(serde_json::Value::from(result))
             }
             "calibrate" => {
-                if args.len() < 3 { return None; }
-                let result = imp.calibrate(args.get(0).unwrap_or(&serde_json::Value::Null).as_u64().unwrap_or_default(), args.get(1).unwrap_or(&serde_json::Value::Null).as_f64().unwrap_or_default(), args.get(2).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
+                if args.len() < 3 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 3, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a2 = match logos_rust_sdk::args::as_string(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.calibrate(__logos_a0, __logos_a1, __logos_a2);
                 Some(serde_json::Value::from(result))
             }
             "record" => {
-                if args.len() < 4 { return None; }
-                let result = imp.record(args.get(0).unwrap_or(&serde_json::Value::Null).as_u64().unwrap_or_default(), args.get(1).unwrap_or(&serde_json::Value::Null).as_f64().unwrap_or_default(), args.get(2).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string(), args.get(3).unwrap_or(&serde_json::Value::Null).as_bool().unwrap_or_default());
+                if args.len() < 4 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 4, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a2 = match logos_rust_sdk::args::as_string(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a3 = match logos_rust_sdk::args::as_bool(args, 3) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.record(__logos_a0, __logos_a1, __logos_a2, __logos_a3);
                 Some(serde_json::Value::from(result))
             }
             "firmware" => {
-                if args.len() < 1 { return None; }
-                let result = imp.firmware(logos_rust_sdk::bytes::decode(args.get(0).unwrap_or(&serde_json::Value::Null)).unwrap_or_default());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_bytes(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.firmware(__logos_a0);
                 Some(logos_rust_sdk::bytes::encode(&result))
             }
             "labels" => {
-                if args.len() < 1 { return None; }
-                let result = imp.labels(args.get(0).unwrap_or(&serde_json::Value::Null).clone());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Uint)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.labels(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "average" => {
-                if args.len() < 1 { return None; }
-                let result = imp.average(args.get(0).unwrap_or(&serde_json::Value::Null).clone());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Float64)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.average(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "reset" => {
-                if args.len() < 1 { return None; }
-                let result = imp.reset(args.get(0).unwrap_or(&serde_json::Value::Null).as_str().unwrap_or_default().to_string());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_string(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let result = imp.reset(__logos_a0);
                 Some(match result { Ok(v) => serde_json::json!({"success": true, "value": v, "error": null}), Err(e) => serde_json::json!({"success": false, "value": null, "error": e}) })
             }
             _ => None,
@@ -228,9 +248,16 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
         }
     };
     ensure_ready(false);
-    let guard = REGISTERED.lock().unwrap();
-    let registered = match guard.as_ref() { Some(r) => r, None => return std::ptr::null_mut() };
-    match (registered.dispatch)(&method, &args) {
+    // Copy the dispatch fn pointer out and RELEASE the REGISTERED
+    // lock BEFORE running the handler. A concurrency:"multi" module's
+    // glue calls this from worker threads; holding the mutex across
+    // the handler would serialize every call (peak overlap 1).
+    // dispatch_impl resolves the instance internally (a cloned Arc in
+    // multi mode, the boxed instance behind the SingleInstance mutex in
+    // single mode) without holding REGISTERED, so dropping the lock here
+    // first is safe. Same release-before-call shape as ensure_ready.
+    let dispatch = match REGISTERED.lock().unwrap().as_ref() { Some(r) => r.dispatch, None => return std::ptr::null_mut() };
+    match dispatch(&method, &args) {
         Some(value) => to_c_string(value.to_string()),
         None => std::ptr::null_mut(),
     }
