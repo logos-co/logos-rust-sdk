@@ -32,13 +32,15 @@ impl TypeExpr {
         TypeExpr { kind: TypeKind::Primitive, name: name.into(), elements: vec![] }
     }
 
-    /// `?T` — the ONE construction of an Optional in this crate.
+    /// `?T`, guaranteed well-formed: exactly one element and an empty name,
+    /// matching what logos-lidl's parser builds.
     ///
-    /// Exactly one element and an empty name, matching what logos-lidl's parser
-    /// builds for `?T`. A degenerate Optional (no element) is simultaneously
-    /// omittable by the arity gate, undecodable by both backends' `is_optional`
-    /// guards, and an unguarded `elements[0]` index in logos-lidl's serializer —
-    /// so build one only through here.
+    /// Prefer this over building an Optional by hand. A degenerate one (no
+    /// element) is simultaneously omittable by the arity gate, undecodable by
+    /// both backends' `is_optional` guards, and an unguarded `elements[0]` index
+    /// in logos-lidl's serializer. Optional nodes still arrive by other routes —
+    /// deserialization from the C ABI, and tests that build a degenerate node
+    /// deliberately — so this is the safe constructor, not the only one.
     pub fn optional(value: TypeExpr) -> Self {
         TypeExpr { kind: TypeKind::Optional, name: String::new(), elements: vec![value] }
     }

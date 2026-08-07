@@ -150,8 +150,12 @@ fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
              would take Option<i64>/Option<u64>",
             last
         )),
-        "Value" => Err("Option<serde_json::Value> is not admitted yet — `?any` round-trips, but \
-                        it is held back to keep this feature's first surface minimal"
+        // Matched on the last path segment, like the non-optional `Value` arm
+        // above, so the message must not claim WHICH `Value` this is — a
+        // `my_crate::Value` lands here too and would be misdescribed.
+        "Value" => Err("Option<Value> is not admitted yet — as serde_json::Value it is `?any`, \
+                        which round-trips, but it is held back to keep this feature's first \
+                        surface minimal; any other `Value` type has no LIDL spelling at all"
             .into()),
         "Result" => Err("Option<Result<..>> has no LIDL type — a result carries its own empty \
                          discriminant"
