@@ -45,24 +45,52 @@ fn emit_event(name: &str, payload: &serde_json::Value) {
 
 /// Typed emitter for the `moved` event.
 pub fn emit_moved(from: &serde_json::Value, to: &serde_json::Value) {
-    let mut payload: Vec<serde_json::Value> = Vec::new();
-    payload.push(from.clone());
-    payload.push(to.clone());
-    emit_event("moved", &serde_json::Value::Array(payload));
+    let mut __logos_args: Vec<serde_json::Value> = Vec::new();
+    __logos_args.push(from.clone());
+    __logos_args.push(to.clone());
+    emit_event("moved", &serde_json::Value::Array(__logos_args));
 }
 
-pub trait GeometryModule: Send + 'static {
+/// `Point` — a record declared by the `geometry_module` contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    /// The record as its canonical JSON object.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut o = serde_json::Map::new();
+        o.insert("x".to_string(), serde_json::json!(self.x));
+        o.insert("y".to_string(), serde_json::json!(self.y));
+        serde_json::Value::Object(o)
+    }
+
+    /// Decode the canonical JSON object. None if a field is missing or
+    /// has the wrong shape — the provider reports the same mismatch with
+    /// a field path, so this is the consumer-side half of that contract.
+    pub fn from_json(v: &serde_json::Value) -> Option<Self> {
+        let o = v.as_object()?;
+        Some(Self {
+            x: o.get("x")?.as_f64()?,
+            y: o.get("y")?.as_f64()?,
+        })
+    }
+}
+
+pub trait GeometryModule: 'static {
     /// One-time setup hook: fires after the host has stamped the module
     /// context (path / instance id / persistence path) and before the
     /// first method dispatch — the Rust analog of C++'s
     /// LogosModuleContext::onContextReady().
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
-    fn translate(&mut self, p: serde_json::Value, dx: f64, dy: f64) -> serde_json::Value;
-    fn bounds(&mut self, points: serde_json::Value) -> serde_json::Value;
+    fn translate(&mut self, p: Point, dx: f64, dy: f64) -> Point;
+    fn bounds(&mut self, points: Vec<Point>) -> Point;
     fn attributes(&mut self, tags: serde_json::Value) -> serde_json::Value;
-    fn nearest(&mut self, p: serde_json::Value, limit: serde_json::Value) -> serde_json::Value;
-    fn describe(&mut self, p: serde_json::Value) -> serde_json::Value;
+    fn nearest(&mut self, p: Point, limit: Option<u64>) -> Option<Point>;
+    fn describe(&mut self, p: Point) -> serde_json::Value;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
@@ -72,7 +100,14 @@ struct Registered {
     ensure: EnsureFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
-static INSTANCE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
+// A concurrency:"single" module runs entirely on one thread (its
+// subprocess event loop): install / on_context_ready / dispatch all touch
+// INSTANCE from that thread, so the impl never crosses threads and need
+// not be Send. This single-threaded Sync wrapper lets a non-Send impl
+// live in a static (cf. the EmitState unsafe impl above).
+struct SingleInstance(Mutex<Option<Box<dyn std::any::Any>>>);
+unsafe impl Sync for SingleInstance {}
+static INSTANCE: SingleInstance = SingleInstance(Mutex::new(None));
 static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install `T` as the module implementation (Default-constructed once).
@@ -87,7 +122,7 @@ static HOOK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// callback, the hook still fires before the first dispatch.)
 pub fn install<T: GeometryModule + Default>() {
     fn ensure_impl<T: GeometryModule + Default>(require_emit: bool) {
-        let mut guard = INSTANCE.lock().unwrap();
+        let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
             *guard = Some(Box::new(T::default()));
         }
@@ -104,35 +139,47 @@ pub fn install<T: GeometryModule + Default>() {
         }
     }
     fn dispatch_impl<T: GeometryModule + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
-        let mut guard = INSTANCE.lock().unwrap();
+        let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
             *guard = Some(Box::new(T::default()));
         }
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
             "translate" => {
-                if args.len() < 3 { return None; }
-                let result = imp.translate(args.get(0).unwrap_or(&serde_json::Value::Null).clone(), args.get(1).unwrap_or(&serde_json::Value::Null).as_f64().unwrap_or_default(), args.get(2).unwrap_or(&serde_json::Value::Null).as_f64().unwrap_or_default());
-                Some(serde_json::Value::from(result))
+                if args.len() < 3 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 3, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a2 = match logos_rust_sdk::args::as_f64(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let result = imp.translate(__logos_a0, __logos_a1, __logos_a2);
+                Some(result.to_json())
             }
             "bounds" => {
-                if args.len() < 1 { return None; }
-                let result = imp.bounds(args.get(0).unwrap_or(&serde_json::Value::Null).clone());
-                Some(serde_json::Value::from(result))
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)]))) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match __logos_a0.as_array().and_then(|__a| __a.iter().map(Point::from_json).collect::<Option<Vec<_>>>()) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let result = imp.bounds(__logos_a0);
+                Some(result.to_json())
             }
             "attributes" => {
-                if args.len() < 1 { return None; }
-                let result = imp.attributes(args.get(0).unwrap_or(&serde_json::Value::Null).clone());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Map(&logos_rust_sdk::args::Ty::Any)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let result = imp.attributes(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "nearest" => {
-                if args.len() < 2 { return None; }
-                let result = imp.nearest(args.get(0).unwrap_or(&serde_json::Value::Null).clone(), args.get(1).unwrap_or(&serde_json::Value::Null).clone());
-                Some(serde_json::Value::from(result))
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a1 = match logos_rust_sdk::args::as_opt_u64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let result = imp.nearest(__logos_a0, __logos_a1);
+                Some(match result { Some(__o) => __o.to_json(), None => serde_json::Value::Null })
             }
             "describe" => {
-                if args.len() < 1 { return None; }
-                let result = imp.describe(args.get(0).unwrap_or(&serde_json::Value::Null).clone());
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let result = imp.describe(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             _ => None,
@@ -188,9 +235,16 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
         }
     };
     ensure_ready(false);
-    let guard = REGISTERED.lock().unwrap();
-    let registered = match guard.as_ref() { Some(r) => r, None => return std::ptr::null_mut() };
-    match (registered.dispatch)(&method, &args) {
+    // Copy the dispatch fn pointer out and RELEASE the REGISTERED
+    // lock BEFORE running the handler. A concurrency:"multi" module's
+    // glue calls this from worker threads; holding the mutex across
+    // the handler would serialize every call (peak overlap 1).
+    // dispatch_impl resolves the instance internally (a cloned Arc in
+    // multi mode, the boxed instance behind the SingleInstance mutex in
+    // single mode) without holding REGISTERED, so dropping the lock here
+    // first is safe. Same release-before-call shape as ensure_ready.
+    let dispatch = match REGISTERED.lock().unwrap().as_ref() { Some(r) => r.dispatch, None => return std::ptr::null_mut() };
+    match dispatch(&method, &args) {
         Some(value) => to_c_string(value.to_string()),
         None => std::ptr::null_mut(),
     }
