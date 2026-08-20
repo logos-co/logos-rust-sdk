@@ -367,6 +367,9 @@ pub fn extract_from_rust(
                     // they need not be set here (the serializer ignores them).
                     json_return: false,
                     result_return: false,
+                    // Author-written: this is a method on the contract trait.
+                    // The identity methods are added later, by the frontend.
+                    derived: false,
                 });
             }
         } else if ident == events_trait {

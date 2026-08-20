@@ -14,7 +14,7 @@ pub mod rustgen;
 pub mod rustgen_provider;
 
 pub use ast::ModuleDecl;
-pub use lidl_ffi::{parse, serialize};
+pub use lidl_ffi::{inject_identity, parse, serialize};
 pub use rust_frontend::extract_from_rust;
 pub use rustgen::{generate, generate_deps};
 pub use rustgen_provider::generate_provider;
