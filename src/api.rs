@@ -76,6 +76,28 @@ pub fn save_token(module_name: &str, token: &str) -> bool {
     unsafe { crate::ffi::lp_token_save(name_c.as_ptr(), token_c.as_ptr()) == crate::ffi::LP_OK }
 }
 
+/// Route a host-issued grant into THIS image's gate state.
+///
+/// The grant has to cross the C ABI rather than be recorded once by the host:
+/// the host binary and this cdylib each link their own copy of logos-protocol,
+/// so each has its own process-global grant state, exactly as each has its own
+/// TokenManager. A grant the host records for itself is invisible to the gate
+/// an `lp_token_keys()` call checks here.
+///
+/// Takes the raw pointer the C ABI hands us rather than a `&str`: the caller is
+/// the generated `logos_module_grant_host_services` export, which receives it
+/// straight from the host and has nothing to gain from a round trip through
+/// `CStr`. A null pointer is refused rather than dereferenced.
+///
+/// # Safety
+/// `services_json` must be null or a valid NUL-terminated C string.
+pub unsafe fn grant_host_services(services_json: *const std::os::raw::c_char) -> i32 {
+    if services_json.is_null() {
+        return -1;
+    }
+    unsafe { crate::ffi::lp_grant_host_services(services_json) }
+}
+
 impl Default for LogosModuleSDK {
     fn default() -> Self {
         Self::new()
