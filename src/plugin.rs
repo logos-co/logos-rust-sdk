@@ -120,13 +120,25 @@ fn client_cache() -> &'static Mutex<HashMap<String, Weak<ClientHandle>>> {
 /// Get-or-create the shared client for `target` (origin is always "core" here).
 /// Returns None on the same failure surface as before (bad name / null client).
 fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
-    let mut map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = map.get(target).and_then(Weak::upgrade) {
-        return Some(existing); // a live client for this target — reuse it
+    // Fast path: a live client for this target already exists.
+    if let Some(existing) = {
+        let map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(target).and_then(Weak::upgrade)
+    } {
+        return Some(existing);
     }
-    // None live: create one, cache a Weak, hand back the strong Arc. The lp
-    // call happens here under the (uncontended, I/O-free) map lock; the actual
-    // invoke runs later off the proxy's cloned Arc, outside the lock.
+
+    // Create OUTSIDE the lock. This used to run under the map lock, described
+    // there as an "(uncontended, I/O-free)" call. It is neither: on a Qt-affine
+    // transport — the default inside a module process — lp_client_create ends
+    // in runOnQtMainThread, i.e. a Qt::BlockingQueuedConnection that blocks
+    // until the Qt main thread services it. A worker holding the map lock would
+    // then wait for the main thread, while the main thread — reaching this
+    // function for ANY other target, e.g. from an inbound dispatch — blocks on
+    // that same lock and so never returns to the event loop that would run the
+    // construction. Neither ever proceeds. (logos-cpp-sdk's LpClient::ensure
+    // and logos-qt-sdk's LpBridge::resultClient avoid the identical hazard the
+    // same way.)
     let target_c = CString::new(target).ok()?;
     let origin = CString::new("core").unwrap();
     let raw = unsafe {
@@ -136,6 +148,16 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
         return None;
     }
     let handle = Arc::new(ClientHandle(raw));
+
+    // Publish under the lock, re-checking: two threads may have raced through
+    // the gap above. The loser drops its handle, which destroys its own client
+    // (lp_client_destroy is safe from any thread and defers teardown to the
+    // owner thread), so the "one shared client per target" invariant that makes
+    // concurrent calls coalesce into a single capability handshake still holds.
+    let mut map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = map.get(target).and_then(Weak::upgrade) {
+        return Some(existing);
+    }
     map.insert(target.to_string(), Arc::downgrade(&handle));
     Some(handle)
 }
