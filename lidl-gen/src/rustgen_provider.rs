@@ -492,6 +492,47 @@ pub fn install<T: __TRAIT__ + Default>() {
         match method {
 "##;
 
+/// The eleventh module-impl export: `logos_module_grant_host_services`.
+///
+/// logos-protocol only DECLARES this (cpp/logos_module_impl.h); every language
+/// backend owes the definition, and logos-cpp-sdk's cdylib emitter has always
+/// had one. This scaffold did not, so a Rust plugin linked a glue that CALLS it
+/// against an archive that does not DEFINE it.
+///
+/// That is not a link error on ELF — the reference is satisfiable at load time —
+/// but nixpkgs hardens with `-Wl,-z,now`, so dlopen() must bind eagerly and the
+/// module's host process aborts the moment the plugin is loaded. It dies AFTER
+/// the token exchange, so the runtime reports the load as successful and only
+/// the post-load registry snapshot shows the module gone. macOS links plugins
+/// `-undefined dynamic_lookup` and never binds the symbol at all, which is why
+/// this was invisible there and fatal on Linux.
+///
+/// Emitted only for protocol >= 0.3, matching the `LOGOS_PROTOCOL_VERSION_MINOR
+/// >= 3` guard on both the caller (logos-plugin-qt's cdylib glue) and the C++
+/// definition. Older protocols do not export `lp_grant_host_services`, so
+/// emitting it unconditionally would just move the undefined symbol.
+fn grant_host_services_block(protocol_version: &str) -> String {
+    let mut parts = protocol_version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    if (major, minor) < (0, 3) {
+        return String::new();
+    }
+    // Forwards to lp_grant_host_services exactly as the C++ emitter does, and
+    // is emitted for EVERY module rather than behind a codegen flag: which
+    // modules are privileged is the host's decision (it pushes nothing to an
+    // ordinary module), and lp_grant_host_services validates the names and
+    // fails closed. A per-module flag would only add a second place for the
+    // two to disagree.
+    "\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_grant_host_services(services_json: *const c_char) -> c_int {\n\
+     \x20   if services_json.is_null() { return -1; }\n\
+     \x20   unsafe { logos_rust_sdk::ffi::lp_grant_host_services(services_json) }\n\
+     }\n"
+        .to_string()
+}
+
 /// Generate the Rust provider scaffold. `protocol_version` is the
 /// logos-protocol semver this module is built against (stamped by the
 /// build, surfaced through logos_module_get_protocol_version).
@@ -925,8 +966,8 @@ pub fn generate_provider_with(
          \x20   if !s.is_null() {{\n\
          \x20       unsafe {{ drop(CString::from_raw(s)) }};\n\
          \x20   }}\n\
-         }}\n",
-        iface, protocol_version
+         }}\n{}",
+        iface, protocol_version, grant_host_services_block(protocol_version)
     ));
 
     // concurrency:"multi" needs NO extra C ABI here. The sync
