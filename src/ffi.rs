@@ -37,6 +37,18 @@ extern "C" {
 
     pub fn lp_string_free(s: *mut c_char);
 
+    /// Route a host-issued grant into THIS image's gate state.
+    ///
+    /// It has to cross the C ABI rather than be recorded once by the host: the
+    /// host binary and this cdylib each link their own copy of logos-protocol,
+    /// so each has its own process-global grant state, exactly as each has its
+    /// own TokenManager. A grant the host records for itself is invisible to
+    /// the gate an lp_token_keys() call checks here.
+    ///
+    /// Added in logos-protocol 0.3; see `logos_module_grant_host_services` in
+    /// lidl-gen's provider scaffold, which is the only caller.
+    pub fn lp_grant_host_services(services_json: *const c_char) -> c_int;
+
     pub fn lp_client_create(
         target_module: *const c_char,
         origin_module: *const c_char,
