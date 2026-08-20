@@ -231,7 +231,17 @@ extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *
     };
 
     let result = if ok != 0 {
-        Ok(serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw)))
+        let value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw));
+        // Same fold as the sync path: a rejection arrives as a successful
+        // result, and this callback's Result is where it belongs.
+        match crate::args::as_dispatch_rejection(&value) {
+            Some(message) => Err(LogosError::PluginCallFailed {
+                plugin: plugin.clone(),
+                method: method.clone(),
+                message: message.to_string(),
+            }),
+            None => Ok(value),
+        }
     } else {
         let message = serde_json::from_str::<serde_json::Value>(&raw)
             .ok()
@@ -454,14 +464,24 @@ impl PluginProxy {
             return Ok(CallResult { success: false, message });
         }
 
-        let message = if result_json.is_null() {
-            String::new()
+        let (success, message) = if result_json.is_null() {
+            (true, String::new())
         } else {
             let raw = unsafe { CStr::from_ptr(result_json) }.to_string_lossy().into_owned();
             unsafe { ffi::lp_string_free(result_json) };
-            json_to_message(&raw)
+            // `success` is this surface's error channel, so the rejection fold
+            // belongs here too — reporting success for a call the provider
+            // refused is the same defect on a different shape.
+            match serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .as_ref()
+                .and_then(crate::args::as_dispatch_rejection)
+            {
+                Some(message) => (false, message.to_string()),
+                None => (true, json_to_message(&raw)),
+            }
         };
-        Ok(CallResult { success: true, message })
+        Ok(CallResult { success, message })
     }
 
     /// Call a plugin method synchronously with a raw JSON argument array,
@@ -546,6 +566,20 @@ impl PluginProxy {
             unsafe { ffi::lp_string_free(result_json) };
             serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
         };
+        // A provider that RAN and refused answers the canonical rejection
+        // object as its RESULT, so rc is LP_OK and the decode above produced a
+        // map. Fold it into the error channel the caller already reads, or the
+        // typed wrapper downstream turns the refusal into a default value and
+        // the caller never learns the call failed. Same fold the C++ generated
+        // wrappers do; this one lives in the SDK rather than in generated code,
+        // so no module has to be regenerated to get it.
+        if let Some(message) = crate::args::as_dispatch_rejection(&value) {
+            return Err(LogosError::PluginCallFailed {
+                plugin: self.plugin_name.clone(),
+                method: method.to_string(),
+                message: message.to_string(),
+            });
+        }
         Ok(value)
     }
 

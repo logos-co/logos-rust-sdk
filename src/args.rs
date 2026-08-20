@@ -265,6 +265,34 @@ pub fn dispatch_failed(origin: &str, message: &str) -> Value {
     })
 }
 
+/// The inverse of [`dispatch_failed`]: recognise the canonical rejection object
+/// when it arrives as a call's RESULT, and hand back its message.
+///
+/// A provider that RAN and refused answers this object as its result, not as a
+/// transport error, so `lp_invoke` reports success and a consumer that only
+/// decodes the value turns the rejection into a default (`0`, `""`, an empty
+/// list) — the refusal vanishes. Consumers fold it into their error channel
+/// instead; see `PluginProxy::call_json` and friends.
+///
+/// The match is EXACT — those three fields, all strings, and that code — for
+/// the same reason the C++ twin (`logosDispatchRejectionJson`, emitted into
+/// every generated wrapper) is exact: a method legitimately returning a map, or
+/// an `any`, must never false-match. Anything a user can put in a map would
+/// otherwise be enough to fake a failure.
+pub fn as_dispatch_rejection(value: &Value) -> Option<&str> {
+    let obj = value.as_object()?;
+    if obj.len() != 3 {
+        return None;
+    }
+    let code = obj.get("code")?.as_str()?;
+    let message = obj.get("message")?.as_str()?;
+    obj.get("origin")?.as_str()?;
+    if code != "dispatch_failed" {
+        return None;
+    }
+    Some(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,4 +496,49 @@ mod tests {
         assert_eq!(e["origin"], json!("my_module"));
         assert_eq!(e["message"], json!("expected integer at arg0, got string"));
     }
+
+    #[test]
+    fn a_rejection_object_is_recognised_and_yields_its_message() {
+        let v = dispatch_failed("my_module", "expected integer at arg0, got string");
+        assert_eq!(
+            as_dispatch_rejection(&v),
+            Some("expected integer at arg0, got string")
+        );
+    }
+
+    #[test]
+    fn a_plain_value_is_not_a_rejection() {
+        for v in [json!(0), json!(""), json!([]), json!(null), json!(false)] {
+            assert_eq!(as_dispatch_rejection(&v), None, "{v}");
+        }
+    }
+
+    // The false-match surface. A method returning a map — or an `any` — puts
+    // user data exactly where the detector looks, so anything short of the
+    // exact shape has to be refused, or a caller could fake a failed call.
+    #[test]
+    fn a_user_map_never_false_matches() {
+        // Right code, wrong arity.
+        assert_eq!(
+            as_dispatch_rejection(&json!({"code": "dispatch_failed", "message": "m"})),
+            None
+        );
+        assert_eq!(
+            as_dispatch_rejection(
+                &json!({"code": "dispatch_failed", "message": "m", "origin": "o", "extra": 1})
+            ),
+            None
+        );
+        // Right arity and keys, wrong code. invalid_args is a real object with
+        // exactly this shape, and it is NOT a dispatch rejection.
+        assert_eq!(as_dispatch_rejection(&invalid_args("m", 2, 1)), None);
+        // Right shape, non-string values.
+        assert_eq!(
+            as_dispatch_rejection(
+                &json!({"code": "dispatch_failed", "message": 7, "origin": "o"})
+            ),
+            None
+        );
+    }
 }
+

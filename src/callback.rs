@@ -116,9 +116,26 @@ pub(crate) extern "C" fn method_callback_trampoline(
             .into_owned()
     };
 
-    let call_result = CallResult {
-        success: ok != 0,
-        message: json_to_message(&json_str),
+    // A provider that RAN and refused answers the canonical rejection object as
+    // its RESULT, so `ok` is non-zero and the message below would render the
+    // rejection as if it were a value. `success` is this surface's error
+    // channel; fold it there. Matches PluginProxy::call_json / call_sync.
+    let rejection = if ok != 0 {
+        serde_json::from_str::<serde_json::Value>(&json_str)
+            .ok()
+            .as_ref()
+            .and_then(crate::args::as_dispatch_rejection)
+            .map(String::from)
+    } else {
+        None
+    };
+
+    let call_result = match rejection {
+        Some(message) => CallResult { success: false, message },
+        None => CallResult {
+            success: ok != 0,
+            message: json_to_message(&json_str),
+        },
     };
 
     let _ = callback_data.tx.send(call_result);
