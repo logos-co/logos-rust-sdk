@@ -102,10 +102,19 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        match logos_lidl_gen::parse(&src) {
-            Ok(m) => deps.push((name.to_string(), m)),
+        let parsed = match logos_lidl_gen::parse(&src) {
+            Ok(m) => m,
             Err(e) => {
                 eprintln!("Failed to parse dep {}: {}", path, e);
+                std::process::exit(2);
+            }
+        };
+        // A consumer sees name()/version() on every dependency, from the same
+        // frontend pass the provider uses.
+        match logos_lidl_gen::inject_identity(&parsed) {
+            Ok(m) => deps.push((name.to_string(), m)),
+            Err(e) => {
+                eprintln!("Failed to derive identity methods for dep {}: {}", path, e);
                 std::process::exit(2);
             }
         }
@@ -130,10 +139,17 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let module = match logos_lidl_gen::parse(&source) {
+    let parsed = match logos_lidl_gen::parse(&source) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("Failed to parse {}: {}", input, e);
+            std::process::exit(2);
+        }
+    };
+    let module = match logos_lidl_gen::inject_identity(&parsed) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to derive identity methods for {}: {}", input, e);
             std::process::exit(2);
         }
     };

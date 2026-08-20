@@ -387,6 +387,24 @@ fn emit_param_value(ty: &TypeExpr, name: &str, recs: &BTreeSet<String>) -> Strin
     }
 }
 
+/// The value a derived identity method answers with. `None` for any other
+/// derived method, so an unrecognised one falls through to the ordinary path
+/// and fails loudly at compile time rather than silently answering nothing.
+///
+/// An absent version falls back rather than emitting an empty string: `""`
+/// reads as a failed call, not as "unversioned".
+fn identity_literal(module: &ModuleDecl, method: &str) -> Option<String> {
+    match method {
+        "name" => Some(module.name.clone()),
+        "version" => Some(if module.version.is_empty() {
+            "1.0.0".to_string()
+        } else {
+            module.version.clone()
+        }),
+        _ => None,
+    }
+}
+
 fn interface_json(module: &ModuleDecl) -> serde_json::Value {
     let mut entries = Vec::new();
     for m in &module.methods {
@@ -682,6 +700,13 @@ pub fn generate_provider_with(
             self_recv,
         ));
         for m in &module.methods {
+            // A derived method (name/version) is answered by the generated
+            // dispatch from the module declaration. Declaring it on the trait
+            // would force every author to implement it by hand, which is the
+            // thing deriving it exists to stop.
+            if m.derived {
+                continue;
+            }
             let params: Vec<String> = m
                 .params
                 .iter()
@@ -774,6 +799,20 @@ pub fn generate_provider_with(
     }
 
     for m in &module.methods {
+        // A derived method has no trait method to call. name()/version()
+        // answer from the module declaration, which the builder derives from
+        // metadata.json, so the reported value cannot drift from the built one.
+        if m.derived {
+            if let Some(literal) = identity_literal(module, &m.name) {
+                out.push_str(&format!(
+                    "            \"{}\" => {{\n                     \x20               let result = {:?}.to_string();\n                     \x20               Some({})\n                     \x20           }}\n",
+                    m.name,
+                    literal,
+                    ret_to_json(&m.return_type, "result", &recs)
+                ));
+                continue;
+            }
+        }
         // Only the REQUIRED prefix of the parameter list has to be present. A
         // trailing `?T` may arrive as null or not at all: absent and null are
         // the same empty state on decode, and `args::get` already reads a
@@ -1363,4 +1402,84 @@ module v_module {
         // than naming a struct nobody emits.
         assert!(code.contains("fn take_undeclared(&mut self, u: serde_json::Value)"), "{}", code);
     }
+
+
+    // --- Module identity ---------------------------------------------------
+    //
+    // name()/version() are added to the contract by the frontend
+    // (lidl/identity.hpp) and marked `derived`. Two things must hold for a Rust
+    // provider: the author never has to implement them, and the value comes
+    // from the module DECLARATION so it cannot drift from metadata.json.
+
+    fn with_identity(src: &str) -> ModuleDecl {
+        let mut m = parse(src).expect("parse");
+        for name in ["name", "version"] {
+            let mut md = MethodDecl {
+                name: name.to_string(),
+                params: vec![],
+                return_type: TypeExpr::primitive("tstr"),
+                description: String::new(),
+                json_return: false,
+                result_return: false,
+                derived: true,
+            };
+            md.description = format!("The module's {name}.");
+            m.methods.push(md);
+        }
+        m
+    }
+
+    #[test]
+    fn identity_methods_are_answered_by_the_generated_dispatch() {
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+
+        // The literal is the module's own name/version, not a placeholder.
+        assert!(code.contains(r#""name" =>"#), "{code}");
+        assert!(code.contains(r#""rust_calc".to_string()"#), "{code}");
+        assert!(code.contains(r#""version" =>"#), "{code}");
+        assert!(code.contains(r#""1.0.0".to_string()"#), "{code}");
+    }
+
+    #[test]
+    fn identity_methods_are_not_on_the_author_trait() {
+        // Declaring them on the trait would force every author to write them
+        // by hand -- which is the thing deriving them exists to stop. An
+        // authored method is still declared, so this is not a blanket filter.
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+        assert!(!code.contains("fn name(&mut self) -> String;"), "{code}");
+        assert!(!code.contains("fn version(&mut self) -> String;"), "{code}");
+        assert!(code.contains("fn greet("), "{code}");
+    }
+
+    #[test]
+    fn identity_methods_never_call_the_trait() {
+        // The trait has no such method, so a delegating arm would not compile.
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+        assert!(!code.contains("imp.name("), "{code}");
+        assert!(!code.contains("imp.version("), "{code}");
+    }
+
+    #[test]
+    fn identity_methods_are_listed_for_introspection() {
+        // `lm methods` and every untyped caller read this listing, so a method
+        // that dispatches but is not advertised is only half present.
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+        let listing = code
+            .split("logos_module_get_methods")
+            .nth(1)
+            .unwrap_or(&code);
+        assert!(listing.contains("name"), "{listing}");
+        assert!(listing.contains("version"), "{listing}");
+    }
+
+    #[test]
+    fn a_versionless_module_falls_back_rather_than_emitting_empty() {
+        // "" would make version() read as a failed call rather than as
+        // "unversioned".
+        let mut m = with_identity(SAMPLE);
+        m.version = String::new();
+        let code = generate_provider(&m, "0.1.0");
+        assert!(code.contains(r#""1.0.0".to_string()"#), "{code}");
+    }
+
 }

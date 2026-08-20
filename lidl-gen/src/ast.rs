@@ -157,6 +157,12 @@ pub struct MethodDecl {
     /// Return is StdLogosResult — derived from the type.
     #[serde(rename = "resultReturn", default)]
     pub result_return: bool,
+    /// The frontend added this method rather than the author writing it — see
+    /// `lidl/identity.hpp`. It is part of the contract a backend generates code
+    /// for, but not part of the `.lidl` text, and a backend must emit a BODY
+    /// for it rather than calling the module's trait, which has no such method.
+    #[serde(default)]
+    pub derived: bool,
 }
 
 impl MethodDecl {

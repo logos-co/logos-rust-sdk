@@ -13,6 +13,7 @@ extern "C" {
     fn lidl_parse_to_json(lidl: *const c_char, err: *mut *mut c_char) -> *mut c_char;
     fn lidl_serialize_from_json(json: *const c_char, err: *mut *mut c_char) -> *mut c_char;
     fn lidl_validate_json(json: *const c_char) -> *mut c_char;
+    fn lidl_inject_identity_json(json: *const c_char, err: *mut *mut c_char) -> *mut c_char;
     fn lidl_free_string(s: *mut c_char);
 }
 
@@ -43,6 +44,31 @@ pub fn parse(source: &str) -> Result<ModuleDecl, String> {
     take_cstring(err); // success: defensively drain any (unexpected) error string
     let json = take_cstring(json_ptr).ok_or("logos-lidl: parse returned null")?;
     serde_json::from_str(&json).map_err(|e| format!("decode AST JSON from logos-lidl: {e}"))
+}
+
+/// Add the derived module identity methods -- `name()` and `version()` -- via
+/// the canonical C++ frontend.
+///
+/// Delegated rather than reimplemented for the same reason `parse` is: the
+/// provider and every consumer of a contract must agree exactly on which
+/// methods exist, including the corner where a module declares `name()`
+/// itself. A second implementation here is a second answer waiting to happen.
+///
+/// Call it on every `ModuleDecl` that CODE is generated from. Never before
+/// serializing a `.lidl`: the injected methods are marked `derived`, which the
+/// serializer omits, so the published artifact stays the author's contract.
+pub fn inject_identity(module: &ModuleDecl) -> Result<ModuleDecl, String> {
+    let json = serde_json::to_string(module).map_err(|e| format!("serialize AST to JSON: {e}"))?;
+    let c_json = CString::new(json).map_err(|e| format!("AST JSON has interior NUL: {e}"))?;
+    let mut err: *mut c_char = std::ptr::null_mut();
+    // SAFETY: c_json outlives the call; err is a valid out-pointer.
+    let out_ptr = unsafe { lidl_inject_identity_json(c_json.as_ptr(), &mut err) };
+    if out_ptr.is_null() {
+        return Err(take_cstring(err).unwrap_or_else(|| "logos-lidl: inject_identity failed".into()));
+    }
+    take_cstring(err);
+    let out = take_cstring(out_ptr).ok_or("logos-lidl: inject_identity returned null")?;
+    serde_json::from_str(&out).map_err(|e| format!("decode AST JSON from logos-lidl: {e}"))
 }
 
 /// Serialize an AST back to `.lidl` text via the canonical C++ serializer.
