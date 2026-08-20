@@ -528,7 +528,7 @@ fn grant_host_services_block(protocol_version: &str) -> String {
      #[no_mangle]\n\
      pub extern \"C\" fn logos_module_grant_host_services(services_json: *const c_char) -> c_int {\n\
      \x20   if services_json.is_null() { return -1; }\n\
-     \x20   unsafe { logos_rust_sdk::ffi::lp_grant_host_services(services_json) }\n\
+     \x20   unsafe { logos_rust_sdk::grant_host_services(services_json) }\n\
      }\n"
         .to_string()
 }
