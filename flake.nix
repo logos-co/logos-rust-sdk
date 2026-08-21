@@ -24,9 +24,8 @@
     # reading it could not see a missing grant_host_services (0.3) or teardown
     # pair (0.5) — it would be structurally incapable of failing. See
     # checks.module-impl-abi below.
-    # TODO: re-point at master once logos-protocol#66 (module-impl-abi) merges.
     logos-protocol = {
-      url = "github:logos-co/logos-protocol/986813cc661682878c3ecabff2078a6d36cd5c1d";
+      url = "github:logos-co/logos-protocol";
       inputs.logos-nix.follows = "logos-nix";
     };
   };
