@@ -47550,6 +47550,32 @@
         "type": "github"
       }
     },
+    "logos-protocol_28": {
+      "inputs": {
+        "logos-nix": [
+          "logos-nix"
+        ],
+        "nixpkgs": [
+          "logos-protocol",
+          "logos-nix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1787318305,
+        "narHash": "sha256-ROPYPTwQm29E8Pl3W6xqj13xQNtnZARjRoGjOMF+wos=",
+        "owner": "logos-co",
+        "repo": "logos-protocol",
+        "rev": "986813cc661682878c3ecabff2078a6d36cd5c1d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-protocol",
+        "rev": "986813cc661682878c3ecabff2078a6d36cd5c1d",
+        "type": "github"
+      }
+    },
     "logos-protocol_3": {
       "inputs": {
         "logos-nix": "logos-nix_605",
@@ -86944,6 +86970,7 @@
         "logos-logoscore-cli": "logos-logoscore-cli",
         "logos-module-builder": "logos-module-builder_13",
         "logos-nix": "logos-nix_1238",
+        "logos-protocol": "logos-protocol_28",
         "nixpkgs": [
           "logos-nix",
           "nixpkgs"
