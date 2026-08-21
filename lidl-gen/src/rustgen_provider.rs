@@ -461,9 +461,16 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
 // per-method arms (and the closing block) append exactly as for single mode.
 const MULTI_INSTALL_BLOCK: &str = r##"type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
 type EnsureFn = fn(bool);
+// Reaches the author's impl from the teardown C export, which is a free
+// function with no `T` — exactly why `dispatch` is reached this way too.
+type AboutToUnloadFn = fn() -> i32;
 struct Registered {
     dispatch: DispatchFn,
     ensure: EnsureFn,
+    // Read only by the teardown export, which is emitted for protocol >= 0.5;
+    // an older module registers the hook and never calls it.
+    #[allow(dead_code)]
+    about_to_unload: AboutToUnloadFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
 // Shared across worker threads; the mutex guards CONSTRUCTION only.
@@ -497,6 +504,9 @@ pub fn install<T: __TRAIT__ + Default>() {
                 imp.on_context_ready(&ctx);
             }
         }
+    }
+    fn about_to_unload_impl<T: __TRAIT__ + Default>() -> i32 {
+__ABOUT_TO_UNLOAD_BODY__
     }
     fn dispatch_impl<T: __TRAIT__ + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
         let inst = {
@@ -547,6 +557,105 @@ fn grant_host_services_block(protocol_version: &str) -> String {
      pub extern \"C\" fn logos_module_grant_host_services(services_json: *const c_char) -> c_int {\n\
      \x20   if services_json.is_null() { return -1; }\n\
      \x20   unsafe { logos_rust_sdk::grant_host_services(services_json) }\n\
+     }\n"
+        .to_string()
+}
+
+/// The body of the scaffold's `about_to_unload_impl`, which is what reaches
+/// the author's implementation from the teardown C export.
+///
+/// Why this is conditional on `emit_trait` rather than always calling
+/// `imp.about_to_unload()`: in the Rust-first flow (`--no-trait`) the AUTHOR's
+/// trait is the dispatch call site, and it was written before this hook
+/// existed. C++ answers the same question with SFINAE (`maybeAboutToUnload`);
+/// stable Rust has no way to detect an optional method, so the scaffold must
+/// decide at generation time. Calling it unconditionally would turn a missing
+/// hook into a compile error for every existing rust-first module — trading a
+/// load-time break for a build-time one.
+///
+/// A rust-first module that wants teardown declares `about_to_unload` on its
+/// own trait and is generated `--provider` WITH the trait, or drives its
+/// teardown from `on_context_ready`. It still gets the exports either way, so
+/// it loads.
+fn about_to_unload_body(emit_trait: bool, multi: bool) -> String {
+    // Substituted into the ASSEMBLED scaffold, so this is plain Rust source:
+    // real newlines, real braces, and the 8-space body indent both install
+    // blocks already use.
+    if !emit_trait {
+        return "        // Rust-first flow: the author's trait predates this hook, and\n\
+                \x20       // stable Rust cannot detect an optional method, so the\n\
+                \x20       // scaffold must not call one that may not exist.\n\
+                \x20       0"
+            .to_string();
+    }
+    let fetch = if multi {
+        "        let inst = { INSTANCE.lock().unwrap().clone() };\n\
+         \x20       let Some(inst) = inst else { return 0 };\n\
+         \x20       let Ok(imp) = inst.downcast::<T>() else { return 0 };"
+    } else {
+        "        let mut guard = INSTANCE.0.lock().unwrap();\n\
+         \x20       let Some(any) = guard.as_mut() else { return 0 };\n\
+         \x20       let Some(imp) = any.downcast_mut::<T>() else { return 0 };"
+    };
+    format!(
+        "        // No instance means nothing was ever constructed, so there is\n\
+         \x20       // nothing to tear down: Synchronous, and the host proceeds.\n\
+         {}\n\
+         \x20       match imp.about_to_unload() {{\n\
+         \x20           logos_rust_sdk::Shutdown::Asynchronous => 1,\n\
+         \x20           logos_rust_sdk::Shutdown::Synchronous => 0,\n\
+         \x20       }}",
+        fetch
+    )
+}
+
+/// The twelfth and thirteenth module-impl exports:
+/// `logos_module_set_unload_done_callback` / `logos_module_about_to_unload`.
+///
+/// Same rule as `grant_host_services_block` above, and the same failure when
+/// it is broken: logos-protocol only DECLARES these, every language backend
+/// owes the definition, and logos-plugin-qt's cdylib glue CALLS them for any
+/// module built against protocol >= 0.5. A Rust module missing them links
+/// fine (an undefined symbol is satisfiable at load time on ELF) and then
+/// fails to dlopen under nixpkgs' `-Wl,-z,now` eager binding:
+///
+///   undefined symbol: logos_module_set_unload_done_callback
+///
+/// which is what protocol 0.5 shipped as, until this block.
+///
+/// Gated on >= 0.5 to match the guard on both the caller (the Qt glue) and the
+/// C++ emitter: older protocols do not declare the callback typedef, so
+/// emitting this unconditionally would just move the undefined symbol.
+fn teardown_block(protocol_version: &str) -> String {
+    let mut parts = protocol_version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    if (major, minor) < (0, 5) {
+        return String::new();
+    }
+    // `Option<extern "C" fn(..)>` is the nullable function pointer the C side
+    // spells `logos_module_unload_done_cb cb` -- a NULL cb clears the slot,
+    // which is the documented way the host detaches.
+    "\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_set_unload_done_callback(\n\
+     \x20   cb: Option<logos_rust_sdk::UnloadDoneCb>,\n\
+     \x20   user_data: *mut std::os::raw::c_void,\n\
+     ) {\n\
+     \x20   logos_rust_sdk::set_unload_done_callback(cb, user_data);\n\
+     }\n\n\
+     /// Ask the impl whether it is ready to be unloaded: 0 = Synchronous\n\
+     /// (proceed), 1 = Asynchronous (wait for unload_finished()).\n\
+     ///\n\
+     /// A module that was never installed answers 0: there is no instance, so\n\
+     /// there is nothing to tear down and nothing for the host to wait on.\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_about_to_unload() -> c_int {\n\
+     \x20   let hook = REGISTERED.lock().unwrap().as_ref().map(|r| r.about_to_unload);\n\
+     \x20   match hook {\n\
+     \x20       Some(f) => f(),\n\
+     \x20       None => 0,\n\
+     \x20   }\n\
      }\n"
         .to_string()
 }
@@ -699,6 +808,22 @@ pub fn generate_provider_with(
              \x20   fn on_context_ready({}, _ctx: &RustModuleContext) {{}}\n\n",
             self_recv,
         ));
+        // Teardown hook, defaulted so no existing impl has to change: the Rust
+        // analog of C++'s LogosModuleContext::aboutToUnload(). Emitted for
+        // EVERY protocol version -- the author-facing trait surface should not
+        // flicker with the protocol MINOR, and on anything older than 0.5 the
+        // C ABI simply never calls it. See teardown_block().
+        out.push_str(&format!(
+            "    /// Called when the host is about to unload this module, before the\n\
+             \x20   /// implementation is dropped. Return `Synchronous` (the default)\n\
+             \x20   /// when teardown finished inline, or `Asynchronous` to keep the\n\
+             \x20   /// host waiting until `logos_rust_sdk::unload_finished()` is\n\
+             \x20   /// called. The host enforces a grace period either way.\n\
+             \x20   fn about_to_unload({}) -> logos_rust_sdk::Shutdown {{\n\
+             \x20       logos_rust_sdk::Shutdown::Synchronous\n\
+             \x20   }}\n\n",
+            self_recv,
+        ));
         for m in &module.methods {
             // A derived method (name/version) is answered by the generated
             // dispatch from the module declaration. Declaring it on the trait
@@ -745,9 +870,18 @@ pub fn generate_provider_with(
     out.push_str(&format!(
         "type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;\n\
          type EnsureFn = fn(bool);\n\
+         // Reaches the author's impl from the teardown C export, which is a\n\
+         // free function with no `T` -- exactly why `dispatch` is reached\n\
+         // this way too.\n\
+         type AboutToUnloadFn = fn() -> i32;\n\
          struct Registered {{\n\
          \x20   dispatch: DispatchFn,\n\
          \x20   ensure: EnsureFn,\n\
+         \x20   // Read only by the teardown export, which is emitted for\n\
+         \x20   // protocol >= 0.5; an older module registers the hook and\n\
+         \x20   // never calls it.\n\
+         \x20   #[allow(dead_code)]\n\
+         \x20   about_to_unload: AboutToUnloadFn,\n\
          }}\n\
          static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);\n\
          // A concurrency:\"single\" module runs entirely on one thread (its\n\
@@ -787,6 +921,9 @@ pub fn generate_provider_with(
          \x20           imp.on_context_ready(&ctx);\n\
          \x20       }}\n\
          \x20   }}\n\
+         \x20   fn about_to_unload_impl<T: {} + Default>() -> i32 {{\n\
+__ABOUT_TO_UNLOAD_BODY__\n\
+         \x20   }}\n\
          \x20   fn dispatch_impl<T: {} + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
          \x20       let mut guard = INSTANCE.0.lock().unwrap();\n\
          \x20       if guard.is_none() {{\n\
@@ -794,7 +931,7 @@ pub fn generate_provider_with(
          \x20       }}\n\
          \x20       let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;\n\
          \x20       match method {{\n",
-        trait_name, trait_name, trait_name
+        trait_name, trait_name, trait_name, trait_name
     ));
     }
 
@@ -893,6 +1030,7 @@ pub fn generate_provider_with(
          \x20   *REGISTERED.lock().unwrap() = Some(Registered {\n\
          \x20       dispatch: dispatch_impl::<T>,\n\
          \x20       ensure: ensure_impl::<T>,\n\
+         \x20       about_to_unload: about_to_unload_impl::<T>,\n\
          \x20   });\n\
          }\n\n\
          /// Run the author's install hook (once) and give the ready-latch a\n\
@@ -1006,7 +1144,13 @@ pub fn generate_provider_with(
          \x20       unsafe {{ drop(CString::from_raw(s)) }};\n\
          \x20   }}\n\
          }}\n{}",
-        iface, protocol_version, grant_host_services_block(protocol_version)
+        iface,
+        protocol_version,
+        format!(
+            "{}{}",
+            grant_host_services_block(protocol_version),
+            teardown_block(protocol_version)
+        )
     ));
 
     // concurrency:"multi" needs NO extra C ABI here. The sync
@@ -1017,7 +1161,10 @@ pub fn generate_provider_with(
     // this cdylib just serves those concurrent dispatch calls. The provider/host
     // ABI is unchanged — an old host loads and forwards a multi module unmodified.
 
-    out
+    out.replace(
+        "__ABOUT_TO_UNLOAD_BODY__",
+        about_to_unload_body(emit_trait, multi).trim_end_matches('\n'),
+    )
 }
 
 #[cfg(test)]
@@ -1035,6 +1182,47 @@ module rust_calc {
   event totalChanged(total: int)
 }
 "#;
+
+    // The C ABI is TOTAL for a given protocol version: logos-protocol only
+    // declares these, logos-plugin-qt's glue calls them, and a backend that
+    // skips one ships a module that links clean and dies at dlopen. Protocol
+    // 0.5 shipped exactly that way for Rust — see teardown_block().
+    #[test]
+    fn protocol_0_5_emits_the_teardown_exports() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.5.0");
+        assert!(code.contains("pub extern \"C\" fn logos_module_set_unload_done_callback"));
+        assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        // ...reaching the author's impl through the same fn-pointer table
+        // `dispatch` uses, since the export has no `T` to name.
+        assert!(code.contains("about_to_unload: about_to_unload_impl::<T>"));
+        assert!(code.contains("fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown"));
+    }
+
+    // Older protocols do not declare the callback typedef, so emitting the
+    // exports there would just move the undefined symbol to the other side.
+    #[test]
+    fn protocol_0_4_emits_no_teardown_exports() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.4.0");
+        assert!(!code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        assert!(!code.contains("logos_module_set_unload_done_callback"));
+        // The author-facing trait surface does NOT flicker with the protocol
+        // MINOR, though: the hook is simply never called.
+        assert!(code.contains("fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown"));
+    }
+
+    // The Rust-first flow's trait is the AUTHOR's and predates this hook.
+    // Stable Rust cannot detect an optional method, so the scaffold must not
+    // call one that may not exist — it would turn a load-time break into a
+    // build-time break for every existing rust-first module.
+    #[test]
+    fn the_rust_first_flow_still_exports_but_never_calls_the_trait() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider_with(&m, "0.5.0", false, false);
+        assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        assert!(!code.contains("imp.about_to_unload()"));
+    }
 
     #[test]
     fn generates_provider_scaffold() {

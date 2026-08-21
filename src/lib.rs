@@ -47,4 +47,5 @@ pub use error::LogosError;
 pub use params::{Param, ToParam};
 pub use callback::{CallResult, EventData};
 pub use plugin::{EventSubscription, PluginProxy};
-pub use api::{grant_host_services, protocol_abi_major, protocol_version, save_token, LogosModuleSDK};
+pub use api::{grant_host_services, protocol_abi_major, protocol_version, save_token,
+              set_unload_done_callback, unload_finished, LogosModuleSDK, Shutdown, UnloadDoneCb};
