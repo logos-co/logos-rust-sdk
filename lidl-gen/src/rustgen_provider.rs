@@ -1183,6 +1183,47 @@ module rust_calc {
 }
 "#;
 
+    // The C ABI is TOTAL for a given protocol version: logos-protocol only
+    // declares these, logos-plugin-qt's glue calls them, and a backend that
+    // skips one ships a module that links clean and dies at dlopen. Protocol
+    // 0.5 shipped exactly that way for Rust — see teardown_block().
+    #[test]
+    fn protocol_0_5_emits_the_teardown_exports() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.5.0");
+        assert!(code.contains("pub extern \"C\" fn logos_module_set_unload_done_callback"));
+        assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        // ...reaching the author's impl through the same fn-pointer table
+        // `dispatch` uses, since the export has no `T` to name.
+        assert!(code.contains("about_to_unload: about_to_unload_impl::<T>"));
+        assert!(code.contains("fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown"));
+    }
+
+    // Older protocols do not declare the callback typedef, so emitting the
+    // exports there would just move the undefined symbol to the other side.
+    #[test]
+    fn protocol_0_4_emits_no_teardown_exports() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.4.0");
+        assert!(!code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        assert!(!code.contains("logos_module_set_unload_done_callback"));
+        // The author-facing trait surface does NOT flicker with the protocol
+        // MINOR, though: the hook is simply never called.
+        assert!(code.contains("fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown"));
+    }
+
+    // The Rust-first flow's trait is the AUTHOR's and predates this hook.
+    // Stable Rust cannot detect an optional method, so the scaffold must not
+    // call one that may not exist — it would turn a load-time break into a
+    // build-time break for every existing rust-first module.
+    #[test]
+    fn the_rust_first_flow_still_exports_but_never_calls_the_trait() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider_with(&m, "0.5.0", false, false);
+        assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+        assert!(!code.contains("imp.about_to_unload()"));
+    }
+
     #[test]
     fn generates_provider_scaffold() {
         let m = parse(SAMPLE).unwrap();
