@@ -18,9 +18,19 @@
     # Test-only: module builder + logoscore drive the integration test suite.
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    # DIRECT pin, deliberately not the transitive
+    # logos-module-builder.inputs.logos-protocol: that one resolves to protocol
+    # 0.2.0, which declares only the seven founding module-impl exports. A check
+    # reading it could not see a missing grant_host_services (0.3) or teardown
+    # pair (0.5) — it would be structurally incapable of failing. See
+    # checks.module-impl-abi below.
+    logos-protocol = {
+      url = "github:logos-co/logos-protocol";
+      inputs.logos-nix.follows = "logos-nix";
+    };
   };
 
-  outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-builder, logos-logoscore-cli }:
+  outputs = inputs@{ self, nixpkgs, logos-nix, logos-lidl, logos-module-builder, logos-logoscore-cli, logos-protocol }:
     let
       mkModule = logos-module-builder.lib.mkLogosModule;
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -179,6 +189,26 @@
             MODULES_DIR = modulesDir;
           } ''
             bash ${./tests/ipc-test.sh}
+          '';
+
+          # The module-impl C ABI is TOTAL: logos-protocol declares it, this
+          # backend owes every definition, and the two have drifted twice. The
+          # assertions live in tests/module-impl-abi-test.sh.
+          #
+          # This deliberately does NOT go through the built modules the way
+          # ipc-test does. It reads the scaffold lidl-gen emits, which is the
+          # artifact that either has the export or does not — and it can
+          # therefore cover all four emitter configurations for the cost of
+          # four codegen runs, with no Qt, no daemon and no plugin load.
+          module-impl-abi = pkgs.runCommand "rust-sdk-module-impl-abi" {
+            nativeBuildInputs = [ pkgs.bash ];
+            LIDL_GEN = "${self.packages.${system}.lidl-gen}/bin/logos-lidl-gen";
+            # Both the declared export list AND the protocol version come from
+            # this one output, so they cannot be read from two revisions.
+            ABI_MANIFEST = logos-protocol.packages.${system}.module-impl-abi;
+            CONTRACT = ./tests/provider/rust-lib/sdk_test_provider_module.lidl;
+          } ''
+            bash ${./tests/module-impl-abi-test.sh}
           '';
         }
       );

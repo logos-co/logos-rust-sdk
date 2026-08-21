@@ -119,13 +119,53 @@ fn main() {
             }
         }
     }
-    let protocol_version = args
+    // Which module-impl exports the provider scaffold emits is decided by
+    // PARSING this string (see rustgen_provider's grant_host_services_block /
+    // teardown_block). Both gates fall back to 0 on a parse failure, so an
+    // unparseable version silently means "protocol 0.0" — below every gate —
+    // and the generator exits 0 having emitted only the founding exports. The
+    // module then links clean and dies at dlopen() on Linux with an undefined
+    // symbol, which is how protocol 0.3 and 0.5 each shipped broken.
+    //
+    // A version that was ASKED FOR and not understood is a mistake, not a
+    // default, so refuse it here rather than let it degrade quietly. Omitting
+    // the flag is still fine (the doctests do): that is a choice, and "0.1.0"
+    // is a version this can actually parse.
+    // `--protocol-version` as the LAST argument has no value, and
+    // `.and_then(get(i + 1))` returns None for that — indistinguishable from
+    // the flag being absent, so it would fall through to the "0.1.0" default
+    // and emit the pre-0.3 export set. That is the same fail-open this block
+    // exists to close, one argument to the left of it.
+    if args.last().map(String::as_str) == Some("--protocol-version") {
+        eprintln!("--protocol-version requires a value (MAJOR.MINOR[.PATCH]).");
+        std::process::exit(1);
+    }
+    let explicit = args
         .iter()
         .position(|a| a == "--protocol-version")
         .and_then(|i| args.get(i + 1))
         .cloned()
-        .or_else(|| std::env::var("LOGOS_PROTOCOL_VERSION").ok())
-        .unwrap_or_else(|| "0.1.0".to_string());
+        .or_else(|| std::env::var("LOGOS_PROTOCOL_VERSION").ok());
+    if let Some(v) = explicit.as_deref() {
+        let mut parts = v.split('.');
+        let ok = matches!(
+            (parts.next().map(str::trim), parts.next().map(str::trim)),
+            (Some(major), Some(minor))
+                if !major.is_empty() && major.parse::<u32>().is_ok()
+                    && !minor.is_empty() && minor.parse::<u32>().is_ok()
+        );
+        if !ok {
+            eprintln!(
+                "Invalid protocol version {:?}: expected MAJOR.MINOR[.PATCH].\n\
+                 \x20      This selects which logos_module_* exports the scaffold defines; an\n\
+                 \x20      unparseable value would emit the pre-0.3 set and build a module that\n\
+                 \x20      fails at dlopen() with an undefined symbol.",
+                v
+            );
+            std::process::exit(1);
+        }
+    }
+    let protocol_version = explicit.unwrap_or_else(|| "0.1.0".to_string());
     let output = args
         .iter()
         .position(|a| a == "-o")
@@ -153,9 +193,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    // concurrency:"multi" — emit the concurrent-dispatch scaffold (Arc<&self>
-    // instance + logos_module_dispatch_async). Fed from metadata.json's
-    // `concurrency` field by the builder. Absent / anything else ⇒ single.
+    // concurrency:"multi" — emit the concurrent-dispatch scaffold (a shared
+    // Arc<T> instance with &self receivers; no extra C export, the Qt glue
+    // spawns a worker per call into the ordinary logos_module_dispatch). Fed
+    // from metadata.json's `concurrency` field by the builder. Absent /
+    // anything else ⇒ single.
     let multi = flag_value(&args, "--concurrency").as_deref() == Some("multi");
     let mut code = if provider {
         logos_lidl_gen::rustgen_provider::generate_provider_with(

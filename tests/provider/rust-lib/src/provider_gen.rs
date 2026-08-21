@@ -58,6 +58,15 @@ pub trait SdkTestProviderModule: 'static {
     /// LogosModuleContext::onContextReady().
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
+    /// Called when the host is about to unload this module, before the
+    /// implementation is dropped. Return `Synchronous` (the default)
+    /// when teardown finished inline, or `Asynchronous` to keep the
+    /// host waiting until `logos_rust_sdk::unload_finished()` is
+    /// called. The host enforces a grace period either way.
+    fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown {
+        logos_rust_sdk::Shutdown::Synchronous
+    }
+
     fn add(&mut self, a: i64, b: i64) -> i64;
     fn emit_blob(&mut self, size: i64) -> i64;
     fn sleep(&mut self, ms: i64) -> i64;
@@ -65,9 +74,18 @@ pub trait SdkTestProviderModule: 'static {
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
 type EnsureFn = fn(bool);
+// Reaches the author's impl from the teardown C export, which is a
+// free function with no `T` -- exactly why `dispatch` is reached
+// this way too.
+type AboutToUnloadFn = fn() -> i32;
 struct Registered {
     dispatch: DispatchFn,
     ensure: EnsureFn,
+    // Read only by the teardown export, which is emitted for
+    // protocol >= 0.5; an older module registers the hook and
+    // never calls it.
+    #[allow(dead_code)]
+    about_to_unload: AboutToUnloadFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
 // A concurrency:"single" module runs entirely on one thread (its
@@ -108,6 +126,17 @@ pub fn install<T: SdkTestProviderModule + Default>() {
             imp.on_context_ready(&ctx);
         }
     }
+    fn about_to_unload_impl<T: SdkTestProviderModule + Default>() -> i32 {
+        // No instance means nothing was ever constructed, so there is
+        // nothing to tear down: Synchronous, and the host proceeds.
+        let mut guard = INSTANCE.0.lock().unwrap();
+        let Some(any) = guard.as_mut() else { return 0 };
+        let Some(imp) = any.downcast_mut::<T>() else { return 0 };
+        match imp.about_to_unload() {
+            logos_rust_sdk::Shutdown::Asynchronous => 1,
+            logos_rust_sdk::Shutdown::Synchronous => 0,
+        }
+    }
     fn dispatch_impl<T: SdkTestProviderModule + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
         let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
@@ -134,12 +163,21 @@ pub fn install<T: SdkTestProviderModule + Default>() {
                 let result = imp.sleep(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
+            "name" => {
+                                     let result = "sdk_test_provider_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     let result = "0.1.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
             _ => None,
         }
     }
     *REGISTERED.lock().unwrap() = Some(Registered {
         dispatch: dispatch_impl::<T>,
         ensure: ensure_impl::<T>,
+        about_to_unload: about_to_unload_impl::<T>,
     });
 }
 
@@ -204,7 +242,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"isInvokable\":true,\"name\":\"sleep\",\"parameters\":[{\"name\":\"ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"sleep(int)\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"isInvokable\":true,\"name\":\"sleep\",\"parameters\":[{\"name\":\"ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"sleep(int)\"},{\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
 }
 
 #[no_mangle]
@@ -249,7 +287,7 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
 /// (stamped at generation time by the build; never minted here).
 #[no_mangle]
 pub extern "C" fn logos_module_get_protocol_version() -> *const c_char {
-    static VERSION: &str = "0.1.0\0";
+    static VERSION: &str = "0.5.0\0";
     VERSION.as_ptr() as *const c_char
 }
 
@@ -257,5 +295,33 @@ pub extern "C" fn logos_module_get_protocol_version() -> *const c_char {
 pub extern "C" fn logos_module_string_free(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(CString::from_raw(s)) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn logos_module_grant_host_services(services_json: *const c_char) -> c_int {
+    if services_json.is_null() { return -1; }
+    unsafe { logos_rust_sdk::grant_host_services(services_json) }
+}
+
+#[no_mangle]
+pub extern "C" fn logos_module_set_unload_done_callback(
+    cb: Option<logos_rust_sdk::UnloadDoneCb>,
+    user_data: *mut std::os::raw::c_void,
+) {
+    logos_rust_sdk::set_unload_done_callback(cb, user_data);
+}
+
+/// Ask the impl whether it is ready to be unloaded: 0 = Synchronous
+/// (proceed), 1 = Asynchronous (wait for unload_finished()).
+///
+/// A module that was never installed answers 0: there is no instance, so
+/// there is nothing to tear down and nothing for the host to wait on.
+#[no_mangle]
+pub extern "C" fn logos_module_about_to_unload() -> c_int {
+    let hook = REGISTERED.lock().unwrap().as_ref().map(|r| r.about_to_unload);
+    match hook {
+        Some(f) => f(),
+        None => 0,
     }
 }
