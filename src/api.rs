@@ -103,3 +103,62 @@ impl Default for LogosModuleSDK {
         Self::new()
     }
 }
+
+// -- teardown ---------------------------------------------------------------
+//
+// The module-impl C ABI gained two teardown exports in logos-protocol 0.5
+// (`logos_module_set_unload_done_callback` / `logos_module_about_to_unload`).
+// The generated provider scaffold owns the exports — it is what can reach the
+// author's impl — but the CALLBACK lives here, for the same reason
+// `grant_host_services` does: it is SDK state, and a module that wants to
+// signal completion from its own code should not have to reach back into
+// generated symbols to do it.
+
+/// A module's answer to "are you ready to be unloaded?".
+///
+/// Mirrors C++'s `LogosShutdown` and Qt Creator's `IPlugin::aboutToShutdown()`
+/// contract: return `Synchronous` when teardown finished inline (the common
+/// case, and the default), or `Asynchronous` to keep the host waiting until
+/// [`unload_finished`] is called. The host enforces a grace period either way —
+/// an `Asynchronous` module that never finishes is killed, not waited on
+/// forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Teardown is complete; the host may proceed immediately.
+    Synchronous,
+    /// Teardown continues in the background; the host waits for
+    /// [`unload_finished`] (or its grace period, whichever comes first).
+    Asynchronous,
+}
+
+/// The C callback the host installs to learn that async teardown finished.
+pub type UnloadDoneCb = unsafe extern "C" fn(*mut std::os::raw::c_void);
+
+// The `void*` rides as a `usize` so the pair is `Send`: a raw pointer is not,
+// and the callback is installed on the host's thread but fired from whichever
+// thread the module finishes its work on — which is the whole point of the
+// asynchronous answer.
+static UNLOAD_CB: std::sync::Mutex<Option<(UnloadDoneCb, usize)>> = std::sync::Mutex::new(None);
+
+/// Install the host's completion callback. `None` clears it.
+///
+/// Called by the generated `logos_module_set_unload_done_callback` export
+/// before the host asks the module to unload, so a module that finishes inline
+/// still has somewhere to signal.
+pub fn set_unload_done_callback(cb: Option<UnloadDoneCb>, user_data: *mut std::os::raw::c_void) {
+    *UNLOAD_CB.lock().unwrap() = cb.map(|f| (f, user_data as usize));
+}
+
+/// Signal that this module's asynchronous teardown is complete.
+///
+/// Only meaningful after returning [`Shutdown::Asynchronous`]; calling it
+/// otherwise is harmless (the host is not waiting). Safe to call from any
+/// thread — the host marshals the notification back to its own.
+pub fn unload_finished() {
+    // Copied out from under the lock: the callback re-enters the host, and
+    // holding the SDK's mutex across that is how a teardown deadlock starts.
+    let entry = *UNLOAD_CB.lock().unwrap();
+    if let Some((cb, ud)) = entry {
+        unsafe { cb(ud as *mut std::os::raw::c_void) };
+    }
+}
