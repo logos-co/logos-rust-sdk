@@ -8,9 +8,16 @@
 //!   - `RustModuleContext` accessor (module path / instance id /
 //!     persistence path, stamped by the host via set_context)
 //!   - typed event emitters (`emit_total_changed(...)`)
-//!   - #[no_mangle] exports: logos_module_dispatch / get_methods /
-//!     set_context / set_emit_callback / accept_token /
-//!     get_protocol_version / string_free
+//!   - the #[no_mangle] `logos_module_*` exports declared by
+//!     logos-protocol's cpp/logos_module_impl.h
+//!
+//! That export set is not fixed: the header is itself versioned and the ABI
+//! grows (grant_host_services at 0.3, the teardown pair at 0.5), so the
+//! authority is the header at the protocol version passed in, never a list
+//! written down here. Twice now a Rust module has shipped missing an export
+//! because the set was assumed to be the founding seven — `nix build
+//! .#checks.<system>.module-impl-abi` diffs what this file emits against what
+//! that header declares, in every emitter configuration.
 //!
 //! The author writes `struct MyImpl; impl CalcDemoModule for MyImpl {...}`
 //! and calls the generated `logos_module_register!(MyImpl)`-equivalent via
@@ -520,7 +527,8 @@ __ABOUT_TO_UNLOAD_BODY__
         match method {
 "##;
 
-/// The eleventh module-impl export: `logos_module_grant_host_services`.
+/// The module-impl export `logos_module_grant_host_services`, added at
+/// protocol 0.3.
 ///
 /// logos-protocol only DECLARES this (cpp/logos_module_impl.h); every language
 /// backend owes the definition, and logos-cpp-sdk's cdylib emitter has always
@@ -609,8 +617,8 @@ fn about_to_unload_body(emit_trait: bool, multi: bool) -> String {
     )
 }
 
-/// The twelfth and thirteenth module-impl exports:
-/// `logos_module_set_unload_done_callback` / `logos_module_about_to_unload`.
+/// The module-impl exports `logos_module_set_unload_done_callback` /
+/// `logos_module_about_to_unload`, added at protocol 0.5.
 ///
 /// Same rule as `grant_host_services_block` above, and the same failure when
 /// it is broken: logos-protocol only DECLARES these, every language backend
@@ -674,12 +682,12 @@ pub fn generate_provider(module: &ModuleDecl, protocol_version: &str) -> String 
 /// emitters, dispatch and the C ABI exports around it (see rust_frontend).
 ///
 /// `multi = true` emits the `concurrency: "multi"` scaffold: the instance is
-/// shared (`Arc<T>`, `T: Send + Sync`), methods take `&self`, the instance mutex
-/// guards CONSTRUCTION only, and an extra `logos_module_dispatch_async` C export
-/// runs each handler on its own worker thread so calls to one module overlap.
-/// The author owns thread-safety (interior mutability). `multi = false`
-/// (default) is the single-threaded event-loop scaffold (`&mut self`, the mutex
-/// held across the handler).
+/// shared (`Arc<T>`, `T: Send + Sync`), methods take `&self`, and the instance
+/// mutex guards CONSTRUCTION only. This adds NO C export: concurrency rides on
+/// the existing synchronous `logos_module_dispatch`, which the Qt glue spawns a
+/// worker per call for. The author owns thread-safety (interior mutability).
+/// `multi = false` (default) is the single-threaded event-loop scaffold
+/// (`&mut self`, the mutex held across the handler).
 pub fn generate_provider_with(
     module: &ModuleDecl,
     protocol_version: &str,
