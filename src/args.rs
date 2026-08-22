@@ -265,6 +265,27 @@ pub fn dispatch_failed(origin: &str, message: &str) -> Value {
     })
 }
 
+/// The CLOSED SET of `code` values that mark a result as a provider REFUSAL
+/// rather than a value. The single source of truth for [`as_dispatch_rejection`]
+/// in this crate, and the vocabulary its C++ twins duplicate.
+///
+/// Why a closed set and not "any {code,message,origin} object": a method may
+/// legitimately RETURN a three-string map, and an `any` return certainly can.
+/// Matching the shape alone would let user data impersonate a refusal.
+///
+/// * `dispatch_failed` — the provider ran and refused the argument VALUES; see
+///   [`dispatch_failed`].
+/// * `invalid_args` — wrong argument COUNT; see [`invalid_args`]. This crate has
+///   EMITTED it since arity checking landed, and nothing detected it — an arity
+///   error read back to a typed consumer as a successful call returning a map.
+/// * `unknown_method` — nothing emits this yet, listed on purpose. An unknown
+///   method is currently answered with a bare null, indistinguishable from a
+///   legitimate null return, and closing that needs a provider-contract change
+///   across the SDKs. Widening a detector is backwards-compatible on its own;
+///   a new provider code shipped against narrow detectors would arrive at
+///   consumers as DATA — the same silent-success bug, freshly minted.
+pub const REJECTION_CODES: [&str; 3] = ["dispatch_failed", "invalid_args", "unknown_method"];
+
 /// The inverse of [`dispatch_failed`]: recognise the canonical rejection object
 /// when it arrives as a call's RESULT, and hand back its message.
 ///
@@ -274,11 +295,13 @@ pub fn dispatch_failed(origin: &str, message: &str) -> Value {
 /// list) — the refusal vanishes. Consumers fold it into their error channel
 /// instead; see `PluginProxy::call_json` and friends.
 ///
-/// The match is EXACT — those three fields, all strings, and that code — for
-/// the same reason the C++ twin (`logosDispatchRejectionJson`, emitted into
-/// every generated wrapper) is exact: a method legitimately returning a map, or
-/// an `any`, must never false-match. Anything a user can put in a map would
-/// otherwise be enough to fake a failure.
+/// The match is NARROW — those three fields, all strings, and a code from
+/// [`REJECTION_CODES`] — for the same reason the C++ twin
+/// (`logosDispatchRejectionJson`, emitted into every generated wrapper) is
+/// narrow: a method legitimately returning a map, or an `any`, must never
+/// false-match. Anything a user can put in a map would otherwise be enough to
+/// fake a failure. An unrecognised code, a 2- or 4-key object, and a non-string
+/// value all stay DATA.
 pub fn as_dispatch_rejection(value: &Value) -> Option<&str> {
     let obj = value.as_object()?;
     if obj.len() != 3 {
@@ -287,7 +310,7 @@ pub fn as_dispatch_rejection(value: &Value) -> Option<&str> {
     let code = obj.get("code")?.as_str()?;
     let message = obj.get("message")?.as_str()?;
     obj.get("origin")?.as_str()?;
-    if code != "dispatch_failed" {
+    if !REJECTION_CODES.contains(&code) {
         return None;
     }
     Some(message)
@@ -513,12 +536,39 @@ mod tests {
         }
     }
 
+    // Every code in the closed set is detected, not just `dispatch_failed`.
+    //
+    // `invalid_args` is the one that was LIVE and undetected: this crate has
+    // emitted it since arity checking landed, and until the detector was
+    // widened a consumer decoded it as data — `logosctl call m isPositive` with
+    // the argument missing exited 0, status "ok", the refusal object as the
+    // result.
+    #[test]
+    fn every_rejection_code_is_detected() {
+        for code in REJECTION_CODES {
+            let v = json!({"code": code, "message": "m", "origin": "o"});
+            assert_eq!(as_dispatch_rejection(&v), Some("m"), "{code}");
+        }
+    }
+
+    // The real constructor, not a hand-built object: what a provider actually
+    // sends for an arity error is recognised.
+    #[test]
+    fn a_real_invalid_args_object_is_a_rejection() {
+        let v = invalid_args("my_module", 4, 2);
+        assert_eq!(as_dispatch_rejection(&v), Some("expected 4 arguments, got 2"));
+    }
+
     // The false-match surface. A method returning a map — or an `any` — puts
     // user data exactly where the detector looks, so anything short of the
-    // exact shape has to be refused, or a caller could fake a failed call.
+    // narrow shape has to be refused, or a caller could fake a failed call.
+    //
+    // These NEGATIVES are what keep the widened match CLOSED. Widening from one
+    // literal to a set is one edit away from "any object with a code", and that
+    // would hand every method returning a three-string map to the error channel.
     #[test]
     fn a_user_map_never_false_matches() {
-        // Right code, wrong arity.
+        // Right code, wrong arity — 2 keys and 4 keys.
         assert_eq!(
             as_dispatch_rejection(&json!({"code": "dispatch_failed", "message": "m"})),
             None
@@ -529,16 +579,43 @@ mod tests {
             ),
             None
         );
-        // Right arity and keys, wrong code. invalid_args is a real object with
-        // exactly this shape, and it is NOT a dispatch rejection.
-        assert_eq!(as_dispatch_rejection(&invalid_args("m", 2, 1)), None);
-        // Right shape, non-string values.
-        assert_eq!(
-            as_dispatch_rejection(
-                &json!({"code": "dispatch_failed", "message": 7, "origin": "o"})
-            ),
-            None
-        );
+        // Right arity and keys, code OUTSIDE the closed set. This is the whole
+        // point of a closed set: a method may legitimately answer
+        // {code, message, origin} with a code of its own.
+        for code in [
+            "",
+            "ok",
+            "not_found",
+            "DISPATCH_FAILED",
+            "dispatch_failed ",
+            "invalid_argument",
+            "unknown_methods",
+            "user_error",
+        ] {
+            assert_eq!(
+                as_dispatch_rejection(&json!({"code": code, "message": "m", "origin": "o"})),
+                None,
+                "{code:?}"
+            );
+        }
+        // Right shape and a good code, but a non-string value in each slot.
+        for code in REJECTION_CODES {
+            assert_eq!(
+                as_dispatch_rejection(&json!({"code": code, "message": 7, "origin": "o"})),
+                None,
+                "{code}"
+            );
+            assert_eq!(
+                as_dispatch_rejection(&json!({"code": code, "message": "m", "origin": null})),
+                None,
+                "{code}"
+            );
+            assert_eq!(
+                as_dispatch_rejection(&json!({"code": 1, "message": "m", "origin": "o"})),
+                None,
+                "{code}"
+            );
+        }
     }
 }
 
