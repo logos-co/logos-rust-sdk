@@ -144,6 +144,35 @@ fn whereami(&mut self) -> String {
 
 `instance_persistence_path` is a writable, per-instance directory — the place to keep a module's on-disk state.
 
+### Who is calling — `current_caller()`
+
+Who made the call your handler is running. Ambient rather than a parameter: the callee already
+possesses the caller's identity, because the caller had to present a token this module itself
+issued to get here, so nothing about it is per-method or visible in a `.lidl`.
+
+```rust
+fn wipe(&mut self) -> bool {
+    let caller = logos_rust_sdk::current_caller();
+    if !caller.is_module("admin_module") {
+        eprintln!("refusing wipe from {}", caller.describe_for_human());
+        return false;                      // Unknown lands here too
+    }
+    true
+}
+```
+
+`LogosCaller` is `Unknown | HostAnchor | Module{name, instance} | Derived{parent, leaf} |
+Operator{name}`, with `is_module(name)`, `is_derived(parent, leaf)`, `identity()` (stable, for a
+map key) and `describe_for_human()` (a log line). `Unknown` is the fail-closed answer and it is
+in band: an unnamed caller, a document this build cannot read, an arm from a newer protocol, and
+"no dispatch in flight on this thread" — a spawned worker, a timer, `on_context_ready`, an event
+emission — all read `Unknown`.
+
+Valid only for the duration of one dispatch, on the dispatching thread; a handler that needs the
+identity later copies it at the top. Requires **logos-protocol 0.6**: the host pushes the identity
+across `logos_module_set_call_caller`, which the generated scaffold only exports at >= 0.6. Built
+against an older protocol the accessor exists and answers `Unknown`.
+
 ## Supporting types
 
 The handful of SDK types that surface directly in module code:
@@ -211,7 +240,7 @@ cargo test
 
 ## Testing
 
-Two complementary checks exercise the SDK and the Rust-module pipeline it builds on (the cross-language composition showcases — typed calls and events crossing the C++/Rust boundary in both directions — live in [logos-module-builder](https://github.com/logos-co/logos-module-builder)'s doctests, since they exercise the builder across both SDKs):
+Complementary checks exercise the SDK and the Rust-module pipeline it builds on (the cross-language composition showcases — typed calls and events crossing the C++/Rust boundary in both directions — live in [logos-module-builder](https://github.com/logos-co/logos-module-builder)'s doctests, since they exercise the builder across both SDKs):
 
 - **IPC integration test** (`tests/`) — builds a minimal provider + caller module
   pair on the **cdylib authoring path**: each fixture is a `.lidl` contract from
@@ -226,6 +255,20 @@ Two complementary checks exercise the SDK and the Rust-module pipeline it builds
   ```bash
   nix build 'path:./tests#checks.x86_64-linux.ipc-test' \
     --override-input logos-rust-sdk path:. --print-build-logs
+  ```
+
+- **Unit tests + module-impl ABI** (`checks.<system>.sdk-unit-tests`,
+  `checks.<system>.module-impl-abi`) — `cargo test -p logos-rust-sdk` (the bytes
+  codec, the argument validator, the per-call timeout rules, the caller parser
+  and its per-thread stack), and a check that diffs what `lidl-gen --provider`
+  DEFINES against what logos-protocol DECLARES, in all four emitter
+  configurations. The second exists because that gap has shipped twice
+  (`logos_module_grant_host_services` at protocol 0.3, the teardown pair at 0.5):
+  a missing definition links cleanly and then fails at `dlopen()` on Linux,
+  invisibly on macOS.
+
+  ```bash
+  nix build .#checks.x86_64-linux.sdk-unit-tests .#checks.x86_64-linux.module-impl-abi
   ```
 
 - **Executable doc-test** (`doctests/cross-language-composition.test.yaml`) — a
