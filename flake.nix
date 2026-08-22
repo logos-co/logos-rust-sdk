@@ -191,6 +191,34 @@
             bash ${./tests/ipc-test.sh}
           '';
 
+          # The SDK crate's own unit tests — and, before this, nothing ran
+          # them. The lidl-gen package's doCheck is scoped to
+          # `-p logos-lidl-gen`, and ci.yml runs only the IPC integration
+          # test, so every assertion in src/*.rs (the bytes codec, the arg
+          # validator, the timeout rules, and now the caller parser and its
+          # per-thread stack) was ungated: `cargo test` had to be run by hand
+          # to learn anything about them.
+          #
+          # The install phase is written out rather than left to the cargo
+          # install hook: this crate is an rlib with the lp_* symbols
+          # deliberately unresolved, so there is no artifact to install and
+          # nothing but the test result is wanted from the build.
+          sdk-unit-tests = pkgs.rustPlatform.buildRustPackage {
+            pname = "logos-rust-sdk-unit-tests";
+            version = "0.3.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "logos-rust-sdk" ];
+            doCheck = true;
+            cargoTestFlags = [ "-p" "logos-rust-sdk" ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              echo "logos-rust-sdk unit tests passed" > $out/result.txt
+              runHook postInstall
+            '';
+          };
+
           # The module-impl C ABI is TOTAL: logos-protocol declares it, this
           # backend owes every definition, and the two have drifted twice. The
           # assertions live in tests/module-impl-abi-test.sh.

@@ -527,6 +527,28 @@ __ABOUT_TO_UNLOAD_BODY__
         match method {
 "##;
 
+/// Is the protocol this module is built against at least MAJOR.MINOR?
+///
+/// The single place the conditional-export gates are decided, so a fourth wave
+/// cannot spell the comparison a fourth way. Two properties are load-bearing:
+///
+///   * It compares (major, minor) TUPLES, so 1.0 is above 0.6. The C++ emitter
+///     has to say the same thing in preprocessor arithmetic, where the obvious
+///     `MINOR >= 6` silently DROPS every conditional export at the next major —
+///     exactly when an ABI is most likely to be re-checked.
+///   * An unparseable version FAILS OPEN to (0, 0), below every gate, emitting
+///     only the founding export set. That is deliberate here and closed one
+///     level up: main.rs REFUSES a `--protocol-version` it cannot parse, and
+///     tests/module-impl-abi-test.sh validates the string it passes, because a
+///     silent degrade to "protocol 0.0" is how a module links clean and then
+///     dies at dlopen().
+fn protocol_at_least(protocol_version: &str, major_gate: u32, minor_gate: u32) -> bool {
+    let mut parts = protocol_version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
+    (major, minor) >= (major_gate, minor_gate)
+}
+
 /// The module-impl export `logos_module_grant_host_services`, added at
 /// protocol 0.3.
 ///
@@ -548,10 +570,7 @@ __ABOUT_TO_UNLOAD_BODY__
 /// definition. Older protocols do not export `lp_grant_host_services`, so
 /// emitting it unconditionally would just move the undefined symbol.
 fn grant_host_services_block(protocol_version: &str) -> String {
-    let mut parts = protocol_version.split('.');
-    let major: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
-    let minor: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
-    if (major, minor) < (0, 3) {
+    if !protocol_at_least(protocol_version, 0, 3) {
         return String::new();
     }
     // Forwards to lp_grant_host_services exactly as the C++ emitter does, and
@@ -635,10 +654,7 @@ fn about_to_unload_body(emit_trait: bool, multi: bool) -> String {
 /// C++ emitter: older protocols do not declare the callback typedef, so
 /// emitting this unconditionally would just move the undefined symbol.
 fn teardown_block(protocol_version: &str) -> String {
-    let mut parts = protocol_version.split('.');
-    let major: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
-    let minor: u32 = parts.next().and_then(|p| p.trim().parse().ok()).unwrap_or(0);
-    if (major, minor) < (0, 5) {
+    if !protocol_at_least(protocol_version, 0, 5) {
         return String::new();
     }
     // `Option<extern "C" fn(..)>` is the nullable function pointer the C side
@@ -664,6 +680,48 @@ fn teardown_block(protocol_version: &str) -> String {
      \x20       Some(f) => f(),\n\
      \x20       None => 0,\n\
      \x20   }\n\
+     }\n"
+        .to_string()
+}
+
+/// The module-impl export `logos_module_set_call_caller`, added at protocol
+/// 0.6: WHO is making the call that is about to run. The glue wraps exactly one
+/// logos_module_dispatch in one push/pop pair, on the dispatching thread, and
+/// the author reads it back through `logos_rust_sdk::current_caller()`.
+///
+/// Same rule as the two blocks above and the same failure when it is broken —
+/// logos-protocol only DECLARES this, the glue emits a DIRECT call for any
+/// module built against >= 0.6, and a Rust module missing the definition links
+/// clean and then dies at dlopen() under nixpkgs' `-Wl,-z,now`:
+///
+///   undefined symbol: logos_module_set_call_caller
+///
+/// invisibly on macOS (-undefined dynamic_lookup) and fatally on Linux, which
+/// is how 0.3 and 0.5 each shipped.
+///
+/// THIS BLOCK LANDS BEFORE THE PROTOCOL BUMP THAT DECLARES THE EXPORT, and the
+/// gate is what makes that safe rather than premature: at the current pin the
+/// guard is false, nothing is emitted, and checks.module-impl-abi compares the
+/// same two sets it does today. When the bump reaches the lock, the declaration
+/// and this definition appear in the SAME closure, because one stamped protocol
+/// version decides both. Protocol-first would instead turn this repo's ABI
+/// check (and logos-cpp-sdk's, and logos-module-builder's `nm` check) red the
+/// night the bump merged.
+fn set_call_caller_block(protocol_version: &str) -> String {
+    if !protocol_at_least(protocol_version, 0, 6) {
+        return String::new();
+    }
+    // NULL is a VALUE in this ABI — it POPS the innermost caller — so this must
+    // NOT copy grant_host_services' null guard. A swallowed pop leaves the
+    // OUTER dispatch reading the inner call's caller for the rest of its frame:
+    // a wrong identity rather than a missing one, next to code that asks
+    // is_module(). The SDK owns the per-thread stack and the null case with it,
+    // for the same reason it owns the unload callback — a module that wants the
+    // caller should not have to reach into generated symbols for it.
+    "\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_set_call_caller(caller_json: *const c_char) {\n\
+     \x20   unsafe { logos_rust_sdk::set_call_caller(caller_json) }\n\
      }\n"
         .to_string()
 }
@@ -1155,9 +1213,10 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         iface,
         protocol_version,
         format!(
-            "{}{}",
+            "{}{}{}",
             grant_host_services_block(protocol_version),
-            teardown_block(protocol_version)
+            teardown_block(protocol_version),
+            set_call_caller_block(protocol_version)
         )
     ));
 
@@ -1230,6 +1289,135 @@ module rust_calc {
         let code = generate_provider_with(&m, "0.5.0", false, false);
         assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
         assert!(!code.contains("imp.about_to_unload()"));
+    }
+
+    // ── protocol 0.6: WHO is calling this dispatch ──────────────────────────
+    //
+    // The same total-ABI rule as the two blocks above, one bump later.
+    // logos-protocol 0.6 DECLARES logos_module_set_call_caller, and the Qt glue
+    // emits a DIRECT call to it around every dispatch — no dlsym, no null
+    // check. A backend that does not DEFINE it links clean and then fails at
+    // dlopen() on ELF under nixpkgs' -Wl,-z,now, invisibly on macOS. That is
+    // how 0.3 and 0.5 each shipped broken; this test is the third time asked
+    // one bump early.
+    #[test]
+    fn protocol_0_6_emits_the_call_caller_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.6.0");
+        assert!(
+            code.contains("pub extern \"C\" fn logos_module_set_call_caller"),
+            "{code}"
+        );
+        // The definition forwards into the SDK crate, exactly as the grant and
+        // teardown exports do: the per-thread caller stack is SDK state, and a
+        // handler reads it back through logos_rust_sdk::current_caller().
+        assert!(
+            code.contains("logos_rust_sdk::set_call_caller(caller_json)"),
+            "{code}"
+        );
+    }
+
+    // NULL is a VALUE in this ABI — it POPS the innermost caller — not an
+    // error. So this export must NOT copy grant_host_services' null guard: a
+    // swallowed pop leaves the outer dispatch reading the inner call's caller
+    // for the rest of its frame, which is a wrong identity rather than a
+    // missing one, and sits next to authorization-shaped decisions.
+    #[test]
+    fn the_call_caller_export_forwards_null_rather_than_refusing_it() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.6.0");
+        let body = code
+            .split("pub extern \"C\" fn logos_module_set_call_caller")
+            .nth(1)
+            .expect("the export is emitted at 0.6")
+            .split("\n}")
+            .next()
+            .unwrap_or("");
+        assert!(!body.contains("is_null()"), "{body}");
+    }
+
+    // Older protocols do not declare it, so emitting it there would only move
+    // the undefined symbol to the other side of the seam.
+    #[test]
+    fn protocol_0_5_emits_no_call_caller_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.5.0");
+        assert!(!code.contains("logos_module_set_call_caller"), "{code}");
+        // ...while the 0.5 pair is untouched. The gates are PER BLOCK, which is
+        // what makes landing this definition before the protocol bump inert:
+        // at the current pin the scaffold is byte-identical to master's.
+        assert!(
+            code.contains("pub extern \"C\" fn logos_module_about_to_unload"),
+            "{code}"
+        );
+    }
+
+    // MAJOR-aware, not MINOR-alone. The C++ emitter spells this guard as
+    // preprocessor arithmetic, where `MINOR >= 6` silently DROPS the export at
+    // 1.0 — the surface disappears exactly when the ABI is most likely to be
+    // checked. Rust compares (major, minor) tuples so the property holds
+    // structurally; this test is what makes it a property rather than an
+    // accident of the current pin.
+    #[test]
+    fn the_0_6_gate_is_major_aware_not_minor_alone() {
+        let m = parse(SAMPLE).unwrap();
+        let next_major = generate_provider(&m, "1.0.0");
+        assert!(
+            next_major.contains("pub extern \"C\" fn logos_module_set_call_caller"),
+            "{next_major}"
+        );
+        // The 0.3 and 0.5 waves survive the major bump for the same reason.
+        assert!(next_major.contains("pub extern \"C\" fn logos_module_grant_host_services"));
+        assert!(next_major.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+    }
+
+    /// The module-impl exports a scaffold DEFINES, by name. Anchored on the
+    /// definition form and nothing looser: the scaffold also emits an
+    /// `extern "Rust"` install hook (not a member of this ABI), and a looser
+    /// anchor would count a DECLARATION as a definition — which is the exact
+    /// shape of the bug this family of tests exists to catch.
+    fn defined_exports(code: &str) -> BTreeSet<String> {
+        code.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter_map(|l| l.split("pub extern \"C\" fn ").nth(1))
+            .filter_map(|rest| rest.split('(').next())
+            .map(str::to_string)
+            .filter(|n| n.starts_with("logos_module_"))
+            .collect()
+    }
+
+    // The emitter has two independent switches and BOTH rewrite the scaffold,
+    // so a missing export can hide in three of the four combinations while the
+    // default looks fine. checks.module-impl-abi asserts this against the
+    // protocol's declared list; asserting it here as well keeps the four in
+    // agreement at a protocol version the pin has not reached yet, which is
+    // precisely where this wave lives.
+    #[test]
+    fn all_four_emitter_configurations_define_the_same_exports_at_0_6() {
+        let m = parse(SAMPLE).unwrap();
+        let configs = [
+            ("default-trait,single", true, false),
+            ("default-trait,multi", true, true),
+            ("no-trait,single", false, false),
+            ("no-trait,multi", false, true),
+        ];
+        let mut sets: Vec<(&str, BTreeSet<String>)> = Vec::new();
+        for (label, emit_trait, multi) in configs {
+            let code = generate_provider_with(&m, "0.6.0", emit_trait, multi);
+            let defined = defined_exports(&code);
+            assert!(
+                defined.contains("logos_module_set_call_caller"),
+                "[{label}] does not define the 0.6 export: {defined:?}"
+            );
+            sets.push((label, defined));
+        }
+        for (label, defined) in &sets[1..] {
+            assert_eq!(
+                *defined, sets[0].1,
+                "[{label}] and [{}] disagree on the module-impl export set",
+                sets[0].0
+            );
+        }
     }
 
     #[test]
