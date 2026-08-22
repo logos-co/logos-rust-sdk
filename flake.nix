@@ -183,6 +183,15 @@
         {
           # The assertions live in tests/ipc-test.sh, shared with tests/flake.nix
           # (the CI job) so the two cannot drift.
+          #
+          # The ASSERTIONS cannot drift. The CLOSURE can, and did: this check
+          # builds its fixtures from THIS flake's logos-module-builder, the CI
+          # one from tests/flake.nix's, and when the two resolved different
+          # logos-protocol revisions this check went red — with the checked-in
+          # scaffolds defining an export the older protocol archive had no
+          # symbol for. Nothing runs this attribute, so it stayed red and
+          # invisible while CI was green. Sharing the script is not the same as
+          # sharing the environment; keep both locks pointed at one protocol.
           ipc-test = pkgs.runCommand "rust-sdk-ipc-test" {
             nativeBuildInputs = [ logoscore pkgs.bash ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
