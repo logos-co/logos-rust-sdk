@@ -1729,14 +1729,21 @@ module opt_module {
             code
         );
 
-        // Arity: only the REQUIRED prefix is demanded. `find`'s one parameter is
-        // optional, so its arm carries no guard at all — the binding follows the
-        // arm directly...
+        // Arity: only the REQUIRED prefix is DEMANDED. `find`'s one parameter is
+        // optional, so its arm carries no lower gate -- but it does carry an
+        // upper one, which is why the binding no longer follows the arm
+        // directly. "Demands nothing" and "accepts anything" are different
+        // claims, and this test used to conflate them.
+        assert!(
+            !code.contains("invalid_args(\"opt_module\", 0, args.len())"),
+            "an all-optional method must not demand arguments:\n{}",
+            code
+        );
         assert!(
             code.contains(
-                "\"find\" => {\n                let __logos_a0 = match logos_rust_sdk::args::as_opt_string(args, 0)"
+                "\"find\" => {\n                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args_max(\"opt_module\", 1, args.len())); }\n                let __logos_a0 = match logos_rust_sdk::args::as_opt_string(args, 0)"
             ),
-            "an all-optional method must not demand arguments:\n{}",
+            "an all-optional method is bounded above, then binds:\n{}",
             code
         );
         // ...while `rename` still demands its one REQUIRED parameter, and lets
@@ -1763,14 +1770,7 @@ module opt_module {
             "a trailing optional must still be bounded above:\n{}",
             code
         );
-        // `find` is all-optional: no lower gate, but still an upper one.
-        assert!(
-            code.contains(
-                "if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args_max(\"opt_module\", 1, args.len())); }"
-            ),
-            "an all-optional method is still bounded above:\n{}",
-            code
-        );
+
 
         // An optional composite that stays UNTYPED still has to reach the trait
         // as the `Option<Value>` the signature declares — `as_value_checked`
@@ -1894,7 +1894,7 @@ module v_module {
         let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
         assert!(
             code.contains(
-                "if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args(\"sample\", 0, args.len())); }"
+                "if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args(\"rust_calc\", 0, args.len())); }"
             ),
             "identity dispatch must bound its arity:\n{}",
             code
