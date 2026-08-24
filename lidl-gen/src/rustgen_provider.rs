@@ -707,6 +707,66 @@ fn teardown_block(protocol_version: &str) -> String {
 /// version decides both. Protocol-first would instead turn this repo's ABI
 /// check (and logos-cpp-sdk's, and logos-module-builder's `nm` check) red the
 /// night the bump merged.
+/// The module-impl export `logos_module_accept_inbound_token`, added at
+/// protocol 0.8.
+///
+/// THE SAME TOTAL-ABI RULE as the three blocks above, one bump later.
+/// logos-protocol only DECLARES this (cpp/logos_module_impl.h); every language
+/// backend owes the definition, and logos-cpp-sdk's cdylib emitter gains one in
+/// the same wave. The Qt glue emits a DIRECT call to it from
+/// `informModuleToken` — no dlsym, no null check — so a scaffold that omits it
+/// links clean and then fails at `dlopen()` on ELF under nixpkgs'
+/// `-Wl,-z,now`, and is invisible on macOS. That is how 0.3, 0.5 and 0.6 each
+/// shipped broken, every time at perfect version agreement.
+///
+/// WHY IT IS A SECOND DOOR RATHER THAN A FLAG ON `logos_module_accept_token`.
+/// The two carry opposite directions. `accept_token` is OUTBOUND — the module's
+/// own host-issued anchor, seeded by the glue's `onInit`, the credential this
+/// module PRESENTS. This one is a CALLER's token, named by capability_module.
+/// While there was one door the caller's token went into the outbound cache and
+/// the module then presented a peer the very token that peer had been issued;
+/// measured as a rejection plus a full extra round trip on every call of every
+/// two-way pair, forever, reported to the caller as success. A parameter would
+/// have been a value a caller can get wrong and default; a separate name either
+/// resolves or does not.
+fn accept_inbound_token_block(protocol_version: &str) -> String {
+    if !protocol_at_least(protocol_version, 0, 8) {
+        return String::new();
+    }
+    // THE BINDING IS DECLARED HERE, NOT IN THE SDK CRATE, and that is a link
+    // requirement rather than a style choice. A `pub fn` wrapper in
+    // logos-rust-sdk's api.rs shares an rlib object with save_token, which every
+    // module needs, so the linker pulls the object in and its undefined
+    // lp_token_save_inbound reference with it -- for EVERY module, including
+    // ones generated for protocol 0.7 that emit no call at all. Measured: every
+    // Rust module then died at dlopen with "undefined symbol:
+    // lp_token_save_inbound", on Linux only, macOS silently fine. Declaring it
+    // inside the gated block is what keeps landing this ahead of the protocol
+    // bump INERT, which is the property the tests below pin.
+    //
+    // Three lines of pure forwarding and no logic: the token-registry carve-out
+    // (a granted registry ALSO gets the outbound entry, because for it the same
+    // wire message means "here is X's token, present it when you call X") lives
+    // in logos-protocol, where a unit test reaches it by value. This mirrors the
+    // C++ backend, which likewise calls lp_token_save_inbound straight from
+    // emitted text.
+    //
+    // Refuses NULL, unlike set_call_caller: NULL is not a value in THIS ABI.
+    "\n\
+     extern \"C\" {\n\
+     \x20   fn lp_token_save_inbound(caller: *const c_char, token: *const c_char) -> c_int;\n\
+     }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_accept_inbound_token(caller: *const c_char, token: *const c_char) -> c_int {\n\
+     \x20   if caller.is_null() || token.is_null() { return -1; }\n\
+     \x20   // INBOUND: `caller` is the module that will CALL US. This is not a\n\
+     \x20   // credential this module may present to anyone, and it must not\n\
+     \x20   // reach lp_token_save().\n\
+     \x20   unsafe { lp_token_save_inbound(caller, token) }\n\
+     }\n"
+        .to_string()
+}
+
 fn set_call_caller_block(protocol_version: &str) -> String {
     if !protocol_at_least(protocol_version, 0, 6) {
         return String::new();
@@ -787,6 +847,35 @@ pub fn generate_provider_with(
          use std::ffi::{{c_char, c_int, c_void, CStr, CString}};\n\
          use std::sync::Mutex;\n\n",
         module.name, trait_name
+    ));
+
+    // -- identity -----------------------------------------------------------
+    //
+    // THIS MODULE'S OWN NAME, from the contract, as a compile-time constant.
+    //
+    // The Rust SDK used to announce the literal "core" as the ORIGIN of every
+    // outbound call it made — a `TokenManager::bootstrapKeys()` anchor label,
+    // not a module name. Measured: `requestModule for origin: "core"`, the
+    // target filing the minted token under "core", `currentCaller()` at the
+    // target reporting the HOST, and every derived access policy (which always
+    // lists "core" among its allowed callers) silently widened. The C++ SDK
+    // never had it: its generated umbrella bakes metadata.json#name into
+    // `logos::LpClient(target, origin)`.
+    //
+    // This is that bake. The name is not invented and not passed at runtime by
+    // the host — the module-impl C ABI carries no self-name (set_context's
+    // instance_id is a per-INSTANCE id, not the module's type name) — it is
+    // `module.name` from the same contract every other identity in this file
+    // comes from, including the derived `name()` method's literal.
+    out.push_str(&format!(
+        "/// This module's own name, from the LIDL contract.\n\
+         ///\n\
+         /// The ORIGIN of every outbound call this image makes: it is what\n\
+         /// capability_module checks against its known-caller roster and the\n\
+         /// target's access policy, what the target files the minted token\n\
+         /// under, and what a callee's `current_caller()` reports.\n\
+         pub const LOGOS_MODULE_NAME: &str = \"{}\";\n\n",
+        module.name
     ));
 
     // -- context ------------------------------------------------------------
@@ -1137,6 +1226,18 @@ __ABOUT_TO_UNLOAD_BODY__\n\
          /// point: set_context / set_emit_callback latch on full wiring;\n\
          /// dispatch passes require_emit = false as the no-event-host fallback.\n\
          fn ensure_ready(require_emit: bool) {\n\
+         \x20   // FIRST, and before the author's install hook can construct\n\
+         \x20   // anything: tell the SDK the name this image announces when it\n\
+         \x20   // calls out. Every generated path that reaches author code runs\n\
+         \x20   // through here -- install/T::default, on_context_ready, dispatch,\n\
+         \x20   // and (transitively) about_to_unload, which answers 0 unless\n\
+         \x20   // install already ran -- so the origin is set before the first\n\
+         \x20   // outbound client exists. Without a name the SDK announces\n\
+         \x20   // nothing and the capability handshake fails closed; with the\n\
+         \x20   // wrong one (\"core\") it authorized as the host. The SDK also\n\
+         \x20   // keys its client cache by origin, so even a client built before\n\
+         \x20   // this ran cannot be reused after it. Idempotent: a OnceLock set.\n\
+         \x20   logos_rust_sdk::set_module_origin(LOGOS_MODULE_NAME);\n\
          \x20   if REGISTERED.lock().unwrap().is_none() {\n\
          \x20       unsafe { __logos_install_hook::logos_module_install() };\n\
          \x20   }\n\
@@ -1223,9 +1324,15 @@ __ABOUT_TO_UNLOAD_BODY__\n\
          \x20   if module_name.is_null() || token.is_null() {{ return -1; }}\n\
          \x20   let name = unsafe {{ CStr::from_ptr(module_name) }}.to_string_lossy().into_owned();\n\
          \x20   let tok = unsafe {{ CStr::from_ptr(token) }}.to_string_lossy().into_owned();\n\
-         \x20   // The runtime handshake: hand the host-issued token to the SDK's\n\
+         \x20   // THE OUTBOUND DOOR. Hand the host-issued token to the SDK's\n\
          \x20   // protocol stack so this module's *outbound* calls authenticate —\n\
          \x20   // the same stack the typed client wrappers invoke through.\n\
+         \x20   //\n\
+         \x20   // ONE MEANING ONLY, as of protocol 0.8: the module's OWN anchor,\n\
+         \x20   // seeded by the Qt glue's onInit. A CALLER's token goes through\n\
+         \x20   // logos_module_accept_inbound_token instead. Do not merge them —\n\
+         \x20   // one value written through the wrong door made every capability\n\
+         \x20   // grant silently bidirectional.\n\
          \x20   logos_rust_sdk::save_token(&name, &tok);\n\
          \x20   TOKENS.lock().unwrap().push((name, tok));\n\
          \x20   0\n\
@@ -1249,7 +1356,11 @@ __ABOUT_TO_UNLOAD_BODY__\n\
             "{}{}{}",
             grant_host_services_block(protocol_version),
             teardown_block(protocol_version),
-            set_call_caller_block(protocol_version)
+            format!(
+                "{}{}",
+                set_call_caller_block(protocol_version),
+                accept_inbound_token_block(protocol_version)
+            )
         )
     ));
 
@@ -1402,6 +1513,107 @@ module rust_calc {
         // The 0.3 and 0.5 waves survive the major bump for the same reason.
         assert!(next_major.contains("pub extern \"C\" fn logos_module_grant_host_services"));
         assert!(next_major.contains("pub extern \"C\" fn logos_module_about_to_unload"));
+    }
+
+    // ── protocol 0.8: the INBOUND door ──────────────────────────────────
+    //
+    // The fourth time this rule is asked one bump early. The Qt glue's
+    // informModuleToken emits a DIRECT call to this export, so a scaffold that
+    // does not define it links clean and dies at dlopen() on ELF, invisibly on
+    // macOS.
+    #[test]
+    fn protocol_0_8_emits_the_inbound_token_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.8.0");
+        assert!(
+            code.contains("pub extern \"C\" fn logos_module_accept_inbound_token"),
+            "{code}"
+        );
+        // It forwards to the INBOUND lp_* entry point, not the outbound one.
+        // This is the assertion that matters: both spellings compile, link,
+        // load and return 0, and the wrong one silently makes every capability
+        // grant bidirectional.
+        assert!(code.contains("unsafe { lp_token_save_inbound(caller, token) }"), "{code}");
+        // And the binding is declared INSIDE the gated block, so no
+        // unconditional item in the SDK crate references a symbol a pre-0.8
+        // logos-protocol does not export. Without this, every Rust module --
+        // at every protocol version -- failed at dlopen on Linux with
+        // "undefined symbol: lp_token_save_inbound".
+        assert!(
+            code.contains("fn lp_token_save_inbound(caller: *const c_char, token: *const c_char) -> c_int;"),
+            "{code}"
+        );
+    }
+
+    // The OTHER half of the same claim, and the one a refactor would break:
+    // the outbound door must still exist and must still be outbound. onInit
+    // seeds the module's OWN anchor through it, and a module that lost that
+    // write could not authenticate a single call of its own.
+    #[test]
+    fn the_outbound_door_stays_outbound_at_0_8() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.8.0");
+        let body = code
+            .split("pub extern \"C\" fn logos_module_accept_token")
+            .nth(1)
+            .expect("the outbound export is emitted at every protocol version")
+            .split("\n}")
+            .next()
+            .unwrap_or("");
+        assert!(body.contains("logos_rust_sdk::save_token(&name, &tok)"), "{body}");
+        assert!(!body.contains("lp_token_save_inbound"), "{body}");
+
+        let inbound = code
+            .split("pub extern \"C\" fn logos_module_accept_inbound_token")
+            .nth(1)
+            .expect("the inbound export is emitted at 0.8")
+            .split("\n}")
+            .next()
+            .unwrap_or("");
+        assert!(!inbound.contains("save_token(&name"), "{inbound}");
+    }
+
+    // Older protocols do not declare it, so emitting it there would only move
+    // the undefined symbol to the other side of the seam — and would not
+    // compile anyway, since lp_token_save_inbound does not exist below 0.8.
+    #[test]
+    fn protocol_0_7_emits_no_inbound_token_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.7.0");
+        // Anchored on the DEFINITION form, not the bare name: the outbound
+        // export's own comment names the inbound one (that cross-reference is
+        // the point of it), and a looser anchor would count a mention as a
+        // definition — the exact shape of the bug this family exists to catch.
+        assert!(
+            !code.contains("pub extern \"C\" fn logos_module_accept_inbound_token"),
+            "{code}"
+        );
+        // And, the half that actually broke a build: no reference to the 0.8
+        // lp_* symbol survives either. A pre-0.8 logos-protocol does not export
+        // it, and an ELF module links clean and dies at dlopen.
+        assert!(!code.contains("lp_token_save_inbound"), "{code}");
+        // ...while every earlier wave is untouched. The gates are PER BLOCK,
+        // which is what makes landing this definition before the protocol bump
+        // reaches this repo's lock inert: at the current pin the scaffold is
+        // byte-identical to master's.
+        assert!(code.contains("pub extern \"C\" fn logos_module_set_call_caller"), "{code}");
+        assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"), "{code}");
+        assert!(code.contains("pub extern \"C\" fn logos_module_accept_token"), "{code}");
+    }
+
+    // MAJOR-aware, not MINOR-alone. The C++ emitter spells this as preprocessor
+    // arithmetic, where `MINOR >= 8` silently drops the export at 1.0 — taking
+    // the glue's call with it, so nothing fails to build, nothing fails to
+    // load, and every module quietly goes back to filing its callers as
+    // outbound credentials.
+    #[test]
+    fn the_0_8_gate_is_major_aware_not_minor_alone() {
+        let m = parse(SAMPLE).unwrap();
+        let next_major = generate_provider(&m, "1.0.0");
+        assert!(
+            next_major.contains("pub extern \"C\" fn logos_module_accept_inbound_token"),
+            "{next_major}"
+        );
     }
 
     /// The module-impl exports a scaffold DEFINES, by name. Anchored on the
@@ -1948,4 +2160,78 @@ module v_module {
         assert!(code.contains(r#""1.0.0".to_string()"#), "{code}");
     }
 
+
+    // ── the module's own name is what it announces when it calls out ──────────
+    //
+    // `lp_client_create(target, origin, ..)`'s ORIGIN is the caller's
+    // self-declared identity: capability_module checks it against its
+    // known-caller roster and the target's access policy, the target files the
+    // minted token under it, and a callee's `current_caller()` reports it. The
+    // Rust SDK announced the literal "core" — a bootstrapKeys() ANCHOR label,
+    // not a module name — for every Rust module ever built. MEASURED on a real
+    // fleet before this: `requestModule for origin: "core"` and
+    // `ModuleProxy: Token saved for module: "core"` at the victim.
+    //
+    // The name is not something the module-impl C ABI can hand a module at
+    // runtime (there is no self-name export, and set_context's instance_id is
+    // a per-INSTANCE id). It is a fact about the contract, so it is baked here
+    // — the same way the C++ generated umbrella bakes metadata.json#name into
+    // `logos::LpClient(target, origin)`.
+    #[test]
+    fn the_scaffold_declares_the_contracts_own_module_name() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.8.0");
+        assert!(
+            code.contains(r#"pub const LOGOS_MODULE_NAME: &str = "rust_calc";"#),
+            "the scaffold must carry the contract's own module name: {code}"
+        );
+        // Not any of the anchor labels. A module named after one would be
+        // indistinguishable from the host at every callee, which is the whole
+        // failure this closes; the contract's name is the only right answer.
+        assert!(
+            !code.contains(r#"LOGOS_MODULE_NAME: &str = "core""#),
+            "the module name must come from the contract, never from a literal"
+        );
+    }
+
+    /// The latch must be reachable BEFORE any code of the author's can run,
+    /// because that is the only code that can build an outbound client. Every
+    /// C-ABI entry point that leads to author code goes through `ensure_ready`,
+    /// so the latch belongs at its head — ahead of the install hook, which is
+    /// what constructs the author's impl (and whose `Default` may itself call
+    /// out).
+    ///
+    /// Asserted as an ORDER inside `ensure_ready`, not merely as presence:
+    /// `set_module_origin` after `logos_module_install()` would still appear in
+    /// the file, still compile, and still be wrong for the first call a module
+    /// makes from its own constructor.
+    #[test]
+    fn ensure_ready_latches_the_origin_before_the_author_install_hook() {
+        let m = parse(SAMPLE).unwrap();
+        for (label, emit_trait, multi) in [
+            ("default-trait,single", true, false),
+            ("default-trait,multi", true, true),
+            ("no-trait,single", false, false),
+            ("no-trait,multi", false, true),
+        ] {
+            let code = generate_provider_with(&m, "0.8.0", emit_trait, multi);
+            let head = code
+                .find("fn ensure_ready(require_emit: bool) {")
+                .unwrap_or_else(|| panic!("[{label}] no ensure_ready in the scaffold"));
+            let body = &code[head..];
+            let end = body.find("\nmod __logos_install_hook").unwrap_or(body.len());
+            let body = &body[..end];
+            let latch = body
+                .find("logos_rust_sdk::set_module_origin(LOGOS_MODULE_NAME);")
+                .unwrap_or_else(|| panic!("[{label}] ensure_ready does not latch the origin: {body}"));
+            let install = body
+                .find("__logos_install_hook::logos_module_install()")
+                .unwrap_or_else(|| panic!("[{label}] ensure_ready does not call the install hook"));
+            assert!(
+                latch < install,
+                "[{label}] the origin is latched AFTER the author's install hook, so an \
+                 outbound call made from the impl's constructor would announce nothing: {body}"
+            );
+        }
+    }
 }

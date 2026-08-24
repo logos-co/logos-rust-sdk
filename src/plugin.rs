@@ -98,7 +98,7 @@ impl Drop for ClientHandle {
     }
 }
 
-/// Process-global cache of ONE shared `lp_client` per target module name.
+/// Process-global cache of ONE shared `lp_client` per (origin, target) pair.
 ///
 /// Why: the protocol coalesces concurrent capability handshakes PER client, so
 /// a fan-out that opens a fresh client per call (the old `modules().dep.x()`
@@ -112,18 +112,66 @@ impl Drop for ClientHandle {
 /// when the last drops, `lp_client_destroy` fires (teardown unchanged) and a
 /// later lookup re-creates. Sharing across threads is sound by the same
 /// per-handle thread-safety contract `EventSubscription` already relies on.
-fn client_cache() -> &'static Mutex<HashMap<String, Weak<ClientHandle>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Weak<ClientHandle>>>> = OnceLock::new();
+///
+/// Keyed by (origin, target), not by target alone. The origin is latched once
+/// per image (`set_module_origin`) and in a module it is latched before any
+/// author code runs, so in practice one origin ever appears — but a client
+/// carries its origin for life, and it is the origin the capability handshake
+/// authenticates. Keying on it means a client built before the latch can never
+/// be handed back after it, under a name it does not actually announce.
+fn client_cache() -> &'static Mutex<HashMap<(String, String), Weak<ClientHandle>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), Weak<ClientHandle>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Get-or-create the shared client for `target` (origin is always "core" here).
+/// The origin every client this image creates announces — this module's own
+/// name, latched by the generated scaffold (see `api::set_module_origin`).
+///
+/// Empty when nothing declared one. Empty is the FAIL-CLOSED answer, and it is
+/// deliberately not a guess: `capability_module::requestModule` refuses an
+/// empty `fromModuleName` outright ("rejecting empty module name"), and
+/// `ModuleProxy::saveToken` refuses to file a token under an empty caller. The
+/// alternative — inventing a plausible name — is precisely the bug this
+/// replaces, because the plausible name that was invented ("core") happened to
+/// be a bootstrapKeys() anchor, and so carried the host's authority wherever
+/// the callee looked at it.
+///
+/// Warned once per process rather than per client: the cause is one missing
+/// declaration in the image, not a property of the call that tripped over it.
+fn outbound_origin() -> String {
+    match crate::api::module_origin() {
+        Some(name) => name.to_string(),
+        None => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "logos-rust-sdk: creating an outbound client with NO module origin \
+                     declared — the capability handshake will be refused. A module built \
+                     by logos-module-builder gets this from its generated scaffold; a \
+                     caller outside a plugin must call \
+                     logos_rust_sdk::set_module_origin(\"<its own module name>\") first."
+                );
+            }
+            String::new()
+        }
+    }
+}
+
+/// Get-or-create the shared client for `target`, announcing THIS module's own
+/// name as the origin.
 /// Returns None on the same failure surface as before (bad name / null client).
 fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
-    // Fast path: a live client for this target already exists.
+    // Read the origin ONCE, before the lookup, and use that same value for the
+    // key and for lp_client_create. Reading it twice could straddle the latch
+    // and publish a client under a key it was not built with.
+    let origin = outbound_origin();
+    let key = (origin.clone(), target.to_string());
+
+    // Fast path: a live client for this (origin, target) already exists.
     if let Some(existing) = {
         let map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
-        map.get(target).and_then(Weak::upgrade)
+        map.get(&key).and_then(Weak::upgrade)
     } {
         return Some(existing);
     }
@@ -140,9 +188,11 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
     // and logos-qt-sdk's LpBridge::resultClient avoid the identical hazard the
     // same way.)
     let target_c = CString::new(target).ok()?;
-    let origin = CString::new("core").unwrap();
+    // The module's OWN name. Not a literal: see api::set_module_origin for what
+    // announcing a bootstrapKeys() label instead was measured to do.
+    let origin_c = CString::new(origin.as_str()).ok()?;
     let raw = unsafe {
-        ffi::lp_client_create(target_c.as_ptr(), origin.as_ptr(), ptr::null(), ptr::null())
+        ffi::lp_client_create(target_c.as_ptr(), origin_c.as_ptr(), ptr::null(), ptr::null())
     };
     if raw.is_null() {
         return None;
@@ -155,10 +205,10 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
     // owner thread), so the "one shared client per target" invariant that makes
     // concurrent calls coalesce into a single capability handshake still holds.
     let mut map = client_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = map.get(target).and_then(Weak::upgrade) {
+    if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
         return Some(existing);
     }
-    map.insert(target.to_string(), Arc::downgrade(&handle));
+    map.insert(key, Arc::downgrade(&handle));
     Some(handle)
 }
 
@@ -291,8 +341,8 @@ pub struct PluginProxy {
 impl PluginProxy {
     pub(crate) fn new(plugin_name: impl Into<String>) -> Self {
         let plugin_name = plugin_name.into();
-        // Share ONE lp_client per target (origin "core") across all proxies for
-        // that target, so a concurrent fan-out coalesces to a single capability
+        // Share ONE lp_client per (origin, target) across all proxies for that
+        // target, so a concurrent fan-out coalesces to a single capability
         // handshake instead of racing N. See client_cache()/shared_client().
         let client = shared_client(&plugin_name);
         PluginProxy { plugin_name, client }
@@ -841,5 +891,66 @@ mod timeout_tests {
 
         let too_big = TimeoutMs::from_duration(Duration::MAX).unwrap_err().to_string();
         assert!(too_big.contains("clamped"), "{}", too_big);
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use crate::api::{module_origin, set_module_origin};
+
+    /// ONE test, deliberately, for a process-global `OnceLock`: the states are
+    /// ordered (unset → set → contested) and `cargo test` runs test functions
+    /// concurrently in a single process, so splitting them would make the
+    /// "unset" assertion race whichever test set it first. Nothing else in the
+    /// crate touches the origin, so the sequence below is the whole lifecycle.
+    ///
+    /// What this pins, and why each half matters:
+    ///
+    ///  * UNSET reads as EMPTY, not as a guess. `shared_client` hands this
+    ///    string to `lp_client_create` as the origin, and the origin is the
+    ///    identity `capability_module.requestModule` authenticates. An empty
+    ///    one is refused there by name ("rejecting empty module name") — fail
+    ///    closed. The alternative, a plausible-looking default, is the very
+    ///    defect this replaces: the default that was there was "core", a
+    ///    `TokenManager::bootstrapKeys()` anchor, so every Rust module in the
+    ///    fleet announced itself as the HOST.
+    ///
+    ///  * A REPEAT of the same name succeeds. The generated scaffold calls
+    ///    `set_module_origin` from `ensure_ready`, i.e. on every C-ABI entry
+    ///    point, so "already set to this" is the common case and must not read
+    ///    as a failure.
+    ///
+    ///  * A DIFFERENT name is refused AND does not take effect. One cdylib is
+    ///    one module; a second identity latching over the first would re-key
+    ///    every client created after it, and silently.
+    #[test]
+    fn the_origin_is_declared_once_and_never_guessed() {
+        assert_eq!(module_origin(), None, "nothing may pre-set the origin");
+        assert_eq!(
+            outbound_origin(),
+            "",
+            "an undeclared origin must be empty (fail closed), never a default name"
+        );
+
+        assert!(set_module_origin("calc_aggregator"), "first declaration");
+        assert_eq!(module_origin(), Some("calc_aggregator"));
+        assert_eq!(outbound_origin(), "calc_aggregator");
+
+        assert!(
+            set_module_origin("calc_aggregator"),
+            "re-declaring the SAME name is what the scaffold does on every entry point"
+        );
+        assert_eq!(outbound_origin(), "calc_aggregator");
+
+        assert!(
+            !set_module_origin("core"),
+            "a second, different identity must be refused"
+        );
+        assert_eq!(
+            outbound_origin(),
+            "calc_aggregator",
+            "a refused re-declaration must not take effect"
+        );
     }
 }

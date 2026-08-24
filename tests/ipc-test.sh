@@ -15,6 +15,11 @@ set -uo pipefail
 : "${out:?out must be set}"
 mkdir -p "$out"
 export QT_QPA_PLATFORM=offscreen
+# The capability handshake logs at qDebug, and section 4 below reads it. Turning
+# it on also makes the log this script cats on ANY failure worth reading — the
+# default one carries no requestModule/token traffic at all.
+export QT_LOGGING_RULES="*.debug=true;qt.remoteobjects*=false"
+export QT_FORCE_STDERR_LOGGING=1
 
 # Inline (`-c`) mode is legacy; drive a logoscore daemon and call via the
 # `call` client subcommand. A persistent daemon keeps the Qt event loop running
@@ -34,7 +39,9 @@ fail() {
   exit 1
 }
 
-logoscore -D --config-dir "$LOGOSCORE_CONFIG_DIR" -m "$MODULES_DIR" \
+# -v: without it the daemon drops the module subprocesses' own output, which is
+# where the capability handshake (section 4) is logged.
+logoscore -D -v --config-dir "$LOGOSCORE_CONFIG_DIR" -m "$MODULES_DIR" \
   >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 # `status` is the definitive readiness probe; no need to poke at the daemon's
@@ -281,6 +288,71 @@ printf '%s' "$after" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[
   || fail "call_add(5,3) broke after bounded calls — a timeout leaked: $after"
 echo "  OK  default-path call still works after bounded calls"
 
+# ──────────────────────────────────── 4. the caller announces ITS OWN NAME
+#
+# `lp_client_create(target, origin, ..)`'s ORIGIN is the caller's self-declared
+# identity, and it is load-bearing three times over: capability_module checks it
+# against its known-caller roster AND against the target's access policy, and
+# then pushes the minted token to the target NAMING IT — which is the key the
+# target files the token under, and the name a later `current_caller()` reports.
+#
+# The Rust SDK announced the literal "core" here, for every Rust module ever
+# built. "core" is not a module name: it is one of TokenManager's
+# bootstrapKeys(), the role labels a host-issued ANCHOR lives under. Measured
+# consequences, all three real — below protocol 0.8 the push landed in the
+# target's OUTBOUND namespace, which is where credentialLocked() reads, so an
+# ordinary pair token BECAME the target's own credential and its real anchor was
+# destroyed; `current_caller()` at the target reported the HOST; and every
+# derived access policy lists "core" among its allowed callers (liblogos'
+# kTrustedCallers), so the policy was silently satisfied by any Rust module.
+#
+# Read off the wire, not from a getter: what the peer was TOLD is the only thing
+# that decides any of the above. Each assertion below is written by a DIFFERENT
+# process — the caller module, then capability_module — so no single image can
+# make them all true by itself.
+echo
+echo "--- the caller's declared origin ---"
+log="$LOGOSCORE_CONFIG_DIR/daemon.log"
+
+# (a) what the caller ANNOUNCED (written by the caller module's process).
+grep -aq 'requestModule for origin: "sdk_test_caller_module"' "$log" \
+  || fail "the caller did not announce its own module name on the capability handshake"
+echo '  OK  the caller announced origin "sdk_test_caller_module"'
+
+# (b) what capability_module RECEIVED and admitted (its process). This is also
+#     the answer to "does the roster know the real name?" — requestModule fails
+#     closed on an identity it has no token for, so reaching the mint at all
+#     means liblogos registered the module under its own name at load.
+grep -aq 'requestModule called with fromModuleName: "sdk_test_caller_module"' "$log" \
+  || fail "capability_module never saw a handshake from sdk_test_caller_module"
+grep -aq "rejecting request from unknown module identity 'sdk_test_caller_module'" "$log" \
+  && fail "capability_module refused the caller's real name — the known-caller roster does not carry it"
+echo '  OK  capability_module admitted "sdk_test_caller_module" (known-caller roster carries it)'
+
+# (c) the key the TARGET was told to file the token under (capability_module's
+#     process, describing the push it made into the provider).
+grep -aq 'Successfully informed "sdk_test_provider_module" about token for "sdk_test_caller_module"' "$log" \
+  || fail "the minted token was not pushed to the provider under the caller's own name"
+echo '  OK  the provider was told to file the token under "sdk_test_caller_module"'
+
+# (d) the negative half, and the one that would have caught this: no module in
+#     this fleet may present itself under a bootstrapKeys() anchor label. Those
+#     names belong to the host, and a module wearing one authorizes as the host.
+for anchor in core capability_module; do
+  grep -aq "requestModule for origin: \"$anchor\"" "$log" \
+    && fail "a module announced the bootstrap anchor \"$anchor\" as its own identity — it authorizes as the host at every callee"
+  grep -aq "requestModule called with fromModuleName: \"$anchor\"" "$log" \
+    && fail "capability_module was handed the bootstrap anchor \"$anchor\" as a caller identity"
+done
+echo '  OK  no module announced a bootstrapKeys() anchor ("core" / "capability_module") as its identity'
+
+# (e) anti-vacuity: (a)-(d) are only evidence if a handshake ran at all. A fleet
+#     where nothing called anything satisfies every one of them.
+handshakes=$(grep -ac 'requestModule for origin:' "$log" || true)
+[ "${handshakes:-0}" -ge 1 ] \
+  || fail "no capability handshake appears in the log at all — the assertions above are vacuous"
+echo "  OK  $handshakes capability handshake(s) actually happened"
+
 {
   echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC"
   echo "Binary event passed: blobReady payload received as 4096 bytes, checksum 8354754"
@@ -291,5 +363,6 @@ echo "  OK  default-path call still works after bounded calls"
   echo "  async sleep 6000ms under 800ms -> ${async_bounded}ms, under 3000ms -> ${async_bounded2}ms"
   echo "  default path (timeout_ms <= 0) still waits the protocol's 20s: ${default_elapsed}ms"
   echo "  sub-millisecond timeout refused, not rounded into the default"
+  echo "Origin passed: the caller announced \"sdk_test_caller_module\", not a bootstrap anchor"
 } > "$out/result.txt"
 cat "$out/result.txt"

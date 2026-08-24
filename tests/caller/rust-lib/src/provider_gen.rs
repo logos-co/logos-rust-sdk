@@ -12,6 +12,14 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::Mutex;
 
+/// This module's own name, from the LIDL contract.
+///
+/// The ORIGIN of every outbound call this image makes: it is what
+/// capability_module checks against its known-caller roster and the
+/// target's access policy, what the target files the minted token
+/// under, and what a callee's `current_caller()` reports.
+pub const LOGOS_MODULE_NAME: &str = "sdk_test_caller_module";
+
 #[derive(Debug, Clone, Default)]
 pub struct RustModuleContext {
     pub module_path: String,
@@ -232,6 +240,18 @@ pub fn install<T: SdkTestCallerModule + Default>() {
 /// point: set_context / set_emit_callback latch on full wiring;
 /// dispatch passes require_emit = false as the no-event-host fallback.
 fn ensure_ready(require_emit: bool) {
+    // FIRST, and before the author's install hook can construct
+    // anything: tell the SDK the name this image announces when it
+    // calls out. Every generated path that reaches author code runs
+    // through here -- install/T::default, on_context_ready, dispatch,
+    // and (transitively) about_to_unload, which answers 0 unless
+    // install already ran -- so the origin is set before the first
+    // outbound client exists. Without a name the SDK announces
+    // nothing and the capability handshake fails closed; with the
+    // wrong one ("core") it authorized as the host. The SDK also
+    // keys its client cache by origin, so even a client built before
+    // this ran cannot be reused after it. Idempotent: a OnceLock set.
+    logos_rust_sdk::set_module_origin(LOGOS_MODULE_NAME);
     if REGISTERED.lock().unwrap().is_none() {
         unsafe { __logos_install_hook::logos_module_install() };
     }
@@ -321,9 +341,15 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
     if module_name.is_null() || token.is_null() { return -1; }
     let name = unsafe { CStr::from_ptr(module_name) }.to_string_lossy().into_owned();
     let tok = unsafe { CStr::from_ptr(token) }.to_string_lossy().into_owned();
-    // The runtime handshake: hand the host-issued token to the SDK's
+    // THE OUTBOUND DOOR. Hand the host-issued token to the SDK's
     // protocol stack so this module's *outbound* calls authenticate —
     // the same stack the typed client wrappers invoke through.
+    //
+    // ONE MEANING ONLY, as of protocol 0.8: the module's OWN anchor,
+    // seeded by the Qt glue's onInit. A CALLER's token goes through
+    // logos_module_accept_inbound_token instead. Do not merge them —
+    // one value written through the wrong door made every capability
+    // grant silently bidirectional.
     logos_rust_sdk::save_token(&name, &tok);
     TOKENS.lock().unwrap().push((name, tok));
     0
