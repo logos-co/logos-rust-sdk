@@ -104,6 +104,76 @@ impl Default for LogosModuleSDK {
     }
 }
 
+// -- module origin ----------------------------------------------------------
+//
+// THE NAME THIS MODULE ANNOUNCES WHEN IT CALLS OUT.
+//
+// `lp_client_create(target, origin, ..)` takes an origin, and that string is
+// this module's SELF-DECLARED IDENTITY on the capability handshake: the
+// protocol forwards it to `capability_module.requestModule(origin, target)`,
+// which checks it against its known-caller roster, checks it against the
+// target's access policy, and then PUSHES the minted token to the target
+// naming `origin` as the caller. The target files it under that name, and it
+// is that name a later `currentCaller()` reports.
+//
+// This crate used to pass the literal `"core"` there, for every Rust module in
+// the fleet. `"core"` is not a module name: it is one of
+// `TokenManager::bootstrapKeys()`, the role labels a host-issued ANCHOR is
+// installed under. Measured consequences of announcing it, end to end:
+//
+//   * below protocol 0.8 the target's push landed in its OUTBOUND namespace,
+//     which is exactly where `credentialLocked()` reads — so an ordinary
+//     capability-minted pair token BECAME the target's own credential, and the
+//     target's real anchor was destroyed (the host itself locked out of it);
+//   * `currentCaller()` at the target could not name the caller: the key it
+//     scans is the anchor label, which ModuleProxy read as the HOST anchor
+//     (`caller_kind=host`) until that read was tightened to Unknown. Neither
+//     answer is the module, so an identity check at the callee was decided by
+//     a name the caller made up;
+//   * every derived access policy carries `"core"` in its allowedCallers
+//     (liblogos' kTrustedCallers), so the policy was silently widened to
+//     permit any Rust module to call any target.
+//
+// The C++ SDK never had this: `logos::LpClient` takes the origin as a
+// constructor parameter and the generated umbrella bakes `metadata.json#name`
+// into it. This is the Rust equivalent of that bake. The name is known at
+// GENERATION time — it is the LIDL contract's `module.name`, the same string
+// the C++ umbrella uses — so the generated provider scaffold emits it as a
+// `const` and latches it here through `set_module_origin` before any code of
+// the author's can run.
+//
+// A process-global rather than a parameter, because the origin is a property
+// of the IMAGE, not of a call or a target: one cdylib is one module, and the
+// hand-written `LogosModuleSDK::new().plugin(dep)` form (which real modules
+// use beside `modules().<dep>`) has nowhere to put a parameter.
+static MODULE_ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Declare the name this module announces as the origin of its outbound calls.
+///
+/// Called by the generated provider scaffold with the contract's own module
+/// name, from every C-ABI entry point that can precede author code — so by the
+/// time a module builds its first client the origin is already set. A module
+/// authored without the scaffold (a Rust binary calling in from outside a
+/// plugin, over `lib.callerBuildSupport`) must call this itself.
+///
+/// SET ONCE. Returns `true` if this call established the origin or repeated the
+/// value already set; `false` if a DIFFERENT name was already latched, which is
+/// refused — a second identity in one image would silently re-key every client
+/// created after it. Repeating the same name is the normal case: the scaffold
+/// calls this on every entry point.
+pub fn set_module_origin(name: &str) -> bool {
+    match MODULE_ORIGIN.set(name.to_string()) {
+        Ok(()) => true,
+        Err(_) => MODULE_ORIGIN.get().map(String::as_str) == Some(name),
+    }
+}
+
+/// The name this module announces as the origin of its outbound calls, or
+/// `None` when nothing has declared one.
+pub fn module_origin() -> Option<&'static str> {
+    MODULE_ORIGIN.get().map(String::as_str)
+}
+
 // -- teardown ---------------------------------------------------------------
 //
 // The module-impl C ABI gained two teardown exports in logos-protocol 0.5

@@ -77,6 +77,20 @@ extern "C" {
 
     pub fn lp_token_save(module_name: *const c_char, token: *const c_char) -> c_int;
 
+    // THE INBOUND DOOR (logos-protocol 0.8, lp_token_save_inbound) is
+    // DELIBERATELY NOT DECLARED HERE. It is declared inside the generated
+    // provider scaffold, under the same 0.8 gate as the export that calls it --
+    // see lidl-gen's accept_inbound_token_block.
+    //
+    // The reason is a link requirement, not taste. A wrapper in api.rs sits in
+    // the same rlib object as save_token, which every module needs, so the
+    // linker pulls the object in and the undefined lp_token_save_inbound
+    // reference with it -- for EVERY module, including ones generated for
+    // protocol 0.7 that emit no call at all. Measured: every Rust module died
+    // at dlopen with "undefined symbol: lp_token_save_inbound", on Linux only.
+    // Keeping the binding inside the gated block is what makes landing this
+    // ahead of the protocol bump inert.
+
     pub fn lp_subscribe(
         client: *mut LpClient,
         event_name: *const c_char,

@@ -173,6 +173,33 @@ identity later copies it at the top. Requires **logos-protocol 0.6**: the host p
 across `logos_module_set_call_caller`, which the generated scaffold only exports at >= 0.6. Built
 against an older protocol the accessor exists and answers `Unknown`.
 
+### Who you are — the announced origin
+
+The mirror of `current_caller()`, from the other side. Every outbound call this module makes
+carries an **origin**: the name it declares itself to be. `capability_module` checks that name
+against its known-caller roster and against the target's access policy, then pushes the minted
+token to the target *naming it* — so the origin is the key the target files the token under, and
+the name the target's `current_caller()` reports.
+
+You do not set it. The generated scaffold carries your contract's own module name as
+`LOGOS_MODULE_NAME` and declares it to the SDK from every C-ABI entry point, before any of your
+code runs — the same fact the C++ generated umbrella bakes into `logos::LpClient(target, origin)`.
+
+It matters that the name is real. `"core"` and `"capability_module"` are not module names: they
+are `TokenManager::bootstrapKeys()` role labels, the keys a **host-issued anchor** lives under. A
+module announcing one of them authorizes as the host at every callee, and satisfies every derived
+access policy (which always lists `"core"` among its allowed callers).
+
+Only a caller **outside** a module plugin — a Rust binary linking `liblogos_protocol` through
+`lib.callerBuildSupport`, with no generated scaffold — has to declare its own:
+
+```rust
+logos_rust_sdk::set_module_origin("my_tool");   // before the first call
+```
+
+Set once per process; a second, different name is refused. With none declared the origin is empty,
+which the capability handshake rejects by name — fail closed, never a borrowed identity.
+
 ## Supporting types
 
 The handful of SDK types that surface directly in module code:
