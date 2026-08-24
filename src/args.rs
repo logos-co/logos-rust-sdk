@@ -255,6 +255,20 @@ pub fn invalid_args(origin: &str, expected: usize, got: usize) -> Value {
     })
 }
 
+/// The same malformed-call report, for a method whose accepted arity is a RANGE
+/// because it declares trailing optional parameters. Kept separate from
+/// `invalid_args` rather than folded into it so the message states the bound it
+/// actually enforced: claiming an exact count a method does not require would be
+/// wrong in the other direction. Mirrors the C++ generated glue, which picks
+/// between the two spellings on the same condition.
+pub fn invalid_args_max(origin: &str, max: usize, got: usize) -> Value {
+    serde_json::json!({
+        "code": "invalid_args",
+        "message": format!("expected at most {} arguments, got {}", max, got),
+        "origin": origin,
+    })
+}
+
 /// The canonical structured error a failed dispatch returns, matching the object
 /// C++ generated glue emits.
 pub fn dispatch_failed(origin: &str, message: &str) -> Value {

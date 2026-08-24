@@ -1007,9 +1007,19 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         // metadata.json, so the reported value cannot drift from the built one.
         if m.derived {
             if let Some(literal) = identity_literal(module, &m.name) {
+                // This arm returns before the ordinary dispatch path, so it
+                // needs its own arity gate -- it does not inherit the one
+                // below. Without it `version("junk")` dropped the argument and
+                // answered the declared literal with status ok: a
+                // correct-looking reply to a call that should have been
+                // refused, and worse than answering nothing, because the
+                // caller cannot tell it was talking to the wrong contract.
+                // An identity method declares no parameters, so any argument
+                // at all is an overflow.
                 out.push_str(&format!(
-                    "            \"{}\" => {{\n                     \x20               let result = {:?}.to_string();\n                     \x20               Some({})\n                     \x20           }}\n",
+                    "            \"{}\" => {{\n                     \x20               if !args.is_empty() {{ return Some(logos_rust_sdk::args::invalid_args({:?}, 0, args.len())); }}\n                     \x20               let result = {:?}.to_string();\n                     \x20               Some({})\n                     \x20           }}\n",
                     m.name,
+                    module.name,
                     literal,
                     ret_to_json(&m.return_type, "result", &recs)
                 ));
@@ -1063,9 +1073,9 @@ __ABOUT_TO_UNLOAD_BODY__\n\
             idents.push(ident);
         }
         let args: Vec<String> = idents;
-        // Only guard the arg count when the method actually takes parameters —
-        // `if args.len() < 0` is a dead check on a zero-arg method.
-        let guard = if n > 0 {
+        // Only guard the LOWER bound when the method actually takes required
+        // parameters — `if args.len() < 0` is a dead check on a zero-arg method.
+        let mut guard = if n > 0 {
             format!(
                 "                if args.len() < {} {{ return Some(logos_rust_sdk::args::invalid_args(\"{}\", {}, args.len())); }}\n",
                 n, module.name, n
@@ -1073,6 +1083,29 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         } else {
             String::new()
         };
+        // The UPPER bound has no such exemption and is emitted unconditionally,
+        // zero-parameter methods included: nothing bounded this direction, so
+        // an extra argument was silently dropped and the call succeeded. Arity
+        // is the one part of a contract a caller cannot check for itself.
+        //
+        // The bound is the DECLARED parameter count, not the required one, or
+        // supplying a trailing optional would be rejected as an overflow. When
+        // the two coincide the message states the exact count; when they differ
+        // it says `at most`, because claiming an exact count the method does not
+        // require would be wrong in the other direction. The C++ generated glue
+        // chooses between the same two spellings on the same condition.
+        let max = m.params.len();
+        guard.push_str(&if n == max {
+            format!(
+                "                if args.len() > {} {{ return Some(logos_rust_sdk::args::invalid_args(\"{}\", {}, args.len())); }}\n",
+                max, module.name, max
+            )
+        } else {
+            format!(
+                "                if args.len() > {} {{ return Some(logos_rust_sdk::args::invalid_args_max(\"{}\", {}, args.len())); }}\n",
+                max, module.name, max
+            )
+        });
         out.push_str(&format!(
             "            \"{}\" => {{\n\
              {}\
@@ -1720,6 +1753,24 @@ module opt_module {
             "a trailing optional must not count toward the minimum arity:\n{}",
             code
         );
+        // The optional widens the UPPER bound to the declared count, so passing
+        // it is accepted and passing one more is not. `at most` because the two
+        // bounds differ here.
+        assert!(
+            code.contains(
+                "if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args_max(\"opt_module\", 2, args.len())); }"
+            ),
+            "a trailing optional must still be bounded above:\n{}",
+            code
+        );
+        // `find` is all-optional: no lower gate, but still an upper one.
+        assert!(
+            code.contains(
+                "if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args_max(\"opt_module\", 1, args.len())); }"
+            ),
+            "an all-optional method is still bounded above:\n{}",
+            code
+        );
 
         // An optional composite that stays UNTYPED still has to reach the trait
         // as the `Option<Value>` the signature declares — `as_value_checked`
@@ -1833,6 +1884,37 @@ module v_module {
         assert!(!code.contains("fn name(&mut self) -> String;"), "{code}");
         assert!(!code.contains("fn version(&mut self) -> String;"), "{code}");
         assert!(code.contains("fn greet("), "{code}");
+    }
+
+    #[test]
+    fn identity_methods_reject_extra_arguments() {
+        // The identity arm returns before the ordinary dispatch path and so does
+        // not inherit its gate. Until this landed, `version("junk")` dropped the
+        // argument and answered the declared literal with status ok.
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+        assert!(
+            code.contains(
+                "if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args(\"sample\", 0, args.len())); }"
+            ),
+            "identity dispatch must bound its arity:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn zero_parameter_method_rejects_extra_arguments() {
+        // Not the lower bound with n = 0 -- that arm is skipped as dead. This is
+        // the arm that had no gate at all.
+        let m = parse("module z { method ping() -> tstr }").expect("parse");
+        let code = generate_provider(&m, "0.1.0");
+        assert!(
+            code.contains(
+                "if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args(\"z\", 0, args.len())); }"
+            ),
+            "a zero-parameter method must still reject arguments:\n{}",
+            code
+        );
+        assert!(!code.contains("args.len() < 0"), "dead lower gate:\n{}", code);
     }
 
     #[test]
