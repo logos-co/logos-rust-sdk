@@ -29,6 +29,27 @@ pub type LpResultCb = extern "C" fn(ok: c_int, json: *const c_char, user_data: *
 pub type LpEventCb =
     extern "C" fn(event_name: *const c_char, data_json: *const c_char, user_data: *mut c_void);
 
+/// Subscription status callback for `lp_client_set_subscription_status_cb`
+/// (logos-protocol 0.9+). Reports the TARGET MODULE's transitions, not one
+/// subscription's: every subscription through a client shares the provider's
+/// single handle, so they are lost and re-established together.
+///
+/// `reason` is a lowercase snake_case code on LOST/HELD/ABANDONED, NULL on ARMED.
+pub type LpSubStatusCb = extern "C" fn(
+    state: c_int,
+    generation: u64,
+    reason: *const c_char,
+    user_data: *mut c_void,
+);
+
+/// Subscription status codes carried by [`LpSubStatusCb`].
+pub const LP_SUB_ARMED: c_int = 1;
+pub const LP_SUB_LOST: c_int = 2;
+pub const LP_SUB_ABANDONED: c_int = 3;
+/// The provider went away AND the target's restart policy is manual, so nothing
+/// will re-arm itself. Delivered INSTEAD OF `LP_SUB_LOST`.
+pub const LP_SUB_HELD: c_int = 4;
+
 pub const LP_OK: c_int = 0;
 
 extern "C" {
@@ -98,6 +119,33 @@ extern "C" {
         user_data: *mut c_void,
     ) -> *mut LpSubscription;
     pub fn lp_unsubscribe(sub: *mut LpSubscription);
+
+    // 0.9+ / 0.10+.
+    //
+    // DECLARING these is free — an unused `extern "C"` declaration emits no
+    // symbol reference. It is a CALL SITE inside this crate that stamps an
+    // unconditional undefined symbol into every Rust module's staticlib,
+    // whether or not that module uses the feature. Measured: a shipped
+    // libkeystore_module.a has undefined `_lp_subscribe` but NOT
+    // `_lp_get_methods`, which is declared here and called by nothing.
+    //
+    // So the declarations are unconditional and the CALL SITES are gated —
+    // see PluginProxy's subscription-state methods. Rust does not check a
+    // hand-written declaration
+    // against the real symbol, which is also why logos-protocol only ever ADDS
+    // functions here rather than changing one: a stale arity would link against
+    // the same name and mis-call it with no diagnostic anywhere.
+    pub fn lp_client_set_subscription_status_cb(
+        client: *mut LpClient,
+        status_cb: Option<LpSubStatusCb>,
+        user_data: *mut c_void,
+    ) -> c_int;
+    pub fn lp_client_set_subscription_options(
+        client: *mut LpClient,
+        options_json: *const c_char,
+    ) -> c_int;
+    pub fn lp_client_subscription_generation(client: *mut LpClient) -> u64;
+    pub fn lp_client_rearm_subscriptions(client: *mut LpClient) -> c_int;
 
     pub fn lp_get_methods(client: *mut LpClient) -> *mut c_char;
 }

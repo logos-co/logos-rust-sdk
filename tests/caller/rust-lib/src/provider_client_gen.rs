@@ -2,7 +2,7 @@
 //
 // Typed caller + event subscribers over logos_rust_sdk's lp_* consumer.
 
-use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy};
+use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy, RestartPolicy, SubStatus};
 
 pub struct SdkTestProviderModuleClient {
     proxy: PluginProxy,
@@ -210,6 +210,162 @@ impl SdkTestProviderModuleClient {
         self.proxy.call_json_async_with_timeout("sleep", &args, timeout, move |result| {
             callback(result.and_then(|value| value.as_i64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected int, got {}", value)))));
         });
+    }
+
+    /// The module's name, as declared in its metadata.
+    pub fn name(&self) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json("name", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::name`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::name`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn name_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("name", &args, timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Async twin of [`Self::name`]: fire the call and receive the typed
+    /// result in `callback` once it lands — the Rust analog of the C++
+    /// client's `nameAsync`. The callback runs from the protocol
+    /// completion path (the module's Qt event loop), so it fires after
+    /// the current method returns, never inline.
+    pub fn name_async<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async("name", &args, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// [`Self::name_async`] with a per-call timeout — the async half of
+    /// [`Self::name_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::name_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn name_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("name", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// The module's version, as declared in its metadata.
+    pub fn version(&self) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json("version", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::version`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::version`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn version_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("version", &args, timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Async twin of [`Self::version`]: fire the call and receive the typed
+    /// result in `callback` once it lands — the Rust analog of the C++
+    /// client's `versionAsync`. The callback runs from the protocol
+    /// completion path (the module's Qt event loop), so it fires after
+    /// the current method returns, never inline.
+    pub fn version_async<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async("version", &args, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// [`Self::version_async`] with a per-call timeout — the async half of
+    /// [`Self::version_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::version_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn version_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("version", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// Watch this module's subscription transitions: `Armed` / `Lost` /
+    /// `Held` / `Abandoned`, with the establishment number. `Lost` followed
+    /// by `Armed` at a higher generation is the unrecoverable-gap marker.
+    ///
+    /// Per MODULE, not per event: every subscription here shares the
+    /// provider's single handle, so they are lost and restored together.
+    pub fn on_subscription_status<F>(&mut self, f: F) -> Result<(), LogosError>
+    where
+        F: Fn(SubStatus, u64) + Send + Sync + 'static,
+    {
+        self.proxy.on_subscription_status(f)
+    }
+
+    /// 0 = never armed, 1 = the first establishment, N+1 after each one.
+    pub fn subscription_generation(&mut self) -> u64 {
+        self.proxy.subscription_generation()
+    }
+
+    /// `Manual` means "do not RE-arm after a loss", never "do not arm".
+    pub fn set_restart_policy(&mut self, policy: RestartPolicy) -> Result<(), LogosError> {
+        self.proxy.set_restart_policy(policy)
+    }
+
+    /// Revive held subscriptions. Safe from inside the status callback.
+    pub fn rearm_subscriptions(&mut self) -> bool {
+        self.proxy.rearm_subscriptions()
     }
 
     /// Subscribe to the `blobReady` event. Payload arrives as a JSON array of [seq: int, payload: bstr];

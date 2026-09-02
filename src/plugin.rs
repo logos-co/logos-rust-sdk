@@ -87,13 +87,28 @@ impl TimeoutMs {
 /// when the LAST owner drops — the proxy itself or any live subscription.
 /// lp_* handles are thread-safe per-handle (the logos_protocol.h threading
 /// contract), so sharing the raw handle across threads is sound.
-struct ClientHandle(*mut ffi::LpClient);
+struct ClientHandle {
+    client: *mut ffi::LpClient,
+    /// The target's subscription-status watcher, installed at most once per
+    /// client. It lives HERE rather than in a per-subscription box because the
+    /// C ABI reports these edges per target: this handle is shared by every
+    /// subscription to the module, and so is the callback.
+    ///
+    /// It is also what the trampoline's `user_data` points at — the Arc keeps
+    /// the allocation alive for exactly as long as the client it destroys in
+    /// `Drop`, so the pointer cannot outlive what reads it.
+    /// `Arc` rather than `Box` so the trampoline can CLONE it out of the lock
+    /// and call it with the mutex released — a watcher's obvious move on `Held`
+    /// is `rearm_subscriptions()`, and holding the lock across that would
+    /// deadlock against a concurrent installer.
+    status: Mutex<Option<Arc<dyn Fn(SubStatus, u64) + Send + Sync + 'static>>>,
+}
 unsafe impl Send for ClientHandle {}
 unsafe impl Sync for ClientHandle {}
 impl Drop for ClientHandle {
     fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { ffi::lp_client_destroy(self.0) };
+        if !self.client.is_null() {
+            unsafe { ffi::lp_client_destroy(self.client) };
         }
     }
 }
@@ -197,7 +212,7 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
     if raw.is_null() {
         return None;
     }
-    let handle = Arc::new(ClientHandle(raw));
+    let handle = Arc::new(ClientHandle { client: raw, status: Mutex::new(None) });
 
     // Publish under the lock, re-checking: two threads may have raced through
     // the gap above. The loser drops its handle, which destroys its own client
@@ -236,6 +251,130 @@ pub struct EventSubscription {
 // the callback box is only read by the lp trampoline.
 unsafe impl Send for EventSubscription {}
 
+/// One line per missing capability per process, not per call: a module
+/// configuring forty deps against an old runtime should say so once.
+fn warn_once_no_restart() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "logos: set_restart_policy: this runtime is logos-protocol {}, which has no \
+             per-module subscription restart policy (needs 0.9). Subscriptions are live, but \
+             RestartPolicy::Manual is NOT in effect.",
+            crate::api::protocol_version()
+        );
+    });
+}
+
+fn warn_once_no_status() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "logos: on_subscription_status: this runtime is logos-protocol {}, which has no \
+             per-module subscription status channel (needs 0.9). Subscriptions are live, but \
+             the watcher will NOT fire.",
+            crate::api::protocol_version()
+        );
+    });
+}
+
+/// Is the LINKED logos-protocol at least `major.minor`?
+///
+/// Runtime rather than compile-time, and deliberately so: the version comes
+/// from `lp_protocol_version()` in the protocol library this module is actually
+/// linked against, so a feature guarded on it cannot disagree with the runtime
+/// the way a build-time `--cfg` can.
+///
+/// Note what this does NOT do: it does not make a call site safe to LINK. An
+/// unused `extern "C"` declaration is free, but a call site stamps an
+/// unconditional undefined symbol into every module's staticlib. Guarding a
+/// call in an `if` does not remove that reference — the SDK and the protocol
+/// travel in one nix closure, which is what actually guarantees the symbol is
+/// there. This guard is about SEMANTICS: answering 0/false rather than calling
+/// into a runtime whose answer would be meaningless.
+fn protocol_at_least(major: u32, minor: u32) -> bool {
+    let v = crate::api::protocol_version();
+    let mut it = v.split('.');
+    let have_major: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let have_minor: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    (have_major, have_minor) >= (major, minor)
+}
+
+/// What happened to a TARGET MODULE's subscriptions, as reported by
+/// [`PluginProxy::on_subscription_status`].
+///
+/// Per module, not per subscription: every subscription to a module shares the
+/// provider's single handle, so they are lost and re-established together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SubStatus {
+    /// Live. `generation` identifies THIS arming.
+    Armed,
+    /// The provider became unreachable. Events until the next `Armed` are
+    /// gone. Not terminal — the SDK re-arms.
+    Lost,
+    /// Terminal; it will never fire again.
+    Abandoned,
+    /// The provider became unreachable AND the target's policy is
+    /// [`RestartPolicy::Manual`], so nothing will re-arm itself. Delivered
+    /// INSTEAD OF `Lost`, never alongside it. Revive with
+    /// [`PluginProxy::rearm_subscriptions`].
+    Held,
+}
+
+/// What the runtime does when a target's ARMED subscriptions lose their
+/// provider. Set per module with [`PluginProxy::set_restart_policy`].
+///
+/// `Manual` means "do not RE-arm after a loss" and never "do not arm the first
+/// time": a subscription taken before its provider is reachable is deferred and
+/// armed under either policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RestartPolicy {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+pub(crate) extern "C" fn status_trampoline(
+    state: std::os::raw::c_int,
+    generation: u64,
+    _reason: *const std::os::raw::c_char,
+    user_data: *mut std::os::raw::c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    // An UNKNOWN code is DROPPED, never coerced. A newer protocol can add a
+    // status this build has no name for, and reporting it as Armed -- the
+    // numerically-first value -- would tell a subscriber its subscription is
+    // live at the one moment that might not be true.
+    let status = match state {
+        ffi::LP_SUB_ARMED => SubStatus::Armed,
+        ffi::LP_SUB_LOST => SubStatus::Lost,
+        ffi::LP_SUB_ABANDONED => SubStatus::Abandoned,
+        ffi::LP_SUB_HELD => SubStatus::Held,
+        _ => return,
+    };
+    // The CLIENT handle, not a per-subscription box: this callback is installed
+    // per target and outlives every individual subscription through it.
+    //
+    // Safety: `user_data` is `Arc::as_ptr` of the ClientHandle that owns the
+    // client this edge came from. `Drop` calls `lp_client_destroy` — after
+    // which the C side fires nothing — before the allocation is released, so
+    // the pointer cannot outlive what reads it.
+    let handle = unsafe { &*(user_data as *const ClientHandle) };
+    let cb = handle
+        .status
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(Arc::clone));
+    if let Some(f) = cb {
+        f(status, generation);
+    }
+}
+
 impl EventSubscription {
     /// Block until the next event arrives (or the subscription dies).
     pub fn recv(&self) -> Result<EventData, std::sync::mpsc::RecvError> {
@@ -251,6 +390,7 @@ impl EventSubscription {
     pub fn receiver(&self) -> &Receiver<EventData> {
         &self.rx
     }
+
 }
 
 /// Blocking iteration: `for ev in subscription { ... }` yields each event as
@@ -354,7 +494,7 @@ impl PluginProxy {
 
     fn client(&self) -> Result<*mut ffi::LpClient, LogosError> {
         match &self.client {
-            Some(handle) => Ok(handle.0),
+            Some(handle) => Ok(handle.client),
             None => Err(LogosError::Other(format!(
                 "Failed to create protocol client for {}",
                 self.plugin_name
@@ -761,7 +901,7 @@ impl PluginProxy {
         let user_data = Box::into_raw(state) as *mut c_void;
         unsafe {
             ffi::lp_invoke_async(
-                client_handle.0,
+                client_handle.client,
                 method_c.as_ptr(),
                 args_c.as_ptr(),
                 timeout,
@@ -793,7 +933,7 @@ impl PluginProxy {
         let user_data = event_callback_ptr(&callback_data);
 
         let sub =
-            unsafe { ffi::lp_subscribe(client_handle.0, event_c.as_ptr(), callback, user_data) };
+            unsafe { ffi::lp_subscribe(client_handle.client, event_c.as_ptr(), callback, user_data) };
         if sub.is_null() {
             return Err(LogosError::EventListenerFailed {
                 plugin: self.plugin_name.clone(),
@@ -808,6 +948,122 @@ impl PluginProxy {
             _callback: callback_data,
             _client: client_handle,
         })
+    }
+
+    /// Watch this TARGET MODULE's subscription transitions.
+    ///
+    /// Per module, not per subscription: every subscription through this proxy
+    /// shares the provider's single handle, so they are lost and re-established
+    /// together. A per-subscription watcher would have reported one event once
+    /// per subscription.
+    ///
+    /// The pair worth watching for is `Lost` -> `Armed` with a HIGHER
+    /// generation: the provider restarted, so every subscription is new and
+    /// everything emitted in between is unrecoverable. Under
+    /// [`RestartPolicy::Manual`] you get `Held` instead and it stays down until
+    /// [`PluginProxy::rearm_subscriptions`].
+    ///
+    /// Installable before the first [`PluginProxy::on`], and replays the
+    /// current state, so there is no order in which the arm can be missed.
+    ///
+    /// Warns once against a runtime older than logos-protocol 0.9 rather than
+    /// degrading silently.
+    pub fn on_subscription_status<F>(&mut self, f: F) -> Result<(), LogosError>
+    where
+        F: Fn(SubStatus, u64) + Send + Sync + 'static,
+    {
+        let handle = match &self.client {
+            Some(h) => Arc::clone(h),
+            None => {
+                return Err(LogosError::Other(format!(
+                    "Failed to create protocol client for {}",
+                    self.plugin_name
+                )))
+            }
+        };
+        if !protocol_at_least(0, 9) {
+            warn_once_no_status();
+            return Ok(());
+        }
+        {
+            let mut guard = handle
+                .status
+                .lock()
+                .map_err(|_| LogosError::Other("subscription status lock poisoned".into()))?;
+            *guard = Some(Arc::new(f));
+        }
+        // `Arc::as_ptr`, so the trampoline reads the same allocation the client
+        // is destroyed from. Installed AFTER the closure is in place: the C
+        // side replays the current state synchronously from inside this call.
+        let user_data = Arc::as_ptr(&handle) as *mut std::os::raw::c_void;
+        unsafe {
+            ffi::lp_client_set_subscription_status_cb(
+                handle.client,
+                Some(status_trampoline as ffi::LpSubStatusCb),
+                user_data,
+            );
+        }
+        Ok(())
+    }
+
+    /// Which establishment this module is on: 0 = never armed, 1 = the first,
+    /// N+1 after each re-establishment.
+    ///
+    /// Reading this beside each received event and seeing it change IS the gap
+    /// detector — no status callback required. Events emitted while it was down
+    /// reached nobody and cannot be recovered.
+    ///
+    /// Returns 0 against a runtime older than logos-protocol 0.9.
+    pub fn subscription_generation(&mut self) -> u64 {
+        if !protocol_at_least(0, 9) {
+            return 0;
+        }
+        match self.client() {
+            Ok(c) => unsafe { ffi::lp_client_subscription_generation(c) },
+            Err(_) => 0,
+        }
+    }
+
+    /// What happens to this module's subscriptions when its provider goes away.
+    ///
+    /// `Manual` means "do not RE-arm after a loss", never "do not arm the first
+    /// time" — a subscription taken before the provider is reachable is
+    /// deferred and armed under either policy.
+    ///
+    /// Warns once against a runtime older than logos-protocol 0.9.
+    pub fn set_restart_policy(&mut self, policy: RestartPolicy) -> Result<(), LogosError> {
+        if !protocol_at_least(0, 9) {
+            if policy == RestartPolicy::Manual {
+                warn_once_no_restart();
+            }
+            return Ok(());
+        }
+        let c = self.client()?;
+        let json = match policy {
+            RestartPolicy::Manual => CString::new(r#"{"restart":"manual"}"#)?,
+            _ => CString::new(r#"{"restart":"automatic"}"#)?,
+        };
+        unsafe { ffi::lp_client_set_subscription_options(c, json.as_ptr()) };
+        Ok(())
+    }
+
+    /// Revive this module's held subscriptions.
+    ///
+    /// Safe to call from inside the status callback: the ABI posts the revive
+    /// to the client's owner thread rather than marshalling it synchronously,
+    /// which is what keeps it from inverting against the delivery guard.
+    ///
+    /// Answers "accepted", not "re-armed" — watch for `Armed` at a higher
+    /// generation for that. False if nothing is held, or against a runtime
+    /// older than logos-protocol 0.9.
+    pub fn rearm_subscriptions(&mut self) -> bool {
+        if !protocol_at_least(0, 9) {
+            return false;
+        }
+        match self.client() {
+            Ok(c) => unsafe { ffi::lp_client_rearm_subscriptions(c) != 0 },
+            Err(_) => false,
+        }
     }
 }
 
