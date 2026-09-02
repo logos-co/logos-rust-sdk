@@ -11,19 +11,49 @@
       url = "github:logos-co/logos-lidl";
       inputs.logos-nix.follows = "logos-nix";
     };
-    # The SDK's FFI binds the lp_* C ABI. Out-of-plugin callers link it from
-    # logos-protocol's shared library (liblogos_protocol.{so,dylib}); the pin
-    # is reached via logos-module-builder.inputs.logos-protocol below so the
-    # lp_* ABI matches what the cdylib modules embed.
     # Test-only: module builder + logoscore drive the integration test suite.
-    logos-module-builder.url = "github:logos-co/logos-module-builder";
+    #
+    # THE follows IS LOAD-BEARING, and its absence was a real bug. mkLogosModule
+    # builds the ipc-test's fixture modules, so without it the closure carries
+    # TWO protocols: the SDK crate compiles against the direct pin below while
+    # the fixtures embed module-builder's own, older one. The FFI's extern "C"
+    # declarations are unconditional, so a call the fixture inherits from this
+    # crate resolves against whichever protocol is loaded — and when that is the
+    # older one, the module dies at dlopen with an undefined symbol.
+    #
+    # It failed on LINUX ONLY, which is why it survived review: macOS binds
+    # two-level, so each image reaches the protocol it was linked against and
+    # the mismatch stays invisible. Linux resolves against the flat global
+    # namespace, gets the host's older protocol, and refuses to load.
+    logos-module-builder = {
+      url = "github:logos-co/logos-module-builder";
+      inputs.logos-protocol.follows = "logos-protocol";
+    };
+    # NOT given a logos-protocol follows, and the reason is worth recording
+    # because it looks like an obvious omission.
+    #
+    # logoscore is the HOST that dlopens the fixture modules, and on Linux a
+    # plugin's undefined symbols resolve against the HOST's protocol, not
+    # against whatever the module was linked with — so pointing it here does
+    # fix the "undefined symbol: lp_client_rearm_subscriptions" load failure,
+    # and it was measured doing so.
+    #
+    # But it trades that for a worse one. TokenManager's layout is cross-package
+    # ABI: the host allocates it and modules mutate it. Moving logoscore onto a
+    # protocol its own BUNDLED capability_module was not built against splits
+    # the token store, and every call comes back "rejecting unauthorized call —
+    # auth token not recognized". A symbol error at least names itself.
+    #
+    # The logoscore stack has to move as a unit, which is upstream propagation
+    # (logos-logoscore-cli and logos-module-builder relocking onto the 0.9
+    # revision), not something a follows here can express.
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
-    # DIRECT pin, deliberately not the transitive
-    # logos-module-builder.inputs.logos-protocol: that one resolves to protocol
-    # 0.2.0, which declares only the seven founding module-impl exports. A check
-    # reading it could not see a missing grant_host_services (0.3) or teardown
-    # pair (0.5) — it would be structurally incapable of failing. See
-    # checks.module-impl-abi below.
+    # A DIRECT pin rather than taking module-builder's: that one lags, and
+    # checks.module-impl-abi reads this to decide how many module-impl exports
+    # must exist. Against a stale protocol the check is structurally incapable
+    # of failing — it could not see a missing grant_host_services (0.3) or
+    # teardown pair (0.5). The follows above now points module-builder AT this
+    # pin, so both intents hold at once: one protocol, and a current one.
     logos-protocol = {
       url = "github:logos-co/logos-protocol";
       inputs.logos-nix.follows = "logos-nix";
