@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -102,6 +103,20 @@ struct ClientHandle {
     /// is `rearm_subscriptions()`, and holding the lock across that would
     /// deadlock against a concurrent installer.
     status: Mutex<Option<Arc<dyn Fn(SubStatus, u64) + Send + Sync + 'static>>>,
+    /// Set once this target reports `Abandoned` — terminal, per the protocol:
+    /// the registry has dropped every subscription to the module and nothing
+    /// revives them (`abandon()` removes the entries; `rearm()` only scans the
+    /// held set).
+    ///
+    /// It exists because a dead subscription could not otherwise wake its
+    /// reader. `EventSubscription` owns the `Sender` that feeds its own
+    /// `Receiver`, so `recv()` can never return `Err` while the subscription is
+    /// alive — a `for ev in sub` loop owns the only sender and therefore never
+    /// ends. Both halves of that are load-bearing bugs: the listener parks
+    /// forever after the provider is gone, AND any cleanup written after the
+    /// loop is unreachable, so a test asserting that cleanup runs passes
+    /// against broken code.
+    abandoned: AtomicBool,
 }
 unsafe impl Send for ClientHandle {}
 unsafe impl Sync for ClientHandle {}
@@ -212,7 +227,18 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
     if raw.is_null() {
         return None;
     }
-    let handle = Arc::new(ClientHandle { client: raw, status: Mutex::new(None) });
+    let handle = Arc::new(ClientHandle {
+        client: raw,
+        status: Mutex::new(None),
+        abandoned: AtomicBool::new(false),
+    });
+
+    // Installed UNCONDITIONALLY, not when a caller asks for a status callback.
+    // The terminal flag has to be maintained for every client or a consumer
+    // that never adopts on_subscription_status still gets a listener that parks
+    // forever. Mirrors how logos-protocol installs its generation mirror at
+    // lp_client_create for exactly the same reason.
+    install_status_trampoline(&handle);
 
     // Publish under the lock, re-checking: two threads may have raced through
     // the gap above. The loser drops its handle, which destroys its own client
@@ -226,6 +252,16 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
     map.insert(key, Arc::downgrade(&handle));
     Some(handle)
 }
+
+/// How often a blocked reader re-checks the terminal flag.
+///
+/// Only ever costs latency on the DEATH path: recv_timeout returns the instant
+/// an event lands, so delivery is unaffected. Waking a parked listener within a
+/// fifth of a second is ample for a provider that is never coming back, and the
+/// alternative — having the trampoline drop the Sender — would need a registry
+/// of every subscription's callback box, which is a great deal of machinery for
+/// a path taken once per module lifetime.
+const DEAD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A live event subscription: the channel of incoming events PLUS ownership
 /// of everything that keeps it alive (the lp subscription, its callback
@@ -245,7 +281,7 @@ pub struct EventSubscription {
     rx: Receiver<EventData>,
     sub: *mut ffi::LpSubscription,
     _callback: Box<EventCallbackData>,
-    _client: Arc<ClientHandle>,
+    client: Arc<ClientHandle>,
 }
 // Safety: the lp subscription/client handles are thread-safe per-handle, and
 // the callback box is only read by the lp trampoline.
@@ -337,6 +373,23 @@ pub enum RestartPolicy {
     Manual,
 }
 
+/// Point the client's C-ABI status callback at `status_trampoline`, with the
+/// handle itself as `user_data`.
+///
+/// Safe because `Arc::as_ptr` addresses the ClientHandle allocation, and
+/// `ClientHandle::drop` calls `lp_client_destroy` — after which the C side
+/// fires nothing — before that allocation is released.
+fn install_status_trampoline(handle: &Arc<ClientHandle>) {
+    let user_data = Arc::as_ptr(handle) as *mut std::os::raw::c_void;
+    unsafe {
+        ffi::lp_client_set_subscription_status_cb(
+            handle.client,
+            Some(status_trampoline as ffi::LpSubStatusCb),
+            user_data,
+        );
+    }
+}
+
 pub(crate) extern "C" fn status_trampoline(
     state: std::os::raw::c_int,
     generation: u64,
@@ -365,6 +418,14 @@ pub(crate) extern "C" fn status_trampoline(
     // which the C side fires nothing — before the allocation is released, so
     // the pointer cannot outlive what reads it.
     let handle = unsafe { &*(user_data as *const ClientHandle) };
+
+    // Recorded BEFORE the user callback, and unconditionally: a watcher may
+    // re-enter, and a caller that installed none at all still needs its
+    // blocking reads to come unstuck.
+    if status == SubStatus::Abandoned {
+        handle.abandoned.store(true, Ordering::Release);
+    }
+
     let cb = handle
         .status
         .lock()
@@ -378,12 +439,38 @@ pub(crate) extern "C" fn status_trampoline(
 impl EventSubscription {
     /// Block until the next event arrives (or the subscription dies).
     pub fn recv(&self) -> Result<EventData, std::sync::mpsc::RecvError> {
-        self.rx.recv()
+        loop {
+            match self.rx.recv_timeout(DEAD_POLL) {
+                Ok(ev) => return Ok(ev),
+                // Unreachable while this subscription is alive — it owns the
+                // only Sender — but correct if that ever stops being true.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(std::sync::mpsc::RecvError)
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.is_dead() {
+                        return Err(std::sync::mpsc::RecvError);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether this subscription can still deliver: false once its target
+    /// reported `Abandoned`, which is terminal.
+    pub fn is_dead(&self) -> bool {
+        self.client.abandoned.load(Ordering::Acquire)
     }
 
     /// Non-blocking poll for a pending event.
     pub fn try_recv(&self) -> Result<EventData, std::sync::mpsc::TryRecvError> {
-        self.rx.try_recv()
+        match self.rx.try_recv() {
+            Ok(ev) => Ok(ev),
+            Err(std::sync::mpsc::TryRecvError::Empty) if self.is_dead() => {
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The underlying channel, for `select`-style integration.
@@ -398,7 +485,7 @@ impl EventSubscription {
 impl Iterator for EventSubscription {
     type Item = EventData;
     fn next(&mut self) -> Option<EventData> {
-        self.rx.recv().ok()
+        self.recv().ok()
     }
 }
 
@@ -946,7 +1033,7 @@ impl PluginProxy {
             rx,
             sub,
             _callback: callback_data,
-            _client: client_handle,
+            client: client_handle,
         })
     }
 
@@ -995,14 +1082,10 @@ impl PluginProxy {
         // `Arc::as_ptr`, so the trampoline reads the same allocation the client
         // is destroyed from. Installed AFTER the closure is in place: the C
         // side replays the current state synchronously from inside this call.
-        let user_data = Arc::as_ptr(&handle) as *mut std::os::raw::c_void;
-        unsafe {
-            ffi::lp_client_set_subscription_status_cb(
-                handle.client,
-                Some(status_trampoline as ffi::LpSubStatusCb),
-                user_data,
-            );
-        }
+        // Re-installed so the C side replays the CURRENT state into the
+        // callback just set; the trampoline itself is already in place from
+        // client creation.
+        install_status_trampoline(&handle);
         Ok(())
     }
 
@@ -1208,5 +1291,193 @@ mod origin_tests {
             "calc_aggregator",
             "a refused re-declaration must not take effect"
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_subscription_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    // The unit-test binary does not link logos-protocol, and both types under
+    // test call into it from Drop. Stubbing the two symbols is what lets these
+    // types be exercised at all; both are counted so a test can assert the
+    // teardown it claims to check actually happened.
+    static UNSUBSCRIBED: AtomicUsize = AtomicUsize::new(0);
+    static CLIENTS_DESTROYED: AtomicUsize = AtomicUsize::new(0);
+
+    #[no_mangle]
+    extern "C" fn lp_unsubscribe(_sub: *mut ffi::LpSubscription) {
+        UNSUBSCRIBED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[no_mangle]
+    extern "C" fn lp_client_destroy(_client: *mut ffi::LpClient) {
+        CLIENTS_DESTROYED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Build an EventSubscription with no live C subscription behind it. `sub`
+    // is null, which Drop tolerates (lp_unsubscribe(NULL) is a no-op) and no
+    // test here ever delivers through the C path.
+    fn detached(handle: Arc<ClientHandle>) -> (EventSubscription, mpsc::Sender<EventData>) {
+        let (tx, rx) = mpsc::channel();
+        let cb = Box::new(crate::callback::EventCallbackData {
+            tx: tx.clone(),
+            event_name: "probe".to_string(),
+        });
+        (
+            EventSubscription { rx, sub: std::ptr::null_mut(), _callback: cb, client: handle },
+            tx,
+        )
+    }
+
+    fn handle() -> Arc<ClientHandle> {
+        Arc::new(ClientHandle {
+            client: std::ptr::null_mut(),
+            status: Mutex::new(None),
+            abandoned: AtomicBool::new(false),
+        })
+    }
+
+    // THE REGRESSION GUARD, and it is written to fail loudly against the old
+    // code rather than hang in it. Before the terminal flag, `recv()` was
+    // `self.rx.recv()`: the subscription owns the Sender that feeds its own
+    // Receiver, so recv() could never return Err and this call blocked forever.
+    // A plain assertion would therefore have hung the suite instead of failing
+    // it — which is exactly how the bug survived. Running the read on a worker
+    // and bounding the wait converts "never returns" into a FAILED test.
+    #[test]
+    fn recv_returns_err_once_the_target_is_abandoned() {
+        let h = handle();
+        let (sub, _keep_tx) = detached(Arc::clone(&h));
+
+        h.abandoned.store(true, Ordering::Release);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = sub.recv();
+            let _ = done_tx.send(r.is_err());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(is_err) => assert!(is_err, "recv() returned Ok on an abandoned target"),
+            Err(_) => panic!(
+                "recv() never returned on an abandoned target — the reader is parked \
+                 forever, which is the bug this guards"
+            ),
+        }
+    }
+
+    // A live subscription must NOT be woken. Without this the fix could be
+    // "always return Err", which passes the guard above and breaks everything.
+    #[test]
+    fn recv_still_blocks_and_delivers_while_alive() {
+        let h = handle();
+        let (sub, tx) = detached(Arc::clone(&h));
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(sub.recv().map(|e| e.event));
+        });
+
+        // Past one DEAD_POLL, so a wrongly-woken reader has had its chance.
+        std::thread::sleep(DEAD_POLL * 2);
+        assert!(
+            done_rx.try_recv().is_err(),
+            "recv() returned before any event arrived on a LIVE subscription"
+        );
+
+        tx.send(EventData { event: "tick".into(), data: serde_json::Value::Null })
+            .expect("send");
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(name)) => assert_eq!(name, "tick"),
+            other => panic!("live subscription did not deliver: {:?}", other),
+        }
+    }
+
+    // Death observed WHILE parked, not merely before starting — the real
+    // sequence, and the one the poll interval exists for.
+    #[test]
+    fn a_parked_reader_wakes_when_the_target_is_abandoned() {
+        let h = handle();
+        let (sub, _keep_tx) = detached(Arc::clone(&h));
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(sub.recv().is_err());
+        });
+
+        std::thread::sleep(DEAD_POLL / 2);
+        assert!(done_rx.try_recv().is_err(), "woke before anything happened");
+
+        let started = Instant::now();
+        h.abandoned.store(true, Ordering::Release);
+
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(is_err) => {
+                assert!(is_err);
+                assert!(
+                    started.elapsed() < Duration::from_secs(3),
+                    "took {:?} to notice — slower than the poll interval implies",
+                    started.elapsed()
+                );
+            }
+            Err(_) => panic!("a parked reader never noticed the target was abandoned"),
+        }
+    }
+
+    // The iterator is what a listener thread actually writes, and the loop
+    // ending is what makes post-loop cleanup reachable at all.
+    #[test]
+    fn the_for_loop_ends_so_cleanup_after_it_can_run() {
+        let h = handle();
+        let (sub, tx) = detached(Arc::clone(&h));
+
+        tx.send(EventData { event: "one".into(), data: serde_json::Value::Null }).unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut seen = 0;
+            for _ev in sub {
+                seen += 1;
+            }
+            // Unreachable before the fix: the loop owned the only Sender.
+            let _ = done_tx.send(seen);
+        });
+
+        std::thread::sleep(DEAD_POLL);
+        h.abandoned.store(true, Ordering::Release);
+
+        let before = UNSUBSCRIBED.load(Ordering::Relaxed);
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(seen) => assert_eq!(seen, 1, "delivered events were lost"),
+            Err(_) => panic!("`for ev in sub` never ended — cleanup after it is dead code"),
+        }
+        // The loop ending is what lets the subscription drop and unsubscribe.
+        // Before the fix this never ran, so nothing tore down either.
+        for _ in 0..50 {
+            if UNSUBSCRIBED.load(Ordering::Relaxed) > before { break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            UNSUBSCRIBED.load(Ordering::Relaxed) > before,
+            "the subscription never unsubscribed, so it never dropped"
+        );
+    }
+
+    // try_recv distinguishes "nothing yet" from "never again".
+    #[test]
+    fn try_recv_reports_disconnected_only_once_abandoned() {
+        let h = handle();
+        let (sub, _keep_tx) = detached(Arc::clone(&h));
+
+        assert!(matches!(sub.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(!sub.is_dead());
+
+        h.abandoned.store(true, Ordering::Release);
+
+        assert!(matches!(sub.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+        assert!(sub.is_dead());
     }
 }
