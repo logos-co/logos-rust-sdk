@@ -117,6 +117,9 @@ struct ClientHandle {
     /// loop is unreachable, so a test asserting that cleanup runs passes
     /// against broken code.
     abandoned: AtomicBool,
+    /// Whether the status trampoline has been installed on this client yet.
+    /// Installed LAZILY, on the first subscribe — see `ensure_status_trampoline`.
+    trampoline: AtomicBool,
 }
 unsafe impl Send for ClientHandle {}
 unsafe impl Sync for ClientHandle {}
@@ -231,14 +234,9 @@ fn shared_client(target: &str) -> Option<Arc<ClientHandle>> {
         client: raw,
         status: Mutex::new(None),
         abandoned: AtomicBool::new(false),
+        trampoline: AtomicBool::new(false),
     });
 
-    // Installed UNCONDITIONALLY, not when a caller asks for a status callback.
-    // The terminal flag has to be maintained for every client or a consumer
-    // that never adopts on_subscription_status still gets a listener that parks
-    // forever. Mirrors how logos-protocol installs its generation mirror at
-    // lp_client_create for exactly the same reason.
-    install_status_trampoline(&handle);
 
     // Publish under the lock, re-checking: two threads may have raced through
     // the gap above. The loser drops its handle, which destroys its own client
@@ -388,6 +386,30 @@ fn install_status_trampoline(handle: &Arc<ClientHandle>) {
             user_data,
         );
     }
+}
+
+/// Install the trampoline once per client, on the first subscribe.
+///
+/// NOT at client creation, and the reason is linkage rather than taste. Rust's
+/// extern "C" declarations are unconditional: a call site stamps an undefined
+/// symbol into every module's staticlib whether or not it is reached. Installing
+/// at creation therefore made EVERY module — including ones that never
+/// subscribe to anything — hard-require lp_client_set_subscription_status_cb at
+/// dlopen time, and fail to load against a host on an older protocol. That was
+/// measured, not theorised: it turned the ipc-test's failure from
+/// `undefined symbol: lp_client_rearm_subscriptions` into
+/// `undefined symbol: lp_client_set_subscription_status_cb`, i.e. it widened the
+/// breakage from subscription users to everyone.
+///
+/// Hanging it off the first subscribe narrows the requirement back to exactly
+/// the population that needs it: a module that only makes method calls links
+/// nothing new, and one that subscribes needs the symbol anyway for its reads to
+/// be able to terminate.
+fn ensure_status_trampoline(handle: &Arc<ClientHandle>) {
+    if handle.trampoline.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    install_status_trampoline(handle);
 }
 
 pub(crate) extern "C" fn status_trampoline(
@@ -1019,6 +1041,10 @@ impl PluginProxy {
         let (rx, callback_data, callback) = create_event_callback(event);
         let user_data = event_callback_ptr(&callback_data);
 
+        // Before subscribing, so the terminal flag is maintained for THIS
+        // subscription from its first moment.
+        ensure_status_trampoline(&client_handle);
+
         let sub =
             unsafe { ffi::lp_subscribe(client_handle.client, event_c.as_ptr(), callback, user_data) };
         if sub.is_null() {
@@ -1083,8 +1109,9 @@ impl PluginProxy {
         // is destroyed from. Installed AFTER the closure is in place: the C
         // side replays the current state synchronously from inside this call.
         // Re-installed so the C side replays the CURRENT state into the
-        // callback just set; the trampoline itself is already in place from
-        // client creation.
+        // callback just set. Marks the trampoline as present so a later
+        // subscribe does not reinstall it and trigger a second replay.
+        handle.trampoline.store(true, Ordering::Release);
         install_status_trampoline(&handle);
         Ok(())
     }
@@ -1337,6 +1364,7 @@ mod terminal_subscription_tests {
             client: std::ptr::null_mut(),
             status: Mutex::new(None),
             abandoned: AtomicBool::new(false),
+            trampoline: AtomicBool::new(false),
         })
     }
 
