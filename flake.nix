@@ -29,6 +29,24 @@
       url = "github:logos-co/logos-module-builder";
       inputs.logos-protocol.follows = "logos-protocol";
     };
+    # NOT given a logos-protocol follows, and the reason is worth recording
+    # because it looks like an obvious omission.
+    #
+    # logoscore is the HOST that dlopens the fixture modules, and on Linux a
+    # plugin's undefined symbols resolve against the HOST's protocol, not
+    # against whatever the module was linked with — so pointing it here does
+    # fix the "undefined symbol: lp_client_rearm_subscriptions" load failure,
+    # and it was measured doing so.
+    #
+    # But it trades that for a worse one. TokenManager's layout is cross-package
+    # ABI: the host allocates it and modules mutate it. Moving logoscore onto a
+    # protocol its own BUNDLED capability_module was not built against splits
+    # the token store, and every call comes back "rejecting unauthorized call —
+    # auth token not recognized". A symbol error at least names itself.
+    #
+    # The logoscore stack has to move as a unit, which is upstream propagation
+    # (logos-logoscore-cli and logos-module-builder relocking onto the 0.9
+    # revision), not something a follows here can express.
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
     # A DIRECT pin rather than taking module-builder's: that one lags, and
     # checks.module-impl-abi reads this to decide how many module-impl exports
