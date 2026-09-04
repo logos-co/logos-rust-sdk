@@ -148,4 +148,13 @@ extern "C" {
     pub fn lp_client_rearm_subscriptions(client: *mut LpClient) -> c_int;
 
     pub fn lp_get_methods(client: *mut LpClient) -> *mut c_char;
+
+    /// Local presence of the client's target: 0 unknown, 1 present, 2 absent.
+    /// Never blocks and never calls the peer. Unknown means "try the call",
+    /// never "absent" — see lp_target_presence in logos_protocol.h.
+    pub fn lp_target_presence(client: *mut LpClient) -> c_int;
 }
+
+pub const LP_PRESENCE_UNKNOWN: c_int = 0;
+pub const LP_PRESENCE_PRESENT: c_int = 1;
+pub const LP_PRESENCE_ABSENT: c_int = 2;

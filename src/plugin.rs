@@ -1124,6 +1124,35 @@ impl PluginProxy {
     /// reached nobody and cannot be recovered.
     ///
     /// Returns 0 against a runtime older than logos-protocol 0.9.
+    /// Is this module reachable right now? Local: no round trip, no blocking.
+    ///
+    /// For `metadata.json#optional_dependencies` — a concrete dependency that
+    /// may not be running. Without it, learning that a target is missing costs
+    /// the full call deadline.
+    ///
+    /// TRUE ALSO WHEN THE ANSWER IS UNKNOWN, and that is the safety property:
+    /// only a registry-backed transport can prove absence, so folding unknown
+    /// to `true` means this can save a deadline but can never make you skip a
+    /// module that is actually there. Use [`PluginProxy::presence`] when you
+    /// need the three-way answer.
+    ///
+    /// Answers `true` against a runtime older than logos-protocol 0.10, which
+    /// exports no such symbol — same reason: never skip on a missing answer.
+    pub fn available(&mut self) -> bool {
+        self.presence() != ffi::LP_PRESENCE_ABSENT
+    }
+
+    /// The raw tri-state: [`ffi::LP_PRESENCE_PRESENT`] / `_ABSENT` / `_UNKNOWN`.
+    pub fn presence(&mut self) -> i32 {
+        if !protocol_at_least(0, 10) {
+            return ffi::LP_PRESENCE_UNKNOWN;
+        }
+        match self.client() {
+            Ok(c) => unsafe { ffi::lp_target_presence(c) },
+            Err(_) => ffi::LP_PRESENCE_UNKNOWN,
+        }
+    }
+
     pub fn subscription_generation(&mut self) -> u64 {
         if !protocol_at_least(0, 9) {
             return 0;
