@@ -155,21 +155,25 @@ pub fn install<T: SdkTestCallerModule + Default>() {
         match method {
             "call_add" => {
                 if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let result = imp.call_add(__logos_a0, __logos_a1);
                 Some(serde_json::Value::from(result))
             }
             "last_blob_size" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_blob_size();
                 Some(serde_json::Value::from(result))
             }
             "last_blob_checksum" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_blob_checksum();
                 Some(serde_json::Value::from(result))
             }
             "timed_call" => {
                 if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let result = imp.timed_call(__logos_a0, __logos_a1);
@@ -177,6 +181,7 @@ pub fn install<T: SdkTestCallerModule + Default>() {
             }
             "same_client_two_timeouts" => {
                 if args.len() < 4 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 4, args.len())); }
+                if args.len() > 4 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 4, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let __logos_a2 = match logos_rust_sdk::args::as_i64(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
@@ -185,43 +190,52 @@ pub fn install<T: SdkTestCallerModule + Default>() {
                 Some(serde_json::Value::from(result))
             }
             "last_pair_a_ms" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_pair_a_ms();
                 Some(serde_json::Value::from(result))
             }
             "last_pair_b_ms" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_pair_b_ms();
                 Some(serde_json::Value::from(result))
             }
             "provider_client_addr" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.provider_client_addr();
                 Some(serde_json::Value::from(result))
             }
             "start_timed_call_async" => {
                 if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let result = imp.start_timed_call_async(__logos_a0, __logos_a1);
                 Some(serde_json::Value::from(result))
             }
             "last_async_elapsed_ms" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_async_elapsed_ms();
                 Some(serde_json::Value::from(result))
             }
             "last_async_ok" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                 let result = imp.last_async_ok();
                 Some(serde_json::Value::from(result))
             }
             "refused_timeout_reason" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_caller_module", &e)) };
                 let result = imp.refused_timeout_reason(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                                      let result = "sdk_test_caller_module".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
             "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
                                      let result = "0.1.0".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
@@ -359,7 +373,7 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
 /// (stamped at generation time by the build; never minted here).
 #[no_mangle]
 pub extern "C" fn logos_module_get_protocol_version() -> *const c_char {
-    static VERSION: &str = "0.5.0\0";
+    static VERSION: &str = "0.9.0\0";
     VERSION.as_ptr() as *const c_char
 }
 
@@ -398,6 +412,24 @@ pub extern "C" fn logos_module_about_to_unload() -> c_int {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn logos_module_set_call_caller(caller_json: *const c_char) {
+    unsafe { logos_rust_sdk::set_call_caller(caller_json) }
+}
+
+extern "C" {
+    fn lp_token_save_inbound(caller: *const c_char, token: *const c_char) -> c_int;
+}
+
+#[no_mangle]
+pub extern "C" fn logos_module_accept_inbound_token(caller: *const c_char, token: *const c_char) -> c_int {
+    if caller.is_null() || token.is_null() { return -1; }
+    // INBOUND: `caller` is the module that will CALL US. This is not a
+    // credential this module may present to anyone, and it must not
+    // reach lp_token_save().
+    unsafe { lp_token_save_inbound(caller, token) }
+}
+
 // Typed dependency clients + the Modules aggregate — generated by
 // logos-lidl-gen from the dependencies' LIDL contracts. Do not edit.
 
@@ -406,7 +438,7 @@ pub mod sdk_test_provider_module {
     //
     // Typed caller + event subscribers over logos_rust_sdk's lp_* consumer.
 
-    use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy};
+    use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy, RestartPolicy, SubStatus};
 
     pub struct SdkTestProviderModuleClient {
         proxy: PluginProxy,
@@ -742,6 +774,34 @@ pub mod sdk_test_provider_module {
             self.proxy.call_json_async_with_timeout("version", &args, timeout, move |result| {
                 callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
             });
+        }
+
+        /// Watch this module's subscription transitions: `Armed` / `Lost` /
+        /// `Held` / `Abandoned`, with the establishment number. `Lost` followed
+        /// by `Armed` at a higher generation is the unrecoverable-gap marker.
+        ///
+        /// Per MODULE, not per event: every subscription here shares the
+        /// provider's single handle, so they are lost and restored together.
+        pub fn on_subscription_status<F>(&mut self, f: F) -> Result<(), LogosError>
+        where
+            F: Fn(SubStatus, u64) + Send + Sync + 'static,
+        {
+            self.proxy.on_subscription_status(f)
+        }
+
+        /// 0 = never armed, 1 = the first establishment, N+1 after each one.
+        pub fn subscription_generation(&mut self) -> u64 {
+            self.proxy.subscription_generation()
+        }
+
+        /// `Manual` means "do not RE-arm after a loss", never "do not arm".
+        pub fn set_restart_policy(&mut self, policy: RestartPolicy) -> Result<(), LogosError> {
+            self.proxy.set_restart_policy(policy)
+        }
+
+        /// Revive held subscriptions. Safe from inside the status callback.
+        pub fn rearm_subscriptions(&mut self) -> bool {
+            self.proxy.rearm_subscriptions()
         }
 
         /// Subscribe to the `blobReady` event. Payload arrives as a JSON array of [seq: int, payload: bstr];

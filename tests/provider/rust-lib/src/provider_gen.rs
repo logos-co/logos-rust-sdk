@@ -154,6 +154,7 @@ pub fn install<T: SdkTestProviderModule + Default>() {
         match method {
             "add" => {
                 if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 2, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_i64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
                 let result = imp.add(__logos_a0, __logos_a1);
@@ -161,21 +162,25 @@ pub fn install<T: SdkTestProviderModule + Default>() {
             }
             "emit_blob" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
                 let result = imp.emit_blob(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "sleep" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_i64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sdk_test_provider_module", &e)) };
                 let result = imp.sleep(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
                                      let result = "sdk_test_provider_module".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
             "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
                                      let result = "0.1.0".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
@@ -313,7 +318,7 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
 /// (stamped at generation time by the build; never minted here).
 #[no_mangle]
 pub extern "C" fn logos_module_get_protocol_version() -> *const c_char {
-    static VERSION: &str = "0.5.0\0";
+    static VERSION: &str = "0.9.0\0";
     VERSION.as_ptr() as *const c_char
 }
 
@@ -350,4 +355,22 @@ pub extern "C" fn logos_module_about_to_unload() -> c_int {
         Some(f) => f(),
         None => 0,
     }
+}
+
+#[no_mangle]
+pub extern "C" fn logos_module_set_call_caller(caller_json: *const c_char) {
+    unsafe { logos_rust_sdk::set_call_caller(caller_json) }
+}
+
+extern "C" {
+    fn lp_token_save_inbound(caller: *const c_char, token: *const c_char) -> c_int;
+}
+
+#[no_mangle]
+pub extern "C" fn logos_module_accept_inbound_token(caller: *const c_char, token: *const c_char) -> c_int {
+    if caller.is_null() || token.is_null() { return -1; }
+    // INBOUND: `caller` is the module that will CALL US. This is not a
+    // credential this module may present to anyone, and it must not
+    // reach lp_token_save().
+    unsafe { lp_token_save_inbound(caller, token) }
 }
