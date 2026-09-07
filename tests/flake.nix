@@ -2,17 +2,33 @@
   description = "Integration tests for logos-rust-sdk — builds a minimal provider+caller module pair and verifies IPC via logoscore";
 
   inputs = {
-    # The cdylib authoring interface (interface = "cdylib" + codegen.lidl ->
-    # uniform Qt glue over the module-impl C ABI) lives on the builder's
-    # feat/cdylib-interface branch, stacked on the qt-split chain. Temporary
-    # pin — re-point at master when the chain merges.
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     # CI overrides this with --override-input logos-rust-sdk path:.
     # Keeping a real GitHub URL here lets the lock file record a valid narHash.
     logos-rust-sdk.url = "github:logos-co/logos-rust-sdk";
-    # Extraction-chain branch pin — temporary, re-point at master when the
-    # qt-split chain merges.
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/616cb079a5828caecfafd6d4e432519c864e3fb1";
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    # ONE logos-protocol in the closure, not two. The modules are COMPILED
+    # against logos-module-builder's (the header path below reads it straight
+    # out of that input) and LOADED against the runtime this input builds. Left
+    # to resolve on its own, logoscore-cli brings its own, older copy and the
+    # plugin asks for a symbol the runtime does not export —
+    # `lp_client_set_subscription_status_cb` at the time of writing, and
+    # whichever export lands next after that.
+    logos-logoscore-cli.inputs.logos-protocol.follows = "logos-module-builder/logos-protocol";
+    logos-logoscore-cli.inputs.logos-cpp-sdk.follows = "logos-module-builder/logos-cpp-sdk";
+    # The rest are about lock SIZE, not correctness. This input declares no
+    # `follows` of its own, so un-pinning it unrolls its whole subtree: the lock
+    # went from 47k lines to 442k. logos-nix is the driver — every input that
+    # carries a hard edge to it drags its own nixpkgs along — and
+    # logos-test-modules is a CYCLE (logoscore-cli takes it, it takes
+    # logoscore-cli), which is what re-enters the graph rather than meeting a
+    # node already there. Pointed at a leaf, the cycle is cut without changing
+    # what gets built.
+    logos-logoscore-cli.inputs.logos-nix.follows = "logos-module-builder/logos-nix";
+    logos-logoscore-cli.inputs.logos-plugin-qt.follows = "logos-module-builder/logos-plugin-qt";
+    logos-logoscore-cli.inputs.nix-bundle-logos-module-install.follows =
+      "logos-module-builder/nix-bundle-logos-module-install";
+    logos-logoscore-cli.inputs.logos-test-modules.follows = "logos-module-builder/logos-nix";
     nixpkgs.follows = "logos-module-builder/nixpkgs";
   };
 
