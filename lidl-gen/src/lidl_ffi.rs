@@ -129,4 +129,33 @@ mod tests {
         assert!(text.contains("description \"Adds two ints\""));
         assert_eq!(parse(&text).expect("reparse"), m);
     }
+
+    // A field this DTO does not declare is dropped by serde without a word, and
+    // `serialize` then writes a contract that no longer has the clause. So the
+    // assertion that matters is the ROUND TRIP, not the parse: parsing alone
+    // would pass just as well while the write side quietly lost it.
+    #[test]
+    fn optional_depends_survives_the_round_trip() {
+        let src = "module consumer_module {\n  version \"1.0.0\"\n\
+                   \x20 depends [hard_dep]\n\
+                   \x20 optional_depends [soft_dep, other_soft]\n\
+                   \x20 method ping() -> int\n}\n";
+        let m = parse(src).expect("parse");
+        assert_eq!(m.depends, vec!["hard_dep"]);
+        assert_eq!(m.optional_depends, vec!["soft_dep", "other_soft"]);
+
+        let text = serialize(&m);
+        assert!(text.contains("optional_depends [soft_dep, other_soft]"), "got: {text}");
+        assert_eq!(parse(&text).expect("reparse"), m);
+    }
+
+    // ...and a contract with none still serializes without the clause, so every
+    // contract written before this existed round-trips unchanged.
+    #[test]
+    fn a_contract_without_optional_depends_gains_no_clause() {
+        let m = parse("module m {\n  depends [hard_dep]\n  method ping() -> int\n}\n")
+            .expect("parse");
+        assert!(m.optional_depends.is_empty());
+        assert!(!serialize(&m).contains("optional_depends"));
+    }
 }
