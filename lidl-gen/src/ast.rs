@@ -204,6 +204,13 @@ pub struct ModuleDecl {
     pub category: String,
     #[serde(default)]
     pub depends: Vec<String>,
+    /// Concrete dependencies that may be absent at runtime. A second list
+    /// rather than a flag on the first, because the two differ in LIFETIME:
+    /// nothing loads an optional dependency and its absence is not an error.
+    /// Missing it here does not fail — serde would drop the key silently and
+    /// `serialize` would write a contract without the clause.
+    #[serde(default)]
+    pub optional_depends: Vec<String>,
     #[serde(default)]
     pub types: Vec<TypeDecl>,
     #[serde(default)]
