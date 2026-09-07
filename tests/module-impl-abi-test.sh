@@ -169,6 +169,50 @@ done
 
 [ ${#broken[@]} -eq 0 ] || fail "incomplete module-impl C ABI in ${#broken[@]} of ${#configs[@]} configuration(s): ${broken[*]}"
 
+# ─────────────────────────────── the COMMITTED scaffolds, which nothing else reads
+#
+# Everything above regenerates. The fixtures do not: their provider_gen.rs is a
+# CHECKED-IN artifact (flake.nix explains why — buildRustPackage strips what a
+# build script generates, and lidl-gen's C ABI cannot link as a host unit), so
+# the export set they compile was decided by whatever --protocol-version the
+# person who last ran the generator passed.
+#
+# That is the exact blind spot this check had. It regenerates a scaffold, finds
+# it complete, and reports green while the fixtures compile a file frozen at an
+# older protocol. Found at 0.9: both fixtures were stamped 0.5.0 and defined
+# neither logos_module_set_call_caller (>= 0.6) nor
+# logos_module_accept_inbound_token (>= 0.8), while the Qt glue — which reads
+# the LIVE header — emitted direct calls to both. Fatal at dlopen on Linux,
+# and on macOS the reference merely goes unbound under -undefined
+# dynamic_lookup, so it is invisible there.
+#
+# The same regeneration has been needed at 0.3, 0.5, 0.6 and now 0.9. Checking
+# it is what makes the next one a red check instead of a fifth incident.
+# Entries are `label=path`: nix copies each file to its own store path with the
+# same basename, so a path-derived name would call both fixtures the same thing
+# and the failure would not say which one is frozen.
+for entry in ${COMMITTED_SCAFFOLDS:-}; do
+  name="${entry%%=*}"
+  committed="${entry#*=}"
+  [ "$name" != "$committed" ] || fail "COMMITTED_SCAFFOLDS entries are label=path, got: $entry"
+  [ -r "$committed" ] || fail "COMMITTED_SCAFFOLDS names an unreadable file: $committed"
+  defined="$workdir/committed-$name.txt"
+  grep -vE '^[[:space:]]*(//|/\*|\*)' "$committed" \
+    | grep -oE 'pub extern "C" fn logos_module_[a-z0-9_]+' \
+    | sed 's/.*fn //' | sort -u > "$defined"
+
+  if "$diff_exports" "$declared" "$defined" \
+       "committed fixture scaffold $name/src/provider_gen.rs, protocol $version" \
+       "regenerate it: logos-lidl-gen <contract>.lidl --provider --protocol-version $version [--dep <name>=<path>.lidl] -o <path>"
+  then
+    echo "  OK  committed $name: $(wc -l < "$defined" | tr -d ' ') exports defined"
+  else
+    broken+=("committed:$name")
+  fi
+done
+
+[ ${#broken[@]} -eq 0 ] || fail "committed fixture scaffold(s) frozen at an older protocol: ${broken[*]}"
+
 {
   echo "module-impl C ABI check passed at protocol $version"
   echo "Declared by logos-protocol ($(wc -l < "$declared" | tr -d ' ') exports):"
