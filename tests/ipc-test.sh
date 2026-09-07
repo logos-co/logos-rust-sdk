@@ -323,10 +323,28 @@ echo '  OK  the caller announced origin "sdk_test_caller_module"'
 #     the answer to "does the roster know the real name?" — requestModule fails
 #     closed on an identity it has no token for, so reaching the mint at all
 #     means liblogos registered the module under its own name at load.
-grep -aq 'requestModule called with fromModuleName: "sdk_test_caller_module"' "$log" \
-  || fail "capability_module never saw a handshake from sdk_test_caller_module"
+#
+#     READ OFF THE OUTCOME, NOT A RECEIPT LOG. This used to grep
+#     `requestModule called with fromModuleName:`, and capability_module no
+#     longer emits it — identity now comes from the RPC caller document
+#     (logos::currentCaller) rather than from that argument, which it calls
+#     "leftover ABI: any loaded allowlisted name could be written there by the
+#     caller". The line vanished with the impersonation it enabled, so grepping
+#     for it pinned the mechanism instead of the property.
+#
+#     A minted token IS the admission: requestModule fails closed and returns
+#     empty on every identity it cannot place.
+grep -aq 'requestModule result for "sdk_test_provider_module" : "[0-9a-f-][0-9a-f-]*"' "$log" \
+  || fail "capability_module minted no token for the caller — the handshake did not complete"
 grep -aq "rejecting request from unknown module identity 'sdk_test_caller_module'" "$log" \
   && fail "capability_module refused the caller's real name — the known-caller roster does not carry it"
+grep -aq "no named caller on this dispatch" "$log" \
+  && fail "capability_module saw no caller identity on the dispatch — the caller document did not arrive"
+#     STRONGER than the old grep: this fires when the name the caller ANNOUNCED
+#     and the identity its TOKEN binds it to disagree, which is exactly the
+#     impersonation (a) can only half-answer on its own.
+grep -aq "ignoring leftover fromModuleName=" "$log" \
+  && fail "the announced module name disagreed with the token-bound caller identity"
 echo '  OK  capability_module admitted "sdk_test_caller_module" (known-caller roster carries it)'
 
 # (c) the key the TARGET was told to file the token under (capability_module's
@@ -341,7 +359,7 @@ echo '  OK  the provider was told to file the token under "sdk_test_caller_modul
 for anchor in core capability_module; do
   grep -aq "requestModule for origin: \"$anchor\"" "$log" \
     && fail "a module announced the bootstrap anchor \"$anchor\" as its own identity — it authorizes as the host at every callee"
-  grep -aq "requestModule called with fromModuleName: \"$anchor\"" "$log" \
+  grep -aq "ignoring leftover fromModuleName='$anchor'" "$log" \
     && fail "capability_module was handed the bootstrap anchor \"$anchor\" as a caller identity"
 done
 echo '  OK  no module announced a bootstrapKeys() anchor ("core" / "capability_module") as its identity'
