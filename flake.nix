@@ -64,9 +64,18 @@
     let
       mkModule = logos-module-builder.lib.mkLogosModule;
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
+      # logos-nix's crates.io fixes: crates.io 403s the User-Agent nixpkgs'
+      # fetchurl sends, so without these lidl-gen's crates are unfetchable
+      # whenever the org cache misses. Taking the list, not naming entries --
+      # naming them is how the importCargoLock fix shipped reaching nothing.
+      mkPkgs = system: import nixpkgs {
+        inherit system;
+        overlays = logos-nix.lib.nativeOverlays;
+      };
+
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         inherit system;
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = mkPkgs system;
       });
 
       # The logos-protocol semver the whole stack links — stamped into the
@@ -193,7 +202,7 @@
 
       checks = nixpkgs.lib.genAttrs systems (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = mkPkgs system;
 
           provider = mkProvider { inherit pkgs; };
           caller   = mkCaller { inherit pkgs provider; };
