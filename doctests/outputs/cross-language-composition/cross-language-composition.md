@@ -259,21 +259,22 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/metadata.json
 logos_module(NAME rust_calc_module)
 ```
 
-### 2.6 flake.nix — trivial, plus the logos-rust-sdk input
+### 2.6 flake.nix — trivial, exactly like a C++ module's
 
-The builder reads `logos-lidl-gen` from the module's
-`flakeInputs.logos-rust-sdk`, so a Rust module lists one extra input
-beyond a C++ module — `logos-rust-sdk`. Everything else is the
-standard `mkLogosModule` shape; there is no `buildRustPackage` here:
+A Rust module's flake is **identical to a C++ one**: `logos-module-builder`
+and nothing else. Both `logos-lidl-gen` and the SDK source the crate links
+come from the *builder's own* `logos-rust-sdk` input
+(`mkLogosModule.nix:332`, `rustSdk = logos-rust-sdk`), which is what keeps
+the generator and the runtime SDK on one revision. Listing `logos-rust-sdk`
+here would be inert — `mkLogosModule` reads `flakeInputs` by DEPENDENCY
+name — and would invite exactly the skew the builder exists to prevent.
+There is no `buildRustPackage` either:
 
 ```nix
 {
   description = "Basic Rust provider with a typed event";
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-    # Provides logos-lidl-gen (the contract->scaffold generator the builder
-    # runs) and the SDK the crate links. One extra input vs a C++ module.
-    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
   };
   outputs = inputs@{ self, logos-module-builder, ... }:
     let
@@ -304,9 +305,17 @@ the builder pins — the same one it will stage inside the build — as a
 plain directory, which is what lets `cargo generate-lockfile` run before
 any nix build has happened.
 
+Note the rev on that URL: it must match the `logos-module-builder` rev in
+the flake above. This step decides which SDK the LOCKFILE resolves
+against; the flake decides which SDK is actually COMPILED; nothing checks
+that they agree. They previously did not — staging ran from
+module-builder master while the flake pinned an older rev — which was
+harmless only because both happened to carry the same SDK version with
+byte-identical dependencies.
+
 ```bash
 cd rust-calc
-nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
+nix build 'github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src' -o logos-rust-sdk-src
 (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
 git init && git add -A && nix flake update && git add flake.lock
 nix build .#lgx -o calc-lgx
@@ -671,7 +680,6 @@ at build time with `--override-input`:
   description = "Rust consumer: concrete + interface deps, context, sync/async, events";
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc";
-    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/8b89e562a52218af6beef6fa6e3cfa12ab52e93e";
     # The concrete dependency's flake (its published .lidl drives
     # modules().rust_calc_module). Placeholder — locked to the real checkout
     # at build time via --override-input (nix rejects relative paths here).
@@ -703,7 +711,7 @@ the local interface) — compiles the crate, and links it into the glue:
 
 ```bash
 cd rust-orchestrator
-nix build 'github:logos-co/logos-module-builder#rust-sdk-src' -o logos-rust-sdk-src
+nix build 'github:logos-co/logos-module-builder/03ad946f1928cff35373a21838f89d6fd7c8eadc#rust-sdk-src' -o logos-rust-sdk-src
 (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
 git init && git add -A
 nix flake update --override-input rust_calc_module path:$PWD/../rust-calc
@@ -838,4 +846,17 @@ sleep 2
 
 ```bash
 logoscore status
+```
+
+### 5.12 What the daemon itself said
+
+Every step above reads the daemon through the CLI, which can only
+report what the RPC returned. `logs.txt` is the other half: a daemon
+that dies mid-call leaves its reason there and nowhere else. Dumped
+unconditionally, because the run where you want it is the run that
+failed (under `--continue-on-fail`; a stop-at-first-failure run ends
+before this step, and the file is still on disk).
+
+```bash
+tail -40 logs.txt
 ```

@@ -532,3 +532,13 @@ sections:
         code_block: "logoscore status"
         expect_contains:
           - '"status":"not_running"'
+      - title: "What the daemon itself said"
+        text: |
+          Every step above reads the daemon through the CLI, which can only
+          report what the RPC returned. `logs.txt` is the other half: a daemon
+          that dies mid-call leaves its reason there and nowhere else. Dumped
+          unconditionally, because the run where you want it is the run that
+          failed (under `--continue-on-fail`; a stop-at-first-failure run ends
+          before this step, and the file is still on disk).
+        run: "tail -40 logs.txt || true"
+        code_block: "tail -40 logs.txt"
