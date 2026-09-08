@@ -336,10 +336,15 @@ echo '  OK  the caller announced origin "sdk_test_caller_module"'
 #     empty on every identity it cannot place.
 grep -aq 'requestModule result for "sdk_test_provider_module" : "[0-9a-f-][0-9a-f-]*"' "$log" \
   || fail "capability_module minted no token for the caller — the handshake did not complete"
-grep -aq "rejecting request from unknown module identity 'sdk_test_caller_module'" "$log" \
-  && fail "capability_module refused the caller's real name — the known-caller roster does not carry it"
+#     A negative assertion is only worth its line if the string it looks for
+#     still exists — otherwise it passes forever. "rejecting request from
+#     unknown module identity" was the third grep here and appears nowhere in
+#     capability_module any more; it went with the same rewrite. The refusal
+#     path that DOES exist is the one below, and it covers the same case: an
+#     identity capability_module cannot place is refused for having no named
+#     caller on the dispatch.
 grep -aq "no named caller on this dispatch" "$log" \
-  && fail "capability_module saw no caller identity on the dispatch — the caller document did not arrive"
+  && fail "capability_module refused the caller — no named identity arrived on the dispatch"
 #     STRONGER than the old grep: this fires when the name the caller ANNOUNCED
 #     and the identity its TOKEN binds it to disagree, which is exactly the
 #     impersonation (a) can only half-answer on its own.
@@ -349,8 +354,14 @@ echo '  OK  capability_module admitted "sdk_test_caller_module" (known-caller ro
 
 # (c) the key the TARGET was told to file the token under (capability_module's
 #     process, describing the push it made into the provider).
-grep -aq 'Successfully informed "sdk_test_provider_module" about token for "sdk_test_caller_module"' "$log" \
+#     Same rewording as (b): "Successfully informed X about token for Y" was
+#     split into the delivery line and its result. The delivery line is the
+#     better witness of the two — it names both modules in their ROLES, so a
+#     swap of caller and target cannot satisfy it.
+grep -aq 'delivering token for "sdk_test_caller_module" via the handshake surface of "sdk_test_provider_module"' "$log" \
   || fail "the minted token was not pushed to the provider under the caller's own name"
+grep -aq 'informModuleToken completed with result: true' "$log" \
+  || fail "the token push to the provider did not report success"
 echo '  OK  the provider was told to file the token under "sdk_test_caller_module"'
 
 # (d) the negative half, and the one that would have caught this: no module in
