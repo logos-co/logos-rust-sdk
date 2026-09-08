@@ -55,6 +55,34 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// A contract name that is a Rust keyword, as an identifier.
+///
+/// `type`, `match` and `move` are ordinary field names in LIDL and in JSON, and
+/// `pub type: String` does not compile. The wire key is taken from the contract
+/// separately (`f.name`, never this), so escaping here changes the generated
+/// Rust and nothing about the protocol.
+///
+/// Four keywords cannot be raw identifiers at all — `crate`, `self`, `Self` and
+/// `super` — so those take a trailing underscore instead.
+fn rust_ident(name: &str) -> String {
+    let s = snake(name);
+    const NEVER_RAW: [&str; 4] = ["crate", "self", "Self", "super"];
+    const KEYWORDS: [&str; 49] = [
+        "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false",
+        "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+        "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+        "unsafe", "use", "where", "while", "async", "await", "become", "box", "do", "final",
+        "macro", "override", "priv", "try", "typeof", "unsized", "virtual",
+    ];
+    if NEVER_RAW.contains(&s.as_str()) {
+        format!("{s}_")
+    } else if KEYWORDS.contains(&s.as_str()) {
+        format!("r#{s}")
+    } else {
+        s
+    }
+}
+
 /// Whether `ty` is a usable `?T`. A degenerate Optional carrying no value type
 /// (only reachable by hand-building an AST) keeps the untyped fallback.
 fn is_optional(ty: &TypeExpr) -> bool {
@@ -917,7 +945,7 @@ pub fn generate_provider_with(
         let params_sig: Vec<String> = e
             .params
             .iter()
-            .map(|p| format!("{}: {}", snake(&p.name), emit_param_type(&p.ty, &recs)))
+            .map(|p| format!("{}: {}", rust_ident(&p.name), emit_param_type(&p.ty, &recs)))
             .collect();
         // The accumulator is named `__logos_args`, not `payload`: an event
         // parameter is free to be called `payload` (delivery_module's
@@ -930,7 +958,7 @@ pub fn generate_provider_with(
             .params
             .iter()
             .map(|p| {
-                format!("__logos_args.push({});", emit_param_value(&p.ty, &snake(&p.name), &recs))
+                format!("__logos_args.push({});", emit_param_value(&p.ty, &rust_ident(&p.name), &recs))
             })
             .collect();
         out.push_str(&format!(
@@ -990,7 +1018,7 @@ pub fn generate_provider_with(
             let params: Vec<String> = m
                 .params
                 .iter()
-                .map(|p| format!("{}: {}", snake(&p.name), rust_param_type(&p.ty, &recs)))
+                .map(|p| format!("{}: {}", rust_ident(&p.name), rust_param_type(&p.ty, &recs)))
                 .collect();
             let ret = rust_return_type(&m.return_type, &recs);
             out.push_str(&format!(

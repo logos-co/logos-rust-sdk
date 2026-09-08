@@ -31,6 +31,34 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// A contract name that is a Rust keyword, as an identifier.
+///
+/// `type`, `match` and `move` are ordinary field names in LIDL and in JSON, and
+/// `pub type: String` does not compile. The wire key is taken from the contract
+/// separately (`f.name`, never this), so escaping here changes the generated
+/// Rust and nothing about the protocol.
+///
+/// Four keywords cannot be raw identifiers at all — `crate`, `self`, `Self` and
+/// `super` — so those take a trailing underscore instead.
+fn rust_ident(name: &str) -> String {
+    let s = snake(name);
+    const NEVER_RAW: [&str; 4] = ["crate", "self", "Self", "super"];
+    const KEYWORDS: [&str; 49] = [
+        "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false",
+        "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+        "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+        "unsafe", "use", "where", "while", "async", "await", "become", "box", "do", "final",
+        "macro", "override", "priv", "try", "typeof", "unsized", "virtual",
+    ];
+    if NEVER_RAW.contains(&s.as_str()) {
+        format!("{s}_")
+    } else if KEYWORDS.contains(&s.as_str()) {
+        format!("r#{s}")
+    } else {
+        s
+    }
+}
+
 /// The set of record names the module actually DECLARES.
 ///
 /// A `Named` type is not automatically a record: the LIDL front end has no
@@ -189,7 +217,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             // plain `T` while every encoder/decoder below treats it as empty-able.
             out.push_str(&format!(
                 "    pub {}: {},\n",
-                snake(&f.name),
+                rust_ident(&f.name),
                 field_type(f, &recs)
             ));
         }
@@ -210,7 +238,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
         out.push_str("    pub fn to_json(&self) -> serde_json::Value {\n");
         out.push_str("        let mut o = serde_json::Map::new();\n");
         for f in &t.fields {
-            let field = snake(&f.name);
+            let field = rust_ident(&f.name);
             if f.is_optional() {
                 out.push_str(&format!(
                     "        if let Some(__o) = &self.{} {{ o.insert(\"{}\".to_string(), {}); }}\n",
@@ -256,7 +284,7 @@ pub(crate) fn emit_records(module: &ModuleDecl) -> String {
             } else {
                 dec_expr(&f.ty, &format!("o.get(\"{}\")?", f.name), &recs)
             };
-            out.push_str(&format!("            {}: {},\n", snake(&f.name), value));
+            out.push_str(&format!("            {}: {},\n", rust_ident(&f.name), value));
         }
         out.push_str("        })\n    }\n}\n\n");
     }
@@ -487,12 +515,12 @@ pub fn generate(module: &ModuleDecl) -> String {
         let params_sig: Vec<String> = m
             .params
             .iter()
-            .map(|p| format!("{}: {}", snake(&p.name), param_type(&p.ty, &recs)))
+            .map(|p| format!("{}: {}", rust_ident(&p.name), param_type(&p.ty, &recs)))
             .collect();
         let args: Vec<String> = m
             .params
             .iter()
-            .map(|p| param_to_json(&snake(&p.name), &p.ty, &recs))
+            .map(|p| param_to_json(&rust_ident(&p.name), &p.ty, &recs))
             .collect();
         let (ret_ty, conv) = return_conv(&m.return_type, &recs);
         // Carry the contract's doc comment onto the generated method.
@@ -727,7 +755,7 @@ pub fn generate(module: &ModuleDecl) -> String {
             event_struct
         ));
         for (i, p) in e.params.iter().enumerate() {
-            let field = snake(&p.name);
+            let field = rust_ident(&p.name);
             let expr = if p.is_optional() {
                 format!(
                     "match arr.get({}) {{ None | Some(serde_json::Value::Null) => None, Some(__v) => Some({}) }}",
@@ -755,7 +783,7 @@ pub fn generate(module: &ModuleDecl) -> String {
         for p in &e.params {
             out.push_str(&format!(
                 "    pub {}: {},\n",
-                snake(&p.name),
+                rust_ident(&p.name),
                 event_param_type(&p.ty)
             ));
         }
@@ -780,7 +808,7 @@ pub fn generate_deps(deps: &[(String, ModuleDecl)]) -> String {
          // logos-lidl-gen from the dependencies' LIDL contracts. Do not edit.\n\n",
     );
     for (name, decl) in deps {
-        let field = snake(name);
+        let field = rust_ident(name);
         out.push_str(&format!("pub mod {} {{\n", field));
         for line in generate(decl).lines() {
             if line.is_empty() {
@@ -800,7 +828,7 @@ pub fn generate_deps(deps: &[(String, ModuleDecl)]) -> String {
          pub struct Modules {\n",
     );
     for (name, decl) in deps {
-        let field = snake(name);
+        let field = rust_ident(name);
         out.push_str(&format!(
             "    pub {}: {}::{}Client,\n",
             field,
@@ -812,7 +840,7 @@ pub fn generate_deps(deps: &[(String, ModuleDecl)]) -> String {
 
     out.push_str("impl Modules {\n    pub fn new() -> Self {\n        Self {\n");
     for (name, decl) in deps {
-        let field = snake(name);
+        let field = rust_ident(name);
         out.push_str(&format!(
             "            {}: {}::{}Client::new(),\n",
             field,
@@ -1186,6 +1214,54 @@ module info_module {
   method makeStatuses() -> [Status]
 }
 "#;
+
+    // A contract field named after a Rust keyword. `type` is an ordinary name in
+    // LIDL and in JSON — modules_state's ModuleRecord has one — and the emitted
+    // `pub type: String` does not compile. The wire key must be untouched.
+    //
+    // Asserted on the EMITTED code rather than the parse: the parser has always
+    // accepted keywords (see parser_handles_keywords_as_names), which is exactly
+    // why this went unnoticed on the write side.
+    const KEYWORD_FIELDS: &str = r#"
+module kw_module {
+  version "1.0.0"
+  depends []
+  type Rec {
+    type: tstr
+    match: uint
+    self: tstr
+  }
+  method take(r: Rec, move: tstr) -> tstr
+}
+"#;
+
+    #[test]
+    fn keyword_names_are_escaped_but_wire_keys_are_not() {
+        let m = parse(KEYWORD_FIELDS).expect("parse");
+        let code = generate(&m);
+
+        // Struct fields: raw identifiers, never the bare keyword.
+        assert!(code.contains("pub r#type: String"), "{}", code);
+        assert!(code.contains("pub r#match: u64"), "{}", code);
+        assert!(!code.contains("pub type:"), "bare keyword field emitted:\n{}", code);
+        assert!(!code.contains("pub match:"), "bare keyword field emitted:\n{}", code);
+
+        // `self` cannot be a raw identifier at all, so it takes a suffix instead.
+        assert!(code.contains("pub self_: String"), "{}", code);
+        assert!(!code.contains("r#self"), "r#self is not legal Rust:\n{}", code);
+
+        // Encode/decode reach the escaped field, not the keyword.
+        assert!(code.contains("self.r#type"), "{}", code);
+        assert!(code.contains("r#type:"), "{}", code);
+
+        // The JSON keys are the contract's spelling, unescaped.
+        assert!(code.contains(r#""type".to_string()"#), "{}", code);
+        assert!(code.contains(r#"get("type")"#), "{}", code);
+        assert!(!code.contains(r##""r#type""##), "escaped name leaked to the wire:\n{}", code);
+
+        // A method parameter named after a keyword is escaped the same way.
+        assert!(code.contains("r#move: &str"), "{}", code);
+    }
 
     #[test]
     fn records_become_typed_rust_structs() {
