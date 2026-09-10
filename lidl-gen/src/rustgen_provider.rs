@@ -454,6 +454,13 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
             "returnType": qt_type_name(&m.return_type),
             "isInvokable": true,
         });
+        // The author's `///`, which already reaches the generated CLIENT as a doc comment but
+        // stopped here — so a Rust module listed its methods in Basecamp's interface screen with
+        // no description while a C++ one, over the same field, showed them. Omitted when empty,
+        // as the C++ emitter does: the screen hides the row rather than printing a blank.
+        if !m.description.is_empty() {
+            obj["description"] = serde_json::Value::String(m.description.clone());
+        }
         if !m.params.is_empty() {
             obj["parameters"] = serde_json::Value::Array(
                 m.params
@@ -475,6 +482,9 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
             "name": e.name,
             "signature": sig,
         });
+        if !e.description.is_empty() {
+            obj["description"] = serde_json::Value::String(e.description.clone());
+        }
         if !e.params.is_empty() {
             obj["parameters"] = serde_json::Value::Array(
                 e.params
