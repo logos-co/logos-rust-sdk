@@ -49,8 +49,9 @@ pub use callback::{CallResult, EventData};
 pub use plugin::{EventSubscription, PluginProxy, RestartPolicy, SubStatus};
 pub use api::{current_caller, current_caller_json, grant_host_services, module_origin,
               protocol_abi_major, protocol_version, save_token, set_call_caller,
-              set_module_origin, set_unload_done_callback, unload_finished, LogosCaller,
-              LogosModuleSDK, Shutdown, UnloadDoneCb};
+              set_module_origin, set_unload_done_callback, unload_finished, AboutToUnload,
+              LogosCaller, LogosModuleSDK, Shutdown, UnloadDoneCb, UnloadProbe,
+              UnloadProbeDefault, UnloadProbeHooked};
 
 // EVERY PATH THE GENERATED PROVIDER SCAFFOLD SPELLS, RESOLVED AT COMPILE TIME.
 //
@@ -80,6 +81,7 @@ pub use api::{current_caller, current_caller_json, grant_host_services, module_o
 mod generated_scaffold_paths {
     use crate::{
         grant_host_services, save_token, set_call_caller, set_module_origin,
-        set_unload_done_callback, unload_finished,
+        set_unload_done_callback, unload_finished, UnloadProbe, UnloadProbeDefault,
+        UnloadProbeHooked,
     };
 }
