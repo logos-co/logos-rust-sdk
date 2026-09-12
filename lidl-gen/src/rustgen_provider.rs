@@ -638,10 +638,11 @@ fn grant_host_services_block(protocol_version: &str) -> String {
 /// hook into a compile error for every existing rust-first module — trading a
 /// load-time break for a build-time one.
 ///
-/// A rust-first module that wants teardown declares `about_to_unload` on its
-/// own trait and is generated `--provider` WITH the trait, or drives its
-/// teardown from `on_context_ready`. It still gets the exports either way, so
-/// it loads.
+/// A rust-first module opts in instead by implementing
+/// `logos_rust_sdk::AboutToUnload` and installing with `logos_install!` rather
+/// than `install::<T>()` — see rust_first_unload_block(), which probes the
+/// author's CONCRETE type, where autoref specialization can still see it. This
+/// body stays the fallback for every module that has not migrated.
 fn about_to_unload_body(emit_trait: bool, multi: bool) -> String {
     // Substituted into the ASSEMBLED scaffold, so this is plain Rust source:
     // real newlines, real braces, and the 8-space body indent both install
@@ -691,14 +692,14 @@ fn about_to_unload_body(emit_trait: bool, multi: bool) -> String {
 /// Gated on >= 0.5 to match the guard on both the caller (the Qt glue) and the
 /// C++ emitter: older protocols do not declare the callback typedef, so
 /// emitting this unconditionally would just move the undefined symbol.
-fn teardown_block(protocol_version: &str) -> String {
+fn teardown_block(protocol_version: &str, emit_trait: bool) -> String {
     if !protocol_at_least(protocol_version, 0, 5) {
         return String::new();
     }
     // `Option<extern "C" fn(..)>` is the nullable function pointer the C side
     // spells `logos_module_unload_done_cb cb` -- a NULL cb clears the slot,
     // which is the documented way the host detaches.
-    "\n\
+    let base = "\n\
      #[no_mangle]\n\
      pub extern \"C\" fn logos_module_set_unload_done_callback(\n\
      \x20   cb: Option<logos_rust_sdk::UnloadDoneCb>,\n\
@@ -719,8 +720,81 @@ fn teardown_block(protocol_version: &str) -> String {
      \x20       None => 0,\n\
      \x20   }\n\
      }\n"
-        .to_string()
+        .to_string();
+    if emit_trait {
+        return base;
+    }
+    // Rust-first: prefer the hook `logos_install!` resolved at the author's
+    // CONCRETE type. The REGISTERED path it falls back to is the generic one,
+    // which in this mode always answers 0 -- so a module that never migrates
+    // off `install::<T>()` behaves exactly as it does today.
+    base.replace(
+        "    let hook = REGISTERED",
+        "    if let Some(f) = *UNLOAD_HOOK.lock().unwrap() {\n        return f();\n    }\n    let hook = REGISTERED",
+    )
 }
+
+/// The rust-first teardown opt-in: a `logos_install!` macro that probes the
+/// author's CONCRETE impl type for `logos_rust_sdk::AboutToUnload`.
+///
+/// Only the rust-first flow needs it. Autoref specialization resolves at
+/// type-check time, so a probe placed in the scaffold's own generic
+/// `about_to_unload_impl` picks the fallback for EVERY type -- including one
+/// that implements the hook. Expanding at the author's `install::<MyImpl>()`
+/// call site is what makes the type concrete, and is the whole reason this is
+/// a macro rather than a function.
+fn rust_first_unload_block(emit_trait: bool, multi: bool) -> String {
+    if emit_trait {
+        return String::new();
+    }
+    let fetch = if multi {
+        "            let inst = { INSTANCE.lock().unwrap().clone() };\n\
+         \x20           let Some(inst) = inst else { return 0 };\n\
+         \x20           let Ok(imp) = inst.downcast::<$t>() else { return 0 };"
+    } else {
+        "            let guard = INSTANCE.0.lock().unwrap();\n\
+         \x20           let Some(any) = guard.as_ref() else { return 0 };\n\
+         \x20           let Some(imp) = any.downcast_ref::<$t>() else { return 0 };"
+    };
+    RUST_FIRST_UNLOAD_BLOCK.replace("__FETCH__", fetch)
+}
+
+// `__FETCH__` is the instance lookup, which differs by concurrency mode; both
+// spellings leave `imp` derefable to `&$t`, which is what the probe takes.
+const RUST_FIRST_UNLOAD_BLOCK: &str = r##"
+// Set by logos_install! to a hook resolved at the author's concrete type.
+#[allow(dead_code)]
+static UNLOAD_HOOK: Mutex<Option<AboutToUnloadFn>> = Mutex::new(None);
+
+#[allow(dead_code)]
+fn set_unload_hook(f: AboutToUnloadFn) {
+    *UNLOAD_HOOK.lock().unwrap() = Some(f);
+}
+
+/// Install `$t` as the module implementation and wire its teardown hook.
+///
+/// Drop-in for `install::<$t>()`. Implement `logos_rust_sdk::AboutToUnload` for
+/// `$t` to be asked before the host unloads this module; without that impl this
+/// is exactly `install`.
+#[allow(unused_macros)]
+macro_rules! logos_install {
+    ($t:ty) => {{
+        fn __logos_about_to_unload() -> i32 {
+            // Exactly one of these two is used, and which one is the whole
+            // question being asked -- so the loser is always unused.
+            #[allow(unused_imports)]
+            use logos_rust_sdk::{UnloadProbe, UnloadProbeDefault, UnloadProbeHooked};
+__FETCH__
+            match (&UnloadProbe::<$t>::new()).probe(&*imp) {
+                logos_rust_sdk::Shutdown::Asynchronous => 1,
+                logos_rust_sdk::Shutdown::Synchronous => 0,
+            }
+        }
+        set_unload_hook(__logos_about_to_unload);
+        install::<$t>();
+    }};
+}
+"##;
 
 /// The module-impl export `logos_module_set_call_caller`, added at protocol
 /// 0.6: WHO is making the call that is about to run. The glue wraps exactly one
@@ -1393,7 +1467,11 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         format!(
             "{}{}{}",
             grant_host_services_block(protocol_version),
-            teardown_block(protocol_version),
+            format!(
+                "{}{}",
+                teardown_block(protocol_version, emit_trait),
+                rust_first_unload_block(emit_trait, multi)
+            ),
             format!(
                 "{}{}",
                 set_call_caller_block(protocol_version),
@@ -1461,16 +1539,43 @@ module rust_calc {
         assert!(code.contains("fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown"));
     }
 
-    // The Rust-first flow's trait is the AUTHOR's and predates this hook.
-    // Stable Rust cannot detect an optional method, so the scaffold must not
-    // call one that may not exist — it would turn a load-time break into a
-    // build-time break for every existing rust-first module.
+    // The Rust-first flow's trait is the AUTHOR's and predates this hook, so
+    // this GENERIC body must not call a method that may not exist — that would
+    // turn a load-time break into a build-time one for every existing module.
+    // Opting in goes through logos_install! instead; see the two tests below.
     #[test]
     fn the_rust_first_flow_still_exports_but_never_calls_the_trait() {
         let m = parse(SAMPLE).unwrap();
         let code = generate_provider_with(&m, "0.5.0", false, false);
         assert!(code.contains("pub extern \"C\" fn logos_module_about_to_unload"));
         assert!(!code.contains("imp.about_to_unload()"));
+    }
+
+    // The opt-in door for that same flow. `$t` is the whole point: the probe
+    // must name a concrete type, and only the author's call site knows one.
+    #[test]
+    fn the_rust_first_flow_emits_the_opt_in_macro() {
+        let m = parse(SAMPLE).unwrap();
+        for multi in [false, true] {
+            let code = generate_provider_with(&m, "0.5.0", false, multi);
+            assert!(code.contains("macro_rules! logos_install"), "multi={multi}");
+            assert!(code.contains("UnloadProbe::<$t>::new()"), "multi={multi}");
+            assert!(code.contains("if let Some(f) = *UNLOAD_HOOK"), "multi={multi}");
+        }
+    }
+
+    // Contract-first reaches the impl through the trait bound and needs none of
+    // it. Emitting both doors would give an author two ways to answer the same
+    // question, which is how they end up disagreeing.
+    #[test]
+    fn the_contract_first_flow_emits_no_macro_and_no_hook_slot() {
+        let m = parse(SAMPLE).unwrap();
+        for multi in [false, true] {
+            let code = generate_provider_with(&m, "0.5.0", true, multi);
+            assert!(!code.contains("macro_rules! logos_install"), "multi={multi}");
+            assert!(!code.contains("UNLOAD_HOOK"), "multi={multi}");
+            assert!(code.contains("imp.about_to_unload()"), "multi={multi}");
+        }
     }
 
     // ── protocol 0.6: WHO is calling this dispatch ──────────────────────────

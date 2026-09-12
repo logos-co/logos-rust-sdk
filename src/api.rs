@@ -233,6 +233,67 @@ pub fn unload_finished() {
     }
 }
 
+/// Opt-in teardown hook for a RUST-FIRST module.
+///
+/// A contract-first module gets `about_to_unload` on its generated trait. A
+/// rust-first module's trait is the author's own and predates the hook, so the
+/// scaffold cannot call a method that may not exist — implementing this trait
+/// is how such a module asks to be asked. Takes `&self` rather than `&mut self`
+/// because a `concurrency: "multi"` impl is reached through a shared `Arc`; use
+/// a `Mutex`/`Cell` field when teardown has to mutate.
+pub trait AboutToUnload {
+    fn about_to_unload(&self) -> Shutdown;
+}
+
+/// Resolves to [`AboutToUnload`] when the impl has it and to
+/// [`Shutdown::Synchronous`] when it does not — without specialization.
+///
+/// This is autoref specialization (what `anyhow` uses to tell `Display` from
+/// `Debug`): [`UnloadProbeHooked`] is implemented for `UnloadProbe<T>` and
+/// [`UnloadProbeDefault`] for `&UnloadProbe<T>`, so the bounded one sits one
+/// autoref closer and wins whenever `T: AboutToUnload`.
+///
+/// The call must name a CONCRETE type. Method resolution runs at type-check
+/// time, so inside a generic fn every `T` silently takes the fallback — which
+/// is why the scaffold probes from its `logos_install!` macro, expanded at the
+/// author's impl type, rather than from `install::<T>()`.
+pub struct UnloadProbe<T>(std::marker::PhantomData<T>);
+
+impl<T> UnloadProbe<T> {
+    pub fn new() -> Self {
+        UnloadProbe(std::marker::PhantomData)
+    }
+}
+
+impl<T> Default for UnloadProbe<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Preferred candidate: matched by value, so it wins when `T` qualifies.
+pub trait UnloadProbeHooked<T> {
+    fn probe(&self, imp: &T) -> Shutdown;
+}
+
+impl<T: AboutToUnload> UnloadProbeHooked<T> for UnloadProbe<T> {
+    fn probe(&self, imp: &T) -> Shutdown {
+        imp.about_to_unload()
+    }
+}
+
+/// Fallback: one autoref further out, so it applies only when the impl above
+/// does not.
+pub trait UnloadProbeDefault<T> {
+    fn probe(&self, imp: &T) -> Shutdown;
+}
+
+impl<T> UnloadProbeDefault<T> for &UnloadProbe<T> {
+    fn probe(&self, _imp: &T) -> Shutdown {
+        Shutdown::Synchronous
+    }
+}
+
 // -- WHO IS CALLING THIS DISPATCH -------------------------------------------
 //
 // The module-impl C ABI gained `logos_module_set_call_caller` in logos-protocol
@@ -810,5 +871,48 @@ mod caller_tests {
         assert_eq!(current_caller(), LogosCaller::Unknown);
         pop();
         assert_eq!(current_caller_json(), None);
+    }
+}
+
+#[cfg(test)]
+mod unload_probe_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Hooked(AtomicBool);
+    impl AboutToUnload for Hooked {
+        fn about_to_unload(&self) -> Shutdown {
+            self.0.store(true, Ordering::SeqCst);
+            Shutdown::Asynchronous
+        }
+    }
+
+    struct Plain;
+
+    #[test]
+    fn an_impl_with_the_hook_is_reached() {
+        let h = Hooked(AtomicBool::new(false));
+        assert_eq!((&UnloadProbe::<Hooked>::new()).probe(&h), Shutdown::Asynchronous);
+        assert!(h.0.load(Ordering::SeqCst), "the author's method must actually run");
+    }
+
+    #[test]
+    fn an_impl_without_it_answers_synchronous() {
+        assert_eq!((&UnloadProbe::<Plain>::new()).probe(&Plain), Shutdown::Synchronous);
+    }
+
+    // The trap this whole mechanism has to dodge: method resolution runs at
+    // type-check time, so a probe behind an unbounded `T` picks the fallback
+    // for EVERY type — including one that implements the hook. If this ever
+    // starts answering Asynchronous, stable Rust gained specialization and the
+    // macro indirection in the scaffold can go.
+    #[test]
+    fn a_generic_call_site_silently_takes_the_fallback() {
+        fn probe_generically<T>(imp: &T) -> Shutdown {
+            (&UnloadProbe::<T>::new()).probe(imp)
+        }
+        let h = Hooked(AtomicBool::new(false));
+        assert_eq!(probe_generically(&h), Shutdown::Synchronous);
+        assert!(!h.0.load(Ordering::SeqCst));
     }
 }
