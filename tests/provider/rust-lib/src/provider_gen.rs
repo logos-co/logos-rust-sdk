@@ -184,6 +184,11 @@ pub fn install<T: SdkTestProviderModule + Default>() {
                                      let result = "0.1.0".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
+                                     let result = "module sdk_test_provider_module {\n  version \"0.1.0\"\n  description \"Minimal provider module for logos-rust-sdk integration tests\"\n  depends []\n\n  method add(a: int, b: int) -> int\n  method emit_blob(size: int) -> int\n  method sleep(ms: int) -> int description \"Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`.\"\n\n  event blobReady(seq: int, payload: bstr)\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
             _ => None,
         }
     }
@@ -267,7 +272,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"description\":\"Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`.\",\"isInvokable\":true,\"name\":\"sleep\",\"parameters\":[{\"name\":\"ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"sleep(int)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"add(int,int)\"},{\"isInvokable\":true,\"name\":\"emit_blob\",\"parameters\":[{\"name\":\"size\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"emit_blob(int)\"},{\"description\":\"Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`.\",\"isInvokable\":true,\"name\":\"sleep\",\"parameters\":[{\"name\":\"ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"sleep(int)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"description\":\"The module's canonical LIDL interface document.\",\"isInvokable\":true,\"name\":\"lidl\",\"returnType\":\"QString\",\"signature\":\"lidl()\"},{\"name\":\"blobReady\",\"parameters\":[{\"name\":\"seq\",\"type\":\"int\"},{\"name\":\"payload\",\"type\":\"QByteArray\"}],\"signature\":\"blobReady(int,QByteArray)\",\"type\":\"event\"}]".to_string())
 }
 
 #[no_mangle]
