@@ -266,8 +266,10 @@ sections:
           commits under test (locally: this checkout's HEAD; in CI: the pinned
           commit) — the same override on the staging build, so the source the
           lockfile is generated against is the same commit the builder later
-          links and runs the generator from.
-        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+          links and runs the generator from. The C++ SDK is version-coupled too:
+          the Qt generator compiles its shared LIDL frontend sources, so that
+          input must carry the same structural-return support as current LIDL.
+        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd slow-worker
           nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
@@ -276,6 +278,7 @@ sections:
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A && nix flake update && git add flake.lock
           nix build .#lgx -o worker-lgx \
+            --override-input logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
             --override-input logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
             --override-input logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
             --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
@@ -463,7 +466,7 @@ sections:
           builder and the worker's). This is the module whose *generated typed
           client* calls into the SDK, so it is the one that would break first if
           the staged source and the generator ever came from different commits:
-        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd fanout-driver
           nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
@@ -475,9 +478,14 @@ sections:
           git add flake.lock
           nix build .#lgx -o driver-lgx \
             --override-input slow_worker_module path:$PWD/../slow-worker \
+            --override-input logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
             --override-input logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
             --override-input logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
-            --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
+            --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol' \
+            --override-input slow_worker_module/logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
         check_file: "fanout-driver/driver-lgx"
 
   - title: "Run it: the single driver overlaps the multi worker"
