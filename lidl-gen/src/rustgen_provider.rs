@@ -422,13 +422,13 @@ fn emit_param_value(ty: &TypeExpr, name: &str, recs: &BTreeSet<String>) -> Strin
     }
 }
 
-/// The value a derived identity method answers with. `None` for any other
+/// The value a derived built-in method answers with. `None` for any other
 /// derived method, so an unrecognised one falls through to the ordinary path
 /// and fails loudly at compile time rather than silently answering nothing.
 ///
 /// An absent version falls back rather than emitting an empty string: `""`
 /// reads as a failed call, not as "unversioned".
-fn identity_literal(module: &ModuleDecl, method: &str) -> Option<String> {
+fn builtin_literal(module: &ModuleDecl, interface_document: &str, method: &str) -> Option<String> {
     match method {
         "name" => Some(module.name.clone()),
         "version" => Some(if module.version.is_empty() {
@@ -436,6 +436,7 @@ fn identity_literal(module: &ModuleDecl, method: &str) -> Option<String> {
         } else {
             module.version.clone()
         }),
+        "lidl" => Some(interface_document.to_string()),
         _ => None,
     }
 }
@@ -924,6 +925,26 @@ pub fn generate_provider_with(
     emit_trait: bool,
     multi: bool,
 ) -> String {
+    let interface_document = crate::serialize(module);
+    generate_provider_with_document(
+        module,
+        protocol_version,
+        emit_trait,
+        multi,
+        &interface_document,
+    )
+}
+
+/// Generate a provider with the canonical `.lidl` bytes it was built from for
+/// the derived `lidl()` method. Library callers that only have an AST use
+/// [`generate_provider_with`], which serializes it canonically.
+pub fn generate_provider_with_document(
+    module: &ModuleDecl,
+    protocol_version: &str,
+    emit_trait: bool,
+    multi: bool,
+    interface_document: &str,
+) -> String {
     let recs = crate::rustgen::record_names(module);
     let pascal_name = pascal(&module.name);
     // sdk_test_provider_module -> SdkTestProviderModule, not ...ModuleModule
@@ -1203,11 +1224,11 @@ __ABOUT_TO_UNLOAD_BODY__\n\
     }
 
     for m in &module.methods {
-        // A derived method has no trait method to call. name()/version()
-        // answer from the module declaration, which the builder derives from
-        // metadata.json, so the reported value cannot drift from the built one.
+        // A derived method has no trait method to call. name()/version()/lidl()
+        // answer from the module declaration; lidl() answers the canonical
+        // LIDL document consumed by this provider.
         if m.derived {
-            if let Some(literal) = identity_literal(module, &m.name) {
+            if let Some(literal) = builtin_literal(module, interface_document, &m.name) {
                 // This arm returns before the ordinary dispatch path, so it
                 // needs its own arity gate -- it does not inherit the one
                 // below. Without it `version("junk")` dropped the argument and
@@ -2196,14 +2217,14 @@ module v_module {
 
     // --- Module identity ---------------------------------------------------
     //
-    // name()/version() are added to the contract by the frontend
+    // name()/version()/lidl() are added to the contract by the frontend
     // (lidl/identity.hpp) and marked `derived`. Two things must hold for a Rust
     // provider: the author never has to implement them, and the value comes
     // from the module DECLARATION so it cannot drift from metadata.json.
 
     fn with_identity(src: &str) -> ModuleDecl {
         let mut m = parse(src).expect("parse");
-        for name in ["name", "version"] {
+        for name in ["name", "version", "lidl"] {
             let mut md = MethodDecl {
                 name: name.to_string(),
                 params: vec![],
@@ -2223,11 +2244,31 @@ module v_module {
     fn identity_methods_are_answered_by_the_generated_dispatch() {
         let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
 
-        // The literal is the module's own name/version, not a placeholder.
+        // The literal is the module's own name/version/LIDL, not a placeholder.
         assert!(code.contains(r#""name" =>"#), "{code}");
         assert!(code.contains(r#""rust_calc".to_string()"#), "{code}");
         assert!(code.contains(r#""version" =>"#), "{code}");
         assert!(code.contains(r#""1.0.0".to_string()"#), "{code}");
+        assert!(code.contains(r#""lidl" =>"#), "{code}");
+    }
+
+    #[test]
+    fn lidl_method_answers_the_canonical_document() {
+        let authored = "; comment\nmodule rust_calc{version \"1.0.0\" depends[]}";
+        let parsed = parse(authored).expect("parse authored contract");
+        let document = crate::serialize(&parsed);
+        let code = generate_provider_with_document(
+            &with_identity(&document),
+            "0.1.0",
+            true,
+            false,
+            &document,
+        );
+        assert!(
+            code.contains(&format!("{:?}.to_string()", document)),
+            "{code}"
+        );
+        assert!(!code.contains("comment"), "{code}");
     }
 
     #[test]
@@ -2238,6 +2279,7 @@ module v_module {
         let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
         assert!(!code.contains("fn name(&mut self) -> String;"), "{code}");
         assert!(!code.contains("fn version(&mut self) -> String;"), "{code}");
+        assert!(!code.contains("fn lidl(&mut self) -> String;"), "{code}");
         assert!(code.contains("fn greet("), "{code}");
     }
 
@@ -2278,6 +2320,7 @@ module v_module {
         let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
         assert!(!code.contains("imp.name("), "{code}");
         assert!(!code.contains("imp.version("), "{code}");
+        assert!(!code.contains("imp.lidl("), "{code}");
     }
 
     #[test]
@@ -2291,6 +2334,7 @@ module v_module {
             .unwrap_or(&code);
         assert!(listing.contains("name"), "{listing}");
         assert!(listing.contains("version"), "{listing}");
+        assert!(listing.contains("lidl"), "{listing}");
     }
 
     #[test]

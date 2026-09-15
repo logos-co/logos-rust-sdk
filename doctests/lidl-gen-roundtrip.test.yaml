@@ -192,13 +192,15 @@ sections:
       it to the host. Scalars map to `i64`/`u64`/`f64`/`bool`/`String`, `bstr` to
       `Vec<u8>`, and `result` to `Result<serde_json::Value, String>`.
 
-      Note the count: **11 methods, not the 9 in the contract**. Every module
-      answers `name()` and `version()`, and nobody writes them — the frontend
-      derives them from the module declaration, so what a module reports can
-      never drift from what it was built with. They are *derived*, which is why
-      the `.lidl` above still says 9: the published contract stays exactly what
-      its author wrote, and the two identity methods are added on the way into
-      code generation, on the provider and consumer sides alike.
+      Note the count: **12 methods, not the 9 in the contract**. Every module
+      answers `name()`, `version()`, and `lidl()`, and nobody writes them — the
+      frontend derives them from the module declaration and canonical contract,
+      so what a module reports cannot drift from what it was built with. They
+      are *derived*, which is why the normalized `.lidl` above still says 9:
+      the published contract contains only the authored API, and the three
+      built-ins are added on the way into code generation, on the provider and
+      consumer sides alike. `lidl()` returns that normalized document byte for
+      byte.
 
       They do not appear on the `trait` you implement, either — the generated
       dispatch answers them itself. Deriving them would buy nothing if every
@@ -210,7 +212,7 @@ sections:
           logos-lidl-gen extracted/sensor_module.lidl --provider -o provider_gen.rs
         expect_contains:
           - "provider backend"
-          - "11 methods, 3 events"
+          - "12 methods, 3 events"
         check_file: "provider_gen.rs"
       - title: "Inspect the provider scaffold"
         run: "grep -E 'pub trait SensorModule|fn temperature|fn record|fn firmware|fn reset|pub fn emit_fault' provider_gen.rs"

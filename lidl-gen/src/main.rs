@@ -109,8 +109,8 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        // A consumer sees name()/version() on every dependency, from the same
-        // frontend pass the provider uses.
+        // A consumer sees name()/version()/lidl() on every dependency, from
+        // the same frontend pass the provider uses.
         match logos_lidl_gen::inject_identity(&parsed) {
             Ok(m) => deps.push((name.to_string(), m)),
             Err(e) => {
@@ -186,6 +186,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // A provider embeds the canonical contract, never the author's incidental
+    // whitespace/comments. This must match the module's `#lidl` output and the
+    // copy placed in LGX assets byte-for-byte.
+    let canonical_lidl = logos_lidl_gen::serialize(&parsed);
     let module = match logos_lidl_gen::inject_identity(&parsed) {
         Ok(m) => m,
         Err(e) => {
@@ -200,11 +204,12 @@ fn main() {
     // anything else ⇒ single.
     let multi = flag_value(&args, "--concurrency").as_deref() == Some("multi");
     let mut code = if provider {
-        logos_lidl_gen::rustgen_provider::generate_provider_with(
+        logos_lidl_gen::rustgen_provider::generate_provider_with_document(
             &module,
             &protocol_version,
             !no_trait,
             multi,
+            &canonical_lidl,
         )
     } else {
         logos_lidl_gen::generate(&module)

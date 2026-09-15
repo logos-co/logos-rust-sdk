@@ -239,6 +239,11 @@ pub fn install<T: SdkTestCallerModule + Default>() {
                                      let result = "0.1.0".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
+                                     let result = "module sdk_test_caller_module {\n  version \"0.1.0\"\n  description \"Minimal caller module for logos-rust-sdk integration tests\"\n  depends [sdk_test_provider_module]\n\n  method call_add(a: int, b: int) -> int\n  method last_blob_size() -> int\n  method last_blob_checksum() -> int\n  method timed_call(sleep_ms: int, timeout_ms: int) -> int description \"Call the provider's sleep(sleep_ms) on the process's ONE provider client, through the generated sleep_with_timeout when timeout_ms > 0 and through plain sleep otherwise. Returns the elapsed milliseconds, negated if the call actually completed.\"\n  method same_client_two_timeouts(sleep_ms: int, timeout_a_ms: int, timeout_b_ms: int, drain_ms: int) -> int description \"Two sleep(sleep_ms) calls back to back on the SAME client, the first bounded at timeout_a_ms and the second at timeout_b_ms, with drain_ms slept between them so the single-dispatch provider is idle again. Read the elapsed times with last_pair_a_ms / last_pair_b_ms.\"\n  method last_pair_a_ms() -> int description \"Elapsed ms of the FIRST call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\"\n  method last_pair_b_ms() -> int description \"Elapsed ms of the SECOND call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\"\n  method provider_client_addr() -> int description \"Address of the process-wide provider client, so a caller can verify that separate measurements really went through the same client object.\"\n  method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description \"Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok.\"\n  method last_async_elapsed_ms() -> int description \"Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight.\"\n  method last_async_ok() -> int description \"1 if the last async call completed, 0 if it failed, -1 while still in flight.\"\n  method refused_timeout_reason(timeout_us: int) -> tstr description \"Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default.\"\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
             _ => None,
         }
     }
@@ -322,7 +327,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"call_add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"call_add(int,int)\"},{\"isInvokable\":true,\"name\":\"last_blob_size\",\"returnType\":\"int\",\"signature\":\"last_blob_size()\"},{\"isInvokable\":true,\"name\":\"last_blob_checksum\",\"returnType\":\"int\",\"signature\":\"last_blob_checksum()\"},{\"description\":\"Call the provider's sleep(sleep_ms) on the process's ONE provider client, through the generated sleep_with_timeout when timeout_ms > 0 and through plain sleep otherwise. Returns the elapsed milliseconds, negated if the call actually completed.\",\"isInvokable\":true,\"name\":\"timed_call\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"timed_call(int,int)\"},{\"description\":\"Two sleep(sleep_ms) calls back to back on the SAME client, the first bounded at timeout_a_ms and the second at timeout_b_ms, with drain_ms slept between them so the single-dispatch provider is idle again. Read the elapsed times with last_pair_a_ms / last_pair_b_ms.\",\"isInvokable\":true,\"name\":\"same_client_two_timeouts\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_a_ms\",\"type\":\"int\"},{\"name\":\"timeout_b_ms\",\"type\":\"int\"},{\"name\":\"drain_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"same_client_two_timeouts(int,int,int,int)\"},{\"description\":\"Elapsed ms of the FIRST call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\",\"isInvokable\":true,\"name\":\"last_pair_a_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_a_ms()\"},{\"description\":\"Elapsed ms of the SECOND call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\",\"isInvokable\":true,\"name\":\"last_pair_b_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_b_ms()\"},{\"description\":\"Address of the process-wide provider client, so a caller can verify that separate measurements really went through the same client object.\",\"isInvokable\":true,\"name\":\"provider_client_addr\",\"returnType\":\"int\",\"signature\":\"provider_client_addr()\"},{\"description\":\"Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok.\",\"isInvokable\":true,\"name\":\"start_timed_call_async\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"start_timed_call_async(int,int)\"},{\"description\":\"Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight.\",\"isInvokable\":true,\"name\":\"last_async_elapsed_ms\",\"returnType\":\"int\",\"signature\":\"last_async_elapsed_ms()\"},{\"description\":\"1 if the last async call completed, 0 if it failed, -1 while still in flight.\",\"isInvokable\":true,\"name\":\"last_async_ok\",\"returnType\":\"int\",\"signature\":\"last_async_ok()\"},{\"description\":\"Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default.\",\"isInvokable\":true,\"name\":\"refused_timeout_reason\",\"parameters\":[{\"name\":\"timeout_us\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"refused_timeout_reason(int)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"}]".to_string())
+    to_c_string("[{\"isInvokable\":true,\"name\":\"call_add\",\"parameters\":[{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"call_add(int,int)\"},{\"isInvokable\":true,\"name\":\"last_blob_size\",\"returnType\":\"int\",\"signature\":\"last_blob_size()\"},{\"isInvokable\":true,\"name\":\"last_blob_checksum\",\"returnType\":\"int\",\"signature\":\"last_blob_checksum()\"},{\"description\":\"Call the provider's sleep(sleep_ms) on the process's ONE provider client, through the generated sleep_with_timeout when timeout_ms > 0 and through plain sleep otherwise. Returns the elapsed milliseconds, negated if the call actually completed.\",\"isInvokable\":true,\"name\":\"timed_call\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"timed_call(int,int)\"},{\"description\":\"Two sleep(sleep_ms) calls back to back on the SAME client, the first bounded at timeout_a_ms and the second at timeout_b_ms, with drain_ms slept between them so the single-dispatch provider is idle again. Read the elapsed times with last_pair_a_ms / last_pair_b_ms.\",\"isInvokable\":true,\"name\":\"same_client_two_timeouts\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_a_ms\",\"type\":\"int\"},{\"name\":\"timeout_b_ms\",\"type\":\"int\"},{\"name\":\"drain_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"same_client_two_timeouts(int,int,int,int)\"},{\"description\":\"Elapsed ms of the FIRST call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\",\"isInvokable\":true,\"name\":\"last_pair_a_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_a_ms()\"},{\"description\":\"Elapsed ms of the SECOND call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\",\"isInvokable\":true,\"name\":\"last_pair_b_ms\",\"returnType\":\"int\",\"signature\":\"last_pair_b_ms()\"},{\"description\":\"Address of the process-wide provider client, so a caller can verify that separate measurements really went through the same client object.\",\"isInvokable\":true,\"name\":\"provider_client_addr\",\"returnType\":\"int\",\"signature\":\"provider_client_addr()\"},{\"description\":\"Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok.\",\"isInvokable\":true,\"name\":\"start_timed_call_async\",\"parameters\":[{\"name\":\"sleep_ms\",\"type\":\"int\"},{\"name\":\"timeout_ms\",\"type\":\"int\"}],\"returnType\":\"int\",\"signature\":\"start_timed_call_async(int,int)\"},{\"description\":\"Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight.\",\"isInvokable\":true,\"name\":\"last_async_elapsed_ms\",\"returnType\":\"int\",\"signature\":\"last_async_elapsed_ms()\"},{\"description\":\"1 if the last async call completed, 0 if it failed, -1 while still in flight.\",\"isInvokable\":true,\"name\":\"last_async_ok\",\"returnType\":\"int\",\"signature\":\"last_async_ok()\"},{\"description\":\"Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default.\",\"isInvokable\":true,\"name\":\"refused_timeout_reason\",\"parameters\":[{\"name\":\"timeout_us\",\"type\":\"int\"}],\"returnType\":\"QString\",\"signature\":\"refused_timeout_reason(int)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"description\":\"The module's canonical LIDL interface document.\",\"isInvokable\":true,\"name\":\"lidl\",\"returnType\":\"QString\",\"signature\":\"lidl()\"}]".to_string())
 }
 
 #[no_mangle]
@@ -772,6 +777,70 @@ pub mod sdk_test_provider_module {
         {
             let args = serde_json::Value::Array(vec![]);
             self.proxy.call_json_async_with_timeout("version", &args, timeout, move |result| {
+                callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+            });
+        }
+
+        /// The module's canonical LIDL interface document.
+        pub fn lidl(&self) -> Result<String, LogosError> {
+            let args = serde_json::Value::Array(vec![]);
+            let value = self.proxy.call_json("lidl", &args)?;
+            Ok(value.as_str().unwrap_or_default().to_string())
+        }
+
+        /// [`Self::lidl`] with a per-call timeout: THIS call gives up after
+        /// `timeout` instead of waiting for the protocol default (20s).
+        /// The bound is threaded down to the call and stored nowhere, so
+        /// the next call through the same client — with a different
+        /// timeout, or with none — is unaffected.
+        ///
+        /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+        /// expressed on the protocol ABI (sub-millisecond, or longer than
+        /// ~24.8 days). It is refused, never clamped.
+        ///
+        /// A parallel entry point rather than a parameter on [`Self::lidl`]:
+        /// Rust has neither overloading nor default arguments, so the
+        /// parameter would break every existing call site. STOPGAP — a later
+        /// breaking release folds this back into the single entry point.
+        pub fn lidl_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+            let args = serde_json::Value::Array(vec![]);
+            let value = self.proxy.call_json_with_timeout("lidl", &args, timeout)?;
+            Ok(value.as_str().unwrap_or_default().to_string())
+        }
+
+        /// Async twin of [`Self::lidl`]: fire the call and receive the typed
+        /// result in `callback` once it lands — the Rust analog of the C++
+        /// client's `lidlAsync`. The callback runs from the protocol
+        /// completion path (the module's Qt event loop), so it fires after
+        /// the current method returns, never inline.
+        pub fn lidl_async<F>(&self, callback: F)
+        where
+            F: FnOnce(Result<String, LogosError>) + Send + 'static,
+        {
+            let args = serde_json::Value::Array(vec![]);
+            self.proxy.call_json_async("lidl", &args, move |result| {
+                callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+            });
+        }
+
+        /// [`Self::lidl_async`] with a per-call timeout — the async half of
+        /// [`Self::lidl_with_timeout`]. The bound applies to THIS call only;
+        /// nothing is stored on the client.
+        ///
+        /// A duration the protocol ABI cannot express (sub-millisecond, or
+        /// longer than ~24.8 days) is delivered to `callback` as
+        /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+        /// which is how every other undispatchable async call is reported.
+        ///
+        /// STOPGAP, like its sync twin: Rust cannot overload
+        /// [`Self::lidl_async`], so the bounded form needs its own name until a
+        /// breaking release makes `timeout` a parameter of the one entry point.
+        pub fn lidl_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+        where
+            F: FnOnce(Result<String, LogosError>) + Send + 'static,
+        {
+            let args = serde_json::Value::Array(vec![]);
+            self.proxy.call_json_async_with_timeout("lidl", &args, timeout, move |result| {
                 callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
             });
         }
