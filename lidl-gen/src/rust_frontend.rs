@@ -198,13 +198,12 @@ fn type_to_lidl(ty: &syn::Type, is_return: bool) -> Result<TypeExpr, String> {
         return type_to_lidl(&r.elem, is_return);
     }
     match ty {
-        syn::Type::Tuple(t) if t.elems.is_empty() => {
-            if is_return {
-                Ok(TypeExpr::primitive("void"))
+        syn::Type::Tuple(t) if t.elems.is_empty() =>
+            Err(if is_return {
+                "unit return must be represented structurally".into()
             } else {
-                Err("unit type () is not a valid parameter".into())
-            }
-        }
+                "unit type () is not a valid parameter".into()
+            }),
         syn::Type::Slice(s) => {
             // &[u8] arrives here after the reference unwrap.
             if type_name(&s.elem) == Some("u8".into()) {
@@ -353,9 +352,11 @@ pub fn extract_from_rust(
                     continue;
                 }
                 let return_type = match &f.sig.output {
-                    syn::ReturnType::Default => TypeExpr::primitive("void"),
-                    syn::ReturnType::Type(_, t) => type_to_lidl(t, true)
-                        .map_err(|e| format!("{}: {}", f.sig.ident, e))?,
+                    syn::ReturnType::Default => None,
+                    syn::ReturnType::Type(_, t)
+                        if matches!(t.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty()) => None,
+                    syn::ReturnType::Type(_, t) => Some(type_to_lidl(t, true)
+                        .map_err(|e| format!("{}: {}", f.sig.ident, e))?),
                 };
                 module.methods.push(MethodDecl {
                     name: f.sig.ident.to_string(),
@@ -409,6 +410,7 @@ pub trait RustCalcModule {
     fn greet(&mut self, name: String) -> String;
     fn store(&mut self, data: Vec<u8>) -> bool;
     fn fetch(&mut self) -> Result<serde_json::Value, String>;
+    fn notify(&mut self);
     /// Framework hook — defaulted, so NOT part of the contract.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -424,12 +426,14 @@ pub trait RustCalcModuleEvents {
         let m = extract_from_rust(SRC, "RustCalcModule", None, "1.0.0").unwrap();
         assert_eq!(m.name, "rust_calc_module");
         assert_eq!(m.version, "1.0.0");
-        assert_eq!(m.methods.len(), 4); // on_context_ready excluded
+        assert_eq!(m.methods.len(), 5); // on_context_ready excluded
         assert_eq!(m.methods[0].name, "add");
         assert_eq!(m.methods[0].params[0].ty.name, "int");
         assert_eq!(m.methods[1].params[0].ty.name, "tstr");
         assert_eq!(m.methods[2].params[0].ty.name, "bstr");
-        assert_eq!(m.methods[3].return_type.name, "result");
+        assert_eq!(m.methods[3].return_type.as_ref().unwrap().name, "result");
+        assert!(m.methods[4].return_type.is_none());
+        assert!(crate::serialize(&m).contains("method notify()\n"));
         assert_eq!(m.events.len(), 1);
         assert_eq!(m.events[0].name, "total_changed");
         assert_eq!(m.events[0].params[0].ty.name, "int");

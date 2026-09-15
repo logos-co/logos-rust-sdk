@@ -61,11 +61,9 @@ fn rust_ident(name: &str) -> String {
 
 /// The set of record names the module actually DECLARES.
 ///
-/// A `Named` type is not automatically a record: the LIDL front end has no
-/// `void` builtin, so `-> void` parses as `Named("void")` — and pascal-casing
-/// every Named produced `-> Void`, a type that does not exist. Only a name in
-/// `module.types` gets the struct; anything else keeps the untyped fallback it
-/// had before records existed.
+/// A `Named` type is not automatically a record. Only a name in `module.types`
+/// gets the struct; anything else keeps the untyped fallback it had before
+/// records existed. No-return methods carry no TypeExpr at all.
 pub(crate) fn record_names(module: &ModuleDecl) -> BTreeSet<String> {
     module.types.iter().map(|t| t.name.clone()).collect()
 }
@@ -352,12 +350,15 @@ fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 }
 
 /// (return type, conversion-from-json expression over `value`)
-fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
+fn return_conv(ty: Option<&TypeExpr>, recs: &BTreeSet<String>) -> (String, String) {
+    let Some(ty) = ty else {
+        return ("()".into(), "{ let _ = value; Ok(()) }".into());
+    };
     // `-> ?T` is `Option<T>`: null is the empty state (a return is positional,
     // so that is how the provider spells empty). A present value still has to
     // decode as `T` and still fails the call if it doesn't.
     if is_optional(ty) {
-        let (inner_ty, inner_conv) = return_conv(ty.value_type(), recs);
+        let (inner_ty, inner_conv) = return_conv(Some(ty.value_type()), recs);
         return (
             format!("Option<{}>", inner_ty),
             format!(
@@ -367,14 +368,6 @@ fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
         );
     }
     match (&ty.kind, ty.name.as_str()) {
-        // A void method has nothing to hand back. It used to fall to the
-        // catch-all and return the raw serde_json::Value, which made the caller
-        // inspect a value the contract says does not exist — and made every
-        // consumer decide for itself whether the provider's answer meant
-        // success. The call still fails through `?` if the RPC failed.
-        // A BLOCK, not a bare statement: this conversion is also spliced into an
-        // expression position by the async wrapper, where a `let` is a syntax error.
-        (TypeKind::Named, "void") => ("()".into(), "{ let _ = value; Ok(()) }".into()),
         (TypeKind::Primitive, "tstr") => (
             "String".into(),
             "Ok(value.as_str().unwrap_or_default().to_string())".into(),
@@ -522,7 +515,7 @@ pub fn generate(module: &ModuleDecl) -> String {
             .iter()
             .map(|p| param_to_json(&rust_ident(&p.name), &p.ty, &recs))
             .collect();
-        let (ret_ty, conv) = return_conv(&m.return_type, &recs);
+        let (ret_ty, conv) = return_conv(m.return_type.as_ref(), &recs);
         // Carry the contract's doc comment onto the generated method.
         out.push('\n');
         for line in m.description.lines() {
@@ -1313,6 +1306,9 @@ module v_module {
 }
 "#;
         let m = crate::parse(src).expect("parse");
+        assert!(m.methods[0].return_type.is_none());
+        assert!(crate::serialize(&m).contains("method doVoid()\n"));
+        assert!(!crate::serialize(&m).contains("method doVoid() ->"));
         let code = generate(&m);
         // (a plain contains("Void") would match the method name `doVoid`)
         assert!(!code.contains("Result<Void"), "void leaked in as a struct:\n{}", code);

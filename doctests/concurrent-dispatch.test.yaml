@@ -20,7 +20,7 @@ intro: |
 
   | Module | `concurrency` | Role |
   |---|---|---|
-  | `slow_worker_module` | **`"multi"`** | a worker whose `work(ms)` blocks for `ms`, recording the PEAK number of calls running at once |
+  | `slow_worker_module` | **`"multi"`** | `work(ms, batch_size)` waits for its batch, then blocks for `ms`, while `peak()` waits for that batch and returns the PEAK number of calls running at once |
   | `fanout_driver_module` | `"single"` (default) | an ordinary single-threaded module that fires several `work` calls at the worker **without waiting between them** (the generated `work_async` client) |
 
   The driver is single-threaded, yet it drives the worker concurrently: it fires
@@ -36,7 +36,7 @@ what_you_build: "Two composed Rust modules — a concurrency:\"multi\" worker an
 
 what_you_learn:
   - "What `concurrency: \"multi\"` does and when to reach for it"
-  - "The multi contract: the generated trait takes `&self` + `Send + Sync`, so shared state uses interior mutability (here, atomics)"
+  - "The multi contract: the generated trait takes `&self` + `Send + Sync`, so shared state uses interior mutability (here, atomics plus a mutex and condition variable)"
   - "How a single-threaded caller drives concurrent work: fire `method_async(...)` calls without waiting between them"
   - "That a multi worker overlaps those calls (peak == N) while a single worker would serialize them (peak 1)"
 
@@ -73,11 +73,13 @@ sections:
   - title: "Module 1 — the concurrent worker (`slow_worker_module`)"
     step: true
     text: |
-      A Rust module whose `work(ms)` blocks for `ms` milliseconds. The single
-      thing that makes it concurrent is **`"concurrency": "multi"`** in its
-      metadata — with that, the generated trait hands you `&self` (not
-      `&mut self`) and requires `Send + Sync`, so the overlap counter lives in
-      atomics.
+      A Rust module whose `work(ms, batch_size)` waits for the whole batch to
+      enter, then blocks for `ms`. Its `peak()` query waits on that same barrier
+      before reading the counter, making the overlap assertion independent of
+      host scheduling. The single thing that makes it concurrent is
+      **`"concurrency": "multi"`** in its metadata — with that, the generated
+      trait hands you `&self` (not `&mut self`) and requires `Send + Sync`, so
+      the shared state uses atomics plus a mutex and condition variable.
     steps:
       - title: "The module logic"
         text: |
@@ -89,35 +91,74 @@ sections:
           path: slow-worker/rust-lib/src/glue.rs
           language: rust
           content: |
-            //! A concurrency:"multi" worker. `work` blocks for `ms` and records the
-            //! PEAK number of calls running at the same time. Because the module is
-            //! "multi", the generated trait takes &self and is Send + Sync, so the
-            //! counters are atomics (the author owns thread-safety).
+            //! A concurrency:"multi" worker. `work` waits for its batch, blocks for
+            //! `ms`, and records the PEAK number of calls running at the same time.
+            //! Because the module is "multi", the generated trait takes &self and is
+            //! Send + Sync, so the author owns synchronization of the shared state.
 
             use std::sync::atomic::{AtomicI64, Ordering};
+            use std::sync::{Condvar as BatchCondvar, Mutex as BatchMutex};
             use std::time::Duration;
 
             pub trait SlowWorkerModule: Send + Sync + 'static {
-                fn work(&self, ms: i64) -> i64;
+                fn work(&self, ms: i64, batch_size: i64) -> i64;
                 fn peak(&self) -> i64;
                 fn on_context_ready(&self, _ctx: &RustModuleContext) {}
+            }
+
+            #[derive(Default)]
+            struct BatchState {
+                arrived: i64,
+                open: bool,
             }
 
             #[derive(Default)]
             pub struct WorkerImpl {
                 in_flight: AtomicI64,
                 max_seen: AtomicI64,
+                batch: BatchMutex<BatchState>,
+                batch_ready: BatchCondvar,
             }
 
             impl SlowWorkerModule for WorkerImpl {
-                fn work(&self, ms: i64) -> i64 {
+                fn work(&self, ms: i64, batch_size: i64) -> i64 {
                     let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                     self.max_seen.fetch_max(now, Ordering::SeqCst);
+
+                    // Hold every call at a batch barrier until all requested calls
+                    // have entered work(). This tests dispatch concurrency without
+                    // relying on a particular machine scheduling a large worker pool.
+                    {
+                        let mut batch = self.batch.lock().unwrap();
+                        batch.arrived += 1;
+                        if batch.arrived >= batch_size {
+                            batch.open = true;
+                            self.batch_ready.notify_all();
+                        } else {
+                            let (_batch, _) = self
+                                .batch_ready
+                                .wait_timeout_while(batch, Duration::from_secs(10), |state| {
+                                    !state.open
+                                })
+                                .unwrap();
+                        }
+                    }
+
                     std::thread::sleep(Duration::from_millis(ms.max(0) as u64));
                     self.in_flight.fetch_sub(1, Ordering::SeqCst);
                     ms
                 }
                 fn peak(&self) -> i64 {
+                    // A peak query can race ahead of an async work request on a
+                    // heavily loaded host. Wait for the batch itself instead of
+                    // guessing how long dispatch should take.
+                    let batch = self.batch.lock().unwrap();
+                    let (_batch, _) = self
+                        .batch_ready
+                        .wait_timeout_while(batch, Duration::from_secs(30), |state| {
+                            !state.open
+                        })
+                        .unwrap();
                     self.max_seen.load(Ordering::SeqCst)
                 }
             }
@@ -141,7 +182,7 @@ sections:
             {
               "name": "slow_worker_module",
               "version": "1.0.0",
-              "description": "A concurrency:multi worker: work(ms) blocks and records peak overlap",
+              "description": "A concurrency:multi worker: work(ms, batch_size) waits for its batch and records peak overlap",
               "author": "Logos Core Team",
               "type": "core",
               "interface": "cdylib",
@@ -266,8 +307,10 @@ sections:
           commits under test (locally: this checkout's HEAD; in CI: the pinned
           commit) — the same override on the staging build, so the source the
           lockfile is generated against is the same commit the builder later
-          links and runs the generator from.
-        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+          links and runs the generator from. The C++ SDK is version-coupled too:
+          the Qt generator compiles its shared LIDL frontend sources, so that
+          input must carry the same structural-return support as current LIDL.
+        run: "sh -c 'cd slow-worker && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update && git add flake.lock && nix build .#lgx -o worker-lgx --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd slow-worker
           nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
@@ -276,6 +319,7 @@ sections:
           (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile)
           git init && git add -A && nix flake update && git add flake.lock
           nix build .#lgx -o worker-lgx \
+            --override-input logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
             --override-input logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
             --override-input logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
             --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
@@ -292,7 +336,7 @@ sections:
       - title: "The module logic"
         text: |
           Create `fanout-driver/rust-lib/src/glue.rs`. `fan_out` loops firing the
-          generated async client `modules().slow_worker_module.work_async(ms, cb)`
+          generated async client `modules().slow_worker_module.work_async(ms, n, cb)`
           — fire-and-forget; each returns immediately. The worker, being `multi`,
           runs them all at once:
         file:
@@ -305,8 +349,10 @@ sections:
             //! (concurrency:multi) processes them in parallel.
 
             pub trait FanoutDriverModule: Send + 'static {
-                /// Fire `n` concurrent work(ms) calls at the worker; returns `n`.
+                /// Fire `n` concurrent work(ms, n) calls at the worker; returns `n`.
                 fn fan_out(&mut self, n: i64, ms: i64) -> i64;
+                /// Read the worker's observed peak overlap through this driver.
+                fn peak(&mut self) -> i64;
                 fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
             }
 
@@ -321,9 +367,15 @@ sections:
                         // coalesced capability handshake and the worker sees them all
                         // at once. (Async typed client: fire and return immediately;
                         // the result lands on our event loop later, unused here.)
-                        modules().slow_worker_module.work_async(ms, |_res| {});
+                        modules()
+                            .slow_worker_module
+                            .work_async(ms, n, |_res| {});
                     }
                     n
+                }
+
+                fn peak(&mut self) -> i64 {
+                    modules().slow_worker_module.peak().unwrap_or(-1)
                 }
             }
 
@@ -463,7 +515,7 @@ sections:
           builder and the worker's). This is the module whose *generated typed
           client* calls into the SDK, so it is the one that would break first if
           the staged source and the generator ever came from different commits:
-        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
+        run: "sh -c 'cd fanout-driver && printf \"result\\nresult-*\\nlib/\\nrust-lib/target/\\nrust-lib/generated/\\nlogos-rust-sdk-src\\n\" > .gitignore && nix build \"github:logos-co/logos-module-builder{release}#rust-sdk-src\" --override-input logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" -o logos-rust-sdk-src && (cd rust-lib && nix run nixpkgs#cargo -- generate-lockfile) && git init -q && git add -A && nix flake update --override-input slow_worker_module path:$PWD/../slow-worker && git add flake.lock && nix build .#lgx -o driver-lgx --override-input slow_worker_module path:$PWD/../slow-worker --override-input logos-module-builder \"github:logos-co/logos-module-builder{release}\" --override-input logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\" --override-input slow_worker_module/logos-module-builder/logos-cpp-sdk \"github:logos-co/logos-cpp-sdk/247e121fba75b16f4008c18b3a03f782f9744ed5\" --override-input slow_worker_module/logos-module-builder/logos-rust-sdk \"github:logos-co/logos-rust-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-qt-sdk \"github:logos-co/logos-qt-sdk{release}\" --override-input slow_worker_module/logos-module-builder/logos-protocol \"github:logos-co/logos-protocol{release}\"'"
         code_block: |
           cd fanout-driver
           nix build 'github:logos-co/logos-module-builder#rust-sdk-src' \
@@ -475,9 +527,14 @@ sections:
           git add flake.lock
           nix build .#lgx -o driver-lgx \
             --override-input slow_worker_module path:$PWD/../slow-worker \
+            --override-input logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
             --override-input logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
             --override-input logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
-            --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
+            --override-input logos-module-builder/logos-protocol 'github:logos-co/logos-protocol' \
+            --override-input slow_worker_module/logos-module-builder/logos-cpp-sdk 'github:logos-co/logos-cpp-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-rust-sdk 'github:logos-co/logos-rust-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-qt-sdk 'github:logos-co/logos-qt-sdk' \
+            --override-input slow_worker_module/logos-module-builder/logos-protocol 'github:logos-co/logos-protocol'
         check_file: "fanout-driver/driver-lgx"
 
   - title: "Run it: the single driver overlaps the multi worker"
@@ -504,26 +561,29 @@ sections:
         expect_contains:
           - "fanout_driver_module"
           - "slow_worker_module"
-      - title: "Fan out 4 concurrent calls"
+      - title: "Fan out 2 concurrent calls"
         text: |
-          `fan_out(4, 500)` fires four `work(500)` calls at the worker without
-          waiting between them, and returns immediately (`4`). All four are now in
-          flight at the worker:
-        run: "./logos/bin/logoscore call fanout_driver_module fan_out 4 500"
-        code_block: "logoscore call fanout_driver_module fan_out 4 500"
+          `fan_out(2, 500)` fires two `work(500, 2)` calls at the worker without
+          waiting between them, and returns immediately (`2`). Two calls are
+          enough to distinguish concurrent dispatch from serialization without
+          assuming a larger worker pool:
+        run: "./logos/bin/logoscore call fanout_driver_module fan_out 2 500"
+        code_block: "logoscore call fanout_driver_module fan_out 2 500"
         expect_contains:
-          - '"result":4'
-      - run: "sleep 2"
-      - title: "The worker ran them concurrently (peak == 4)"
+          - '"result":2'
+      - title: "The worker ran them concurrently (peak == 2)"
         text: |
-          `peak` is the most calls the worker saw running at the same instant.
-          Because the worker is `concurrency: "multi"`, all four overlapped — so
-          the peak is **4**. Had the worker been `"single"`, it would have run them
-          one after another and the peak would be **1**:
-        run: "./logos/bin/logoscore call slow_worker_module peak"
-        code_block: "logoscore call slow_worker_module peak"
+          `peak` is the most calls the worker saw running at once. Because the
+          worker is `concurrency: "multi"`, both calls overlapped, so the peak is
+          **2**. Had the worker been `"single"`, the peak would be **1**. The
+          worker's `peak()` method waits until the batch barrier opens, so this
+          checks dispatch concurrency without relying on an arbitrary sleep. We
+          read it through the driver so its generated client awaits the multi
+          worker's deferred reply and returns the real number:
+        run: "./logos/bin/logoscore call fanout_driver_module peak"
+        code_block: "logoscore call fanout_driver_module peak"
         expect_contains:
-          - '"result":4'
+          - '"result":2'
       - title: "Stop the daemon"
         run: "./logos/bin/logoscore stop"
         code_block: "logoscore stop"

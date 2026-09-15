@@ -106,10 +106,8 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
         // gets `s: Status`, not a serde_json::Value to pick apart. Other
         // composites stay Value: retyping THOSE would change existing impls.
         //
-        // `recs.contains` is load-bearing, not defensive: the LIDL front end has
-        // no `void` builtin, so `-> void` arrives here as Named("void"). Mapping
-        // every Named to its pascal-cased struct emitted `-> Void` and broke
-        // every provider with a void method.
+        // `recs.contains` is load-bearing, not defensive: only declarations
+        // are records. No-return methods have no TypeExpr at all.
         (TypeKind::Named, n) if recs.contains(n) => {
             crate::rustgen::owned_type(ty, recs)
         }
@@ -122,26 +120,13 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     }
 }
 
-fn is_void(ty: &TypeExpr) -> bool {
-    // `void` is not a LIDL builtin, so it arrives as Named("void") and never as
-    // a declared record. Checked by name in exactly the places that need it,
-    // rather than added to the builtin table, so the parser stays the one
-    // authority on what a LIDL type is.
-    matches!(&ty.kind, TypeKind::Named) && ty.name == "void"
-}
-
-fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
+fn rust_return_type(ty: Option<&TypeExpr>, recs: &BTreeSet<String>) -> String {
+    let Some(ty) = ty else { return "()".into() };
     if is_optional(ty) {
-        return format!("Option<{}>", rust_return_type(ty.value_type(), recs));
+        return format!("Option<{}>", rust_return_type(Some(ty.value_type()), recs));
     }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "result") => "Result<serde_json::Value, String>".into(),
-        // A void method returns nothing. It used to fall to the catch-all and
-        // hand the author `-> serde_json::Value`, which is how it ended up
-        // returning JSON null: null is the failure token on the Qt slot above,
-        // so the same void method answered `true` from a C++ provider and
-        // METHOD_FAILED from this one.
-        _ if is_void(ty) => "()".into(),
         _ => rust_param_type(ty, recs),
     }
 }
@@ -157,10 +142,6 @@ fn qt_type_name(ty: &TypeExpr) -> String {
         (TypeKind::Primitive, "float64") => "double".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "result") => "LogosResult".into(),
-        // Matches what the C++ backend advertises. Without this a void method
-        // was published as returnType "QVariant" here and "void" there — a
-        // second divergence, in the interface metadata rather than the value.
-        (TypeKind::Named, "void") => "void".into(),
         (TypeKind::Array, _) => "QVariantList".into(),
         (TypeKind::Map, _) => "QVariantMap".into(),
         _ => "QVariant".into(),
@@ -342,12 +323,17 @@ fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
                 expr
             )
         }
-        // Both edits are required together: serde_json has
-        // `impl From<()> for Value` producing Value::Null, so changing only the
-        // signature to `()` would still emit null and change nothing.
-        // `true` matches what the C++ backend puts on the C ABI.
-        _ if is_void(ty) => format!("{{ {}; serde_json::Value::Bool(true) }}", expr),
         _ => format!("serde_json::Value::from({})", expr),
+    }
+}
+
+fn method_ret_to_json(ty: Option<&TypeExpr>, expr: &str, recs: &BTreeSet<String>) -> String {
+    match ty {
+        Some(ty) => ret_to_json(ty, expr, recs),
+        // The protocol still carries a success payload even though the LIDL
+        // method has no returned value. `true` matches the C++ backend and
+        // avoids conflating success with the transport's null failure token.
+        None => format!("{{ {}; serde_json::Value::Bool(true) }}", expr),
     }
 }
 
@@ -452,7 +438,7 @@ fn interface_json(module: &ModuleDecl) -> serde_json::Value {
         let mut obj = serde_json::json!({
             "name": m.name,
             "signature": sig,
-            "returnType": qt_type_name(&m.return_type),
+            "returnType": m.return_type.as_ref().map(qt_type_name).unwrap_or_else(|| "void".into()),
             "isInvokable": true,
         });
         // The author's `///`, which already reaches the generated CLIENT as a doc comment but
@@ -1125,7 +1111,7 @@ pub fn generate_provider_with_document(
                 .iter()
                 .map(|p| format!("{}: {}", rust_ident(&p.name), rust_param_type(&p.ty, &recs)))
                 .collect();
-            let ret = rust_return_type(&m.return_type, &recs);
+            let ret = rust_return_type(m.return_type.as_ref(), &recs);
             out.push_str(&format!(
                 "    fn {}({}{}{}){};\n",
                 snake(&m.name),
@@ -1243,7 +1229,7 @@ __ABOUT_TO_UNLOAD_BODY__\n\
                     m.name,
                     module.name,
                     literal,
-                    ret_to_json(&m.return_type, "result", &recs)
+                    method_ret_to_json(m.return_type.as_ref(), "result", &recs)
                 ));
                 continue;
             }
@@ -1340,7 +1326,7 @@ __ABOUT_TO_UNLOAD_BODY__\n\
             bindings,
             snake(&m.name),
             args.join(", "),
-            ret_to_json(&m.return_type, "result", &recs)
+            method_ret_to_json(m.return_type.as_ref(), "result", &recs)
         ));
     }
 
@@ -2177,11 +2163,8 @@ module opt_module {
         );
     }
 
-    // `void` is NOT a LIDL builtin — the front end hands it back as
-    // Named("void"), exactly like a record name. Treating every Named as a
-    // record emitted `fn do_void(&mut self) -> Void;`, a type that does not
-    // exist, breaking every provider with a void method (test_fullapi_rust
-    // among them). Only a name the contract DECLARES is a record.
+    // A method with no returned value carries no return TypeExpr and must not
+    // become a generated record.
     #[test]
     fn void_is_not_a_record() {
         let src = r#"
@@ -2197,6 +2180,9 @@ module v_module {
 }
 "#;
         let m = crate::parse(src).expect("parse");
+        assert!(m.methods[0].return_type.is_none());
+        assert!(crate::serialize(&m).contains("method doVoid()\n"));
+        assert!(!crate::serialize(&m).contains("method doVoid() ->"));
         let code = generate_provider(&m, "0.2.0");
 
         // (a plain contains("Void") would match the method name `doVoid`)
@@ -2228,7 +2214,7 @@ module v_module {
             let mut md = MethodDecl {
                 name: name.to_string(),
                 params: vec![],
-                return_type: TypeExpr::primitive("tstr"),
+                return_type: Some(TypeExpr::primitive("tstr")),
                 description: String::new(),
                 json_return: false,
                 result_return: false,
