@@ -145,8 +145,9 @@ pub struct MethodDecl {
     pub name: String,
     #[serde(default)]
     pub params: Vec<ParamDecl>,
-    #[serde(rename = "returnType")]
-    pub return_type: TypeExpr,
+    /// Absent means the method returns no value and has no `->` clause.
+    #[serde(rename = "returnType", default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<TypeExpr>,
     /// Doc comment carried from the author's `///` (or the .lidl
     /// `description "..."` clause). Surfaced as a `///` on the generated client.
     #[serde(default)]
@@ -169,11 +170,11 @@ impl MethodDecl {
     /// Whether the return may be empty (`-> ?T`). A return is a positional
     /// slot, so it too has only the type-kind spelling.
     pub fn return_is_optional(&self) -> bool {
-        self.return_type.is_optional()
+        self.return_type.as_ref().is_some_and(TypeExpr::is_optional)
     }
 
-    pub fn return_value_type(&self) -> &TypeExpr {
-        self.return_type.value_type()
+    pub fn return_value_type(&self) -> Option<&TypeExpr> {
+        self.return_type.as_ref().map(TypeExpr::value_type)
     }
 }
 
