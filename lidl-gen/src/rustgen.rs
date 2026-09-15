@@ -61,11 +61,10 @@ fn rust_ident(name: &str) -> String {
 
 /// The set of record names the module actually DECLARES.
 ///
-/// A `Named` type is not automatically a record: the LIDL front end has no
-/// `void` builtin, so `-> void` parses as `Named("void")` — and pascal-casing
-/// every Named produced `-> Void`, a type that does not exist. Only a name in
-/// `module.types` gets the struct; anything else keeps the untyped fallback it
-/// had before records existed.
+/// A `Named` type is not automatically a record. Only a name in `module.types`
+/// gets the struct; anything else keeps the untyped fallback it had before
+/// records existed. This membership check also remains compatible with older
+/// frontend ASTs that represented `void` as `Named("void")`.
 pub(crate) fn record_names(module: &ModuleDecl) -> BTreeSet<String> {
     module.types.iter().map(|t| t.name.clone()).collect()
 }
@@ -73,6 +72,15 @@ pub(crate) fn record_names(module: &ModuleDecl) -> BTreeSet<String> {
 /// Whether `ty` names a declared record.
 pub(crate) fn is_record(ty: &TypeExpr, recs: &BTreeSet<String>) -> bool {
     ty.kind == TypeKind::Named && recs.contains(&ty.name)
+}
+
+/// Whether a frontend type is the no-value method return marker.
+///
+/// Current canonical ASTs use Primitive("void"). Accepting the historical
+/// Named("void") form costs nothing — `void` cannot be a declared record — and
+/// keeps generators tolerant of an AST produced before that canonicalization.
+pub(crate) fn is_void(ty: &TypeExpr) -> bool {
+    ty.name == "void" && matches!(ty.kind, TypeKind::Primitive | TypeKind::Named)
 }
 
 /// Whether `ty` is a usable `?T` — an optional that actually carries a value
@@ -374,7 +382,7 @@ fn return_conv(ty: &TypeExpr, recs: &BTreeSet<String>) -> (String, String) {
         // success. The call still fails through `?` if the RPC failed.
         // A BLOCK, not a bare statement: this conversion is also spliced into an
         // expression position by the async wrapper, where a `let` is a syntax error.
-        (TypeKind::Named, "void") => ("()".into(), "{ let _ = value; Ok(()) }".into()),
+        _ if is_void(ty) => ("()".into(), "{ let _ = value; Ok(()) }".into()),
         (TypeKind::Primitive, "tstr") => (
             "String".into(),
             "Ok(value.as_str().unwrap_or_default().to_string())".into(),
@@ -1313,6 +1321,7 @@ module v_module {
 }
 "#;
         let m = crate::parse(src).expect("parse");
+        assert_eq!(m.methods[0].return_type.kind, TypeKind::Primitive);
         let code = generate(&m);
         // (a plain contains("Void") would match the method name `doVoid`)
         assert!(!code.contains("Result<Void"), "void leaked in as a struct:\n{}", code);

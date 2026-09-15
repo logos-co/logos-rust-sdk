@@ -106,10 +106,9 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
         // gets `s: Status`, not a serde_json::Value to pick apart. Other
         // composites stay Value: retyping THOSE would change existing impls.
         //
-        // `recs.contains` is load-bearing, not defensive: the LIDL front end has
-        // no `void` builtin, so `-> void` arrives here as Named("void"). Mapping
-        // every Named to its pascal-cased struct emitted `-> Void` and broke
-        // every provider with a void method.
+        // `recs.contains` is load-bearing, not defensive: mapping every Named
+        // to a pascal-cased struct once emitted `-> Void` for historical ASTs
+        // that represented void as Named("void"). Only declarations are records.
         (TypeKind::Named, n) if recs.contains(n) => {
             crate::rustgen::owned_type(ty, recs)
         }
@@ -123,11 +122,7 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 }
 
 fn is_void(ty: &TypeExpr) -> bool {
-    // `void` is not a LIDL builtin, so it arrives as Named("void") and never as
-    // a declared record. Checked by name in exactly the places that need it,
-    // rather than added to the builtin table, so the parser stays the one
-    // authority on what a LIDL type is.
-    matches!(&ty.kind, TypeKind::Named) && ty.name == "void"
+    crate::rustgen::is_void(ty)
 }
 
 fn rust_return_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
@@ -160,7 +155,7 @@ fn qt_type_name(ty: &TypeExpr) -> String {
         // Matches what the C++ backend advertises. Without this a void method
         // was published as returnType "QVariant" here and "void" there — a
         // second divergence, in the interface metadata rather than the value.
-        (TypeKind::Named, "void") => "void".into(),
+        _ if is_void(ty) => "void".into(),
         (TypeKind::Array, _) => "QVariantList".into(),
         (TypeKind::Map, _) => "QVariantMap".into(),
         _ => "QVariant".into(),
@@ -2177,11 +2172,9 @@ module opt_module {
         );
     }
 
-    // `void` is NOT a LIDL builtin — the front end hands it back as
-    // Named("void"), exactly like a record name. Treating every Named as a
-    // record emitted `fn do_void(&mut self) -> Void;`, a type that does not
-    // exist, breaking every provider with a void method (test_fullapi_rust
-    // among them). Only a name the contract DECLARES is a record.
+    // `void` is a primitive return marker, never a record. Older frontend ASTs
+    // represented it as Named("void"), so the backend accepts both forms and
+    // only treats names the contract DECLARES as records.
     #[test]
     fn void_is_not_a_record() {
         let src = r#"
@@ -2197,6 +2190,7 @@ module v_module {
 }
 "#;
         let m = crate::parse(src).expect("parse");
+        assert_eq!(m.methods[0].return_type.kind, TypeKind::Primitive);
         let code = generate_provider(&m, "0.2.0");
 
         // (a plain contains("Void") would match the method name `doVoid`)
