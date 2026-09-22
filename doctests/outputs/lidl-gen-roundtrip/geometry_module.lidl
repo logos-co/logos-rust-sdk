@@ -10,8 +10,10 @@ module geometry_module {
   method translate(p: Point, dx: float64, dy: float64) -> Point description "Translates a point by an offset."
   method bounds(points: [Point]) -> Point description "Returns the bounding corner of a set of points."
   method attributes(tags: {tstr: any}) -> {tstr: any} description "Echoes a string-keyed map of arbitrary values."
+  method signatures(payloads: {tstr: [bstr]}) -> {tstr: [bstr]} description "Echoes named groups of byte strings."
   method nearest(p: Point, limit: ?uint) -> ?Point description "Finds the nearest point within an optional limit; may return nothing."
   method describe(p: Point) -> any description "Returns an arbitrary JSON description of a point."
 
   event moved(from: Point, to: Point) description "Fires when a point moves, carrying both record values."
+  event signatures_changed(payloads: {tstr: [bstr]}) description "Fires when signature groups change."
 }

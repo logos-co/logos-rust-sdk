@@ -113,7 +113,7 @@ pub(crate) fn owned_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
 /// `bstr` goes through the tagged-bytes codec at EVERY depth — a plain serde
 /// encode would emit a number array that no other language decodes as bytes,
 /// which is the bug class of logos-protocol #21/#23.
-fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
+pub(crate) fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     // A `?T` reached HERE is a positional slot (an element of a container, a
     // return, an event param): there is no key to leave out, so empty is spelled
     // `null`. The one NAMED slot — a record field — is encoded by
@@ -147,7 +147,7 @@ fn enc_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
 /// `expr` (a `&serde_json::Value`) -> the owned type, as an expression using `?`
 /// inside a function returning Option. Mirrors logos_codec.h's acceptance:
 /// bytes take the lenient set, `any` passes through verbatim.
-fn dec_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
+pub(crate) fn dec_expr(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
     // `?T`: null is the empty state. A PRESENT value still decodes as `T`, and
     // still fails the whole decode through `?` if it doesn't match — optional
     // adds one inhabitant, it doesn't stop type checking. (`expr` appears twice,
@@ -302,16 +302,13 @@ fn param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
         (TypeKind::Primitive, "float64") => "f64".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "bstr") => "&[u8]".into(),
-        // Records are real types. Additive: nothing generated records before, so
-        // no existing consumer signature changes. Composites other than
-        // [record] deliberately stay &serde_json::Value — retyping them WOULD
-        // change every existing call site.
         (TypeKind::Named, n) if recs.contains(n) => format!("&{}", pascal(n)),
-        (TypeKind::Array, _)
-            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
-        {
-            format!("&[{}]", pascal(&ty.elements[0].name))
-        }
+        (TypeKind::Array, _) if ty.elements.len() == 1 =>
+            format!("&[{}]", owned_type(&ty.elements[0], recs)),
+        (TypeKind::Map, _) if ty.elements.len() == 2 => format!(
+            "&std::collections::BTreeMap<String, {}>",
+            owned_type(&ty.elements[1], recs)
+        ),
         _ => "&serde_json::Value".into(),
     }
 }
@@ -332,14 +329,7 @@ fn param_to_json(name: &str, ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode({})", name),
         (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", name),
-        (TypeKind::Array, _)
-            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
-        {
-            format!(
-                "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
-                name
-            )
-        }
+        (TypeKind::Array, _) | (TypeKind::Map, _) => enc_expr(ty, name, recs),
         (TypeKind::Primitive, "tstr") => format!("serde_json::Value::from({})", name),
         (TypeKind::Primitive, "int") | (TypeKind::Primitive, "uint")
         | (TypeKind::Primitive, "float64") | (TypeKind::Primitive, "bool") => {
@@ -400,18 +390,13 @@ fn return_conv(ty: Option<&TypeExpr>, recs: &BTreeSet<String>) -> (String, Strin
                 n
             ),
         ),
-        (TypeKind::Array, _)
-            if ty.elements.len() == 1 && is_record(&ty.elements[0], recs) =>
-        {
-            let rec = pascal(&ty.elements[0].name);
-            (
-                format!("Vec<{}>", rec),
-                format!(
-                    "value.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>()).ok_or_else(|| logos_rust_sdk::LogosError::JsonError(\"expected an array of {} objects\".to_string()))",
-                    rec, ty.elements[0].name
-                ),
-            )
-        }
+        (TypeKind::Array, _) | (TypeKind::Map, _) => (
+            owned_type(ty, recs),
+            format!(
+                "(|| Some({}))().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(\"result does not match the declared collection type\".to_string()))",
+                dec_expr(ty, "(&value)", recs)
+            ),
+        ),
         _ => ("serde_json::Value".into(), "Ok(value)".into()),
     }
 }
@@ -422,39 +407,6 @@ fn return_conv(ty: Option<&TypeExpr>, recs: &BTreeSet<String>) -> (String, Strin
 /// count toward the minimum. (The encoding side always sends the full arity.)
 pub(crate) fn required_arity(params: &[ParamDecl]) -> usize {
     params.iter().rposition(|p| !p.is_optional()).map_or(0, |i| i + 1)
-}
-
-/// The typed Rust field for one event parameter. Scalars are owned; anything
-/// else keeps the untyped Value, and `?T` wraps whichever it is in `Option`.
-fn event_param_type(ty: &TypeExpr) -> String {
-    if is_optional(ty) {
-        return format!("Option<{}>", event_param_type(ty.value_type()));
-    }
-    match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => "String".into(),
-        (TypeKind::Primitive, "int") => "i64".into(),
-        (TypeKind::Primitive, "uint") => "u64".into(),
-        (TypeKind::Primitive, "float64") => "f64".into(),
-        (TypeKind::Primitive, "bool") => "bool".into(),
-        (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
-        _ => "serde_json::Value".into(),
-    }
-}
-
-/// Decode one event parameter out of the payload element `expr`, as an
-/// expression using `?` inside a function returning Option.
-fn event_param_decode(ty: &TypeExpr, expr: &str) -> String {
-    match (&ty.kind, ty.name.as_str()) {
-        (TypeKind::Primitive, "tstr") => format!("{}.as_str()?.to_string()", expr),
-        (TypeKind::Primitive, "int") => format!("{}.as_i64()?", expr),
-        (TypeKind::Primitive, "uint") => format!("{}.as_u64()?", expr),
-        (TypeKind::Primitive, "float64") => format!("{}.as_f64()?", expr),
-        (TypeKind::Primitive, "bool") => format!("{}.as_bool()?", expr),
-        (TypeKind::Primitive, "bstr") => {
-            format!("logos_rust_sdk::bytes::decode(&{})?", expr)
-        }
-        _ => format!("{}.clone()", expr),
-    }
 }
 
 /// Generate the typed Rust client for a LIDL module.
@@ -753,10 +705,10 @@ pub fn generate(module: &ModuleDecl) -> String {
                 format!(
                     "match arr.get({}) {{ None | Some(serde_json::Value::Null) => None, Some(__v) => Some({}) }}",
                     i,
-                    event_param_decode(p.value_type(), "__v")
+                    dec_expr(p.value_type(), "__v", &recs)
                 )
             } else {
-                event_param_decode(&p.ty, &format!("arr[{}]", i))
+                dec_expr(&p.ty, &format!("(&arr[{}])", i), &recs)
             };
             out.push_str(&format!("            {}: {},\n", field, expr));
         }
@@ -777,7 +729,7 @@ pub fn generate(module: &ModuleDecl) -> String {
             out.push_str(&format!(
                 "    pub {}: {},\n",
                 rust_ident(&p.name),
-                event_param_type(&p.ty)
+                owned_type(&p.ty, &recs)
             ));
         }
         out.push_str("}\n\n");
@@ -920,10 +872,10 @@ module calc_module {
         assert!(code.contains(
             "pub fn decode_message_received(ev: &EventData) -> Option<MessageReceivedEvent>"
         ));
-        assert!(code.contains("logos_rust_sdk::bytes::decode(&arr[1])?"));
+        assert!(code.contains("logos_rust_sdk::bytes::decode_lenient((&arr[1]))?"));
         // A tstr arg in the same event still decodes as a plain string — the
         // bstr branch is not applied to every param.
-        assert!(code.contains("arr[0].as_str()?.to_string()"));
+        assert!(code.contains("(&arr[0]).as_str()?.to_string()"));
     }
 
     /// Per-call timeout on the generated client. The lp_* ABI has always taken
@@ -1187,7 +1139,7 @@ module opt_module {
         );
         // Only the REQUIRED prefix is demanded of the payload.
         assert!(code.contains("if arr.len() < 1 { return None; }"), "{}", code);
-        assert!(code.contains("id: arr[0].as_str()?.to_string(),"), "{}", code);
+        assert!(code.contains("id: (&arr[0]).as_str()?.to_string(),"), "{}", code);
     }
 
     // Records: a `type` decl becomes a real Rust struct, and methods take and
@@ -1281,13 +1233,21 @@ module kw_module {
         assert!(code.contains("Status::from_json"), "{}", code);
     }
 
-    // Composites that are NOT records keep their existing shape: retyping them
-    // would change every existing consumer call site, which records do not.
+    // Collection signatures use the declared LIDL element types recursively.
     #[test]
-    fn non_record_composites_are_unchanged() {
-        let m = parse(SAMPLE).expect("parse");
+    fn arrays_and_maps_are_typed_on_the_client() {
+        let m = parse("module m { version \"1.0.0\" \
+            method ints(v: [int]) -> [int] \
+            method bytes(v: {tstr: [bstr]}) -> {tstr: [bstr]} \
+            method values(v: [any]) -> [any] \
+            event changed(v: {tstr: [bstr]}) }").expect("parse");
         let code = generate(&m);
-        assert!(code.contains("-> Result<serde_json::Value, LogosError>"), "{}", code);
+        assert!(code.contains("pub fn ints(&self, v: &[i64]) -> Result<Vec<i64>, LogosError>"), "{}", code);
+        assert!(code.contains("pub fn bytes(&self, v: &std::collections::BTreeMap<String, Vec<Vec<u8>>>) -> Result<std::collections::BTreeMap<String, Vec<Vec<u8>>>, LogosError>"), "{}", code);
+        assert!(code.contains("pub fn values(&self, v: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, LogosError>"), "{}", code);
+        assert!(code.contains("pub v: std::collections::BTreeMap<String, Vec<Vec<u8>>>"), "{}", code);
+        assert!(code.contains("logos_rust_sdk::bytes::encode(&__e[..])"), "{}", code);
+        assert!(code.contains("logos_rust_sdk::bytes::decode_lenient"), "{}", code);
     }
 
     // Consumer-side half of the same trap: `-> void` must not become

@@ -186,6 +186,20 @@ event functions, and the `#[no_mangle]` `logos_module_*` C exports that wire
 it to the host. Scalars map to `i64`/`u64`/`f64`/`bool`/`String`, `bstr` to
 `Vec<u8>`, and `result` to `Result<serde_json::Value, String>`.
 
+Note the count: **12 methods, not the 9 in the contract**. Every module
+answers `name()`, `version()`, and `lidl()`, and nobody writes them — the
+frontend derives them from the module declaration and canonical contract,
+so what a module reports cannot drift from what it was built with. They
+are *derived*, which is why the normalized `.lidl` above still says 9:
+the published contract contains only the authored API, and the three
+built-ins are added on the way into code generation, on the provider and
+consumer sides alike. `lidl()` returns that normalized document byte for
+byte.
+
+They do not appear on the `trait` you implement, either — the generated
+dispatch answers them itself. Deriving them would buy nothing if every
+author still had to write the bodies.
+
 ### 4.1 Generate the provider scaffold
 
 ```bash
@@ -225,10 +239,10 @@ grep -E 'SensorModuleClient|temperature|firmware|reset|on_ready|on_fault' client
 
 Beyond the round-trippable core above, LIDL also has **composite** types:
 named record types (`type`), maps (`{K: V}`), and optionals (`?T`), plus the
-untyped escape hatch `any`. A declared record becomes a real struct and `?T`
-becomes `Option<T>`; a map, or an array of anything but a record, crosses as
-untyped JSON and is carried as `serde_json::Value` (a `--from-rust`
-extraction recovers the std-friendly subset shown earlier). Here is a
+untyped escape hatch `any`. A declared record becomes a real struct, `?T`
+becomes `Option<T>`, and collections become `Vec<T>` or
+`BTreeMap<String, T>` recursively. Only `any` stays `serde_json::Value`.
+Here is a
 contract that uses all of them, taken straight to a provider scaffold.
 
 ### 6.1 geometry_module.lidl
@@ -246,10 +260,12 @@ module geometry_module {
   method translate(p: Point, dx: float64, dy: float64) -> Point description "Translates a point by an offset."
   method bounds(points: [Point]) -> Point description "Returns the bounding corner of a set of points."
   method attributes(tags: {tstr: any}) -> {tstr: any} description "Echoes a string-keyed map of arbitrary values."
+  method signatures(payloads: {tstr: [bstr]}) -> {tstr: [bstr]} description "Echoes named groups of byte strings."
   method nearest(p: Point, limit: ?uint) -> ?Point description "Finds the nearest point within an optional limit; may return nothing."
   method describe(p: Point) -> any description "Returns an arbitrary JSON description of a point."
 
   event moved(from: Point, to: Point) description "Fires when a point moves, carrying both record values."
+  event signatures_changed(payloads: {tstr: [bstr]}) description "Fires when signature groups change."
 }
 ```
 
@@ -263,9 +279,11 @@ logos-lidl-gen geometry_module.lidl --provider -o geometry_gen.rs
 
 A declared record (`Point`) is a real struct, and an optional (`?uint`,
 `?Point`) is an `Option` — Rust's one way to spell "no value", which is
-why `?T` has exactly two states and never three. Maps stay
-`serde_json::Value`, the untyped carrier for the JSON that crosses the
-process boundary, and plain scalars like `dx: f64` stay typed.
+why `?T` has exactly two states and never three. The map becomes
+`BTreeMap<String, serde_json::Value>` because its element is `any`;
+plain scalars like `dx: f64` stay typed. The nested `signatures`
+map is `BTreeMap<String, Vec<Vec<u8>>>`; each byte string still uses
+the protocol's tagged byte encoding inside the map and array.
 
 The same mapping reaches the typed event EMITTER: `emit_moved` takes
 `&Point`, not a JSON value the author has to assemble, and encodes it
@@ -281,5 +299,5 @@ read as empty — but a present value of the wrong type is still an
 error, exactly as it is for a required slot.
 
 ```bash
-grep -E 'trait|translate|attributes|nearest|emit_moved' geometry_gen.rs
+grep -E 'trait|translate|attributes|signatures|nearest|emit_' geometry_gen.rs
 ```

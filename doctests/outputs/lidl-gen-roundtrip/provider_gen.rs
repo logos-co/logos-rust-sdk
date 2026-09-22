@@ -12,6 +12,14 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::Mutex;
 
+/// This module's own name, from the LIDL contract.
+///
+/// The ORIGIN of every outbound call this image makes: it is what
+/// capability_module checks against its known-caller roster and the
+/// target's access policy, what the target files the minted token
+/// under, and what a callee's `current_caller()` reports.
+pub const LOGOS_MODULE_NAME: &str = "sensor_module";
+
 #[derive(Debug, Clone, Default)]
 pub struct RustModuleContext {
     pub module_path: String,
@@ -74,22 +82,40 @@ pub trait SensorModule: 'static {
     /// LogosModuleContext::onContextReady().
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
+    /// Called when the host is about to unload this module, before the
+    /// implementation is dropped. Return `Synchronous` (the default)
+    /// when teardown finished inline, or `Asynchronous` to keep the
+    /// host waiting until `logos_rust_sdk::unload_finished()` is
+    /// called. The host enforces a grace period either way.
+    fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown {
+        logos_rust_sdk::Shutdown::Synchronous
+    }
+
     fn temperature(&mut self) -> f64;
     fn enable(&mut self, on: bool) -> bool;
     fn rename(&mut self, id: u64, name: String) -> String;
     fn calibrate(&mut self, id: u64, offset: f64, label: String) -> bool;
     fn record(&mut self, id: u64, value: f64, note: String, valid: bool) -> i64;
     fn firmware(&mut self, image: Vec<u8>) -> Vec<u8>;
-    fn labels(&mut self, ids: serde_json::Value) -> serde_json::Value;
-    fn average(&mut self, samples: serde_json::Value) -> f64;
+    fn labels(&mut self, ids: Vec<u64>) -> Vec<String>;
+    fn average(&mut self, samples: Vec<f64>) -> f64;
     fn reset(&mut self, id: String) -> Result<serde_json::Value, String>;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
 type EnsureFn = fn(bool);
+// Reaches the author's impl from the teardown C export, which is a
+// free function with no `T` -- exactly why `dispatch` is reached
+// this way too.
+type AboutToUnloadFn = fn() -> i32;
 struct Registered {
     dispatch: DispatchFn,
     ensure: EnsureFn,
+    // Read only by the teardown export, which is emitted for
+    // protocol >= 0.5; an older module registers the hook and
+    // never calls it.
+    #[allow(dead_code)]
+    about_to_unload: AboutToUnloadFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
 // A concurrency:"single" module runs entirely on one thread (its
@@ -130,6 +156,17 @@ pub fn install<T: SensorModule + Default>() {
             imp.on_context_ready(&ctx);
         }
     }
+    fn about_to_unload_impl<T: SensorModule + Default>() -> i32 {
+        // No instance means nothing was ever constructed, so there is
+        // nothing to tear down: Synchronous, and the host proceeds.
+        let mut guard = INSTANCE.0.lock().unwrap();
+        let Some(any) = guard.as_mut() else { return 0 };
+        let Some(imp) = any.downcast_mut::<T>() else { return 0 };
+        match imp.about_to_unload() {
+            logos_rust_sdk::Shutdown::Asynchronous => 1,
+            logos_rust_sdk::Shutdown::Synchronous => 0,
+        }
+    }
     fn dispatch_impl<T: SensorModule + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
         let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
@@ -138,17 +175,20 @@ pub fn install<T: SensorModule + Default>() {
         let imp: &mut T = guard.as_mut().unwrap().downcast_mut::<T>()?;
         match method {
             "temperature" => {
+                if args.len() > 0 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
                 let result = imp.temperature();
                 Some(serde_json::Value::from(result))
             }
             "enable" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_bool(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let result = imp.enable(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "rename" => {
                 if args.len() < 2 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 2, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_string(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let result = imp.rename(__logos_a0, __logos_a1);
@@ -156,6 +196,7 @@ pub fn install<T: SensorModule + Default>() {
             }
             "calibrate" => {
                 if args.len() < 3 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 3, args.len())); }
+                if args.len() > 3 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 3, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let __logos_a2 = match logos_rust_sdk::args::as_string(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
@@ -164,6 +205,7 @@ pub fn install<T: SensorModule + Default>() {
             }
             "record" => {
                 if args.len() < 4 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 4, args.len())); }
+                if args.len() > 4 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 4, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_u64(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let __logos_a2 = match logos_rust_sdk::args::as_string(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
@@ -173,34 +215,56 @@ pub fn install<T: SensorModule + Default>() {
             }
             "firmware" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_bytes(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let result = imp.firmware(__logos_a0);
                 Some(logos_rust_sdk::bytes::encode(&result))
             }
             "labels" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Uint)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a0 = match (|| Some((&__logos_a0).as_array()?.iter().map(|__e| Some(__e.as_u64()?)).collect::<Option<Vec<_>>>()?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", "arg0: malformed value")) };
                 let result = imp.labels(__logos_a0);
-                Some(serde_json::Value::from(result))
+                Some(serde_json::Value::Array(result.iter().map(|__e| serde_json::json!(__e)).collect()))
             }
             "average" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Float64)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
+                let __logos_a0 = match (|| Some((&__logos_a0).as_array()?.iter().map(|__e| Some(__e.as_f64()?)).collect::<Option<Vec<_>>>()?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", "arg0: malformed value")) };
                 let result = imp.average(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
             "reset" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_string(args, 0) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("sensor_module", &e)) };
                 let result = imp.reset(__logos_a0);
                 Some(match result { Ok(v) => serde_json::json!({"success": true, "value": v, "error": null}), Err(e) => serde_json::json!({"success": false, "value": null, "error": e}) })
             }
+            "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "sensor_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "2.0.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "module sensor_module {\n  version \"2.0.0\"\n  depends []\n\n  method temperature() -> float64 description \"Returns the latest temperature reading in degrees Celsius.\"\n  method enable(on: bool) -> bool description \"Enables or disables the sensor.\\nReturns the new enabled state.\"\n  method rename(id: uint, name: tstr) -> tstr description \"Renames the sensor channel.\"\n  method calibrate(id: uint, offset: float64, label: tstr) -> bool description \"Calibrates a channel with an offset and a human-readable label.\"\n  method record(id: uint, value: float64, note: tstr, valid: bool) -> int description \"Records a reading and returns the new sample count.\"\n  method firmware(image: bstr) -> bstr description \"Flashes raw firmware bytes and echoes back the stored image.\"\n  method labels(ids: [uint]) -> [tstr] description \"Resolves a batch of channel ids to their labels.\"\n  method average(samples: [float64]) -> float64 description \"Computes the mean of a batch of samples.\"\n  method reset(id: tstr) -> result description \"Resets a channel; returns a structured success/error result.\"\n\n  event ready() description \"Fires once the sensor has finished warming up.\"\n  event reading(id: uint, value: float64) description \"Fires on each new reading with the channel id and value.\"\n  event fault(code: int, message: tstr, fatal: bool) description \"Fires when a channel faults.\\nCarries an error code, a message, and whether the fault is fatal.\"\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
             _ => None,
         }
     }
     *REGISTERED.lock().unwrap() = Some(Registered {
         dispatch: dispatch_impl::<T>,
         ensure: ensure_impl::<T>,
+        about_to_unload: about_to_unload_impl::<T>,
     });
 }
 
@@ -209,6 +273,18 @@ pub fn install<T: SensorModule + Default>() {
 /// point: set_context / set_emit_callback latch on full wiring;
 /// dispatch passes require_emit = false as the no-event-host fallback.
 fn ensure_ready(require_emit: bool) {
+    // FIRST, and before the author's install hook can construct
+    // anything: tell the SDK the name this image announces when it
+    // calls out. Every generated path that reaches author code runs
+    // through here -- install/T::default, on_context_ready, dispatch,
+    // and (transitively) about_to_unload, which answers 0 unless
+    // install already ran -- so the origin is set before the first
+    // outbound client exists. Without a name the SDK announces
+    // nothing and the capability handshake fails closed; with the
+    // wrong one ("core") it authorized as the host. The SDK also
+    // keys its client cache by origin, so even a client built before
+    // this ran cannot be reused after it. Idempotent: a OnceLock set.
+    logos_rust_sdk::set_module_origin(LOGOS_MODULE_NAME);
     if REGISTERED.lock().unwrap().is_none() {
         unsafe { __logos_install_hook::logos_module_install() };
     }
@@ -265,7 +341,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"temperature\",\"returnType\":\"double\",\"signature\":\"temperature()\"},{\"isInvokable\":true,\"name\":\"enable\",\"parameters\":[{\"name\":\"on\",\"type\":\"bool\"}],\"returnType\":\"bool\",\"signature\":\"enable(bool)\"},{\"isInvokable\":true,\"name\":\"rename\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"name\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"rename(int,QString)\"},{\"isInvokable\":true,\"name\":\"calibrate\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"offset\",\"type\":\"double\"},{\"name\":\"label\",\"type\":\"QString\"}],\"returnType\":\"bool\",\"signature\":\"calibrate(int,double,QString)\"},{\"isInvokable\":true,\"name\":\"record\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"value\",\"type\":\"double\"},{\"name\":\"note\",\"type\":\"QString\"},{\"name\":\"valid\",\"type\":\"bool\"}],\"returnType\":\"int\",\"signature\":\"record(int,double,QString,bool)\"},{\"isInvokable\":true,\"name\":\"firmware\",\"parameters\":[{\"name\":\"image\",\"type\":\"QByteArray\"}],\"returnType\":\"QByteArray\",\"signature\":\"firmware(QByteArray)\"},{\"isInvokable\":true,\"name\":\"labels\",\"parameters\":[{\"name\":\"ids\",\"type\":\"QVariantList\"}],\"returnType\":\"QVariantList\",\"signature\":\"labels(QVariantList)\"},{\"isInvokable\":true,\"name\":\"average\",\"parameters\":[{\"name\":\"samples\",\"type\":\"QVariantList\"}],\"returnType\":\"double\",\"signature\":\"average(QVariantList)\"},{\"isInvokable\":true,\"name\":\"reset\",\"parameters\":[{\"name\":\"id\",\"type\":\"QString\"}],\"returnType\":\"LogosResult\",\"signature\":\"reset(QString)\"},{\"name\":\"ready\",\"signature\":\"ready()\",\"type\":\"event\"},{\"name\":\"reading\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"value\",\"type\":\"double\"}],\"signature\":\"reading(int,double)\",\"type\":\"event\"},{\"name\":\"fault\",\"parameters\":[{\"name\":\"code\",\"type\":\"int\"},{\"name\":\"message\",\"type\":\"QString\"},{\"name\":\"fatal\",\"type\":\"bool\"}],\"signature\":\"fault(int,QString,bool)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"description\":\"Returns the latest temperature reading in degrees Celsius.\",\"isInvokable\":true,\"name\":\"temperature\",\"returnType\":\"double\",\"signature\":\"temperature()\"},{\"description\":\"Enables or disables the sensor.\\nReturns the new enabled state.\",\"isInvokable\":true,\"name\":\"enable\",\"parameters\":[{\"name\":\"on\",\"type\":\"bool\"}],\"returnType\":\"bool\",\"signature\":\"enable(bool)\"},{\"description\":\"Renames the sensor channel.\",\"isInvokable\":true,\"name\":\"rename\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"name\",\"type\":\"QString\"}],\"returnType\":\"QString\",\"signature\":\"rename(int,QString)\"},{\"description\":\"Calibrates a channel with an offset and a human-readable label.\",\"isInvokable\":true,\"name\":\"calibrate\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"offset\",\"type\":\"double\"},{\"name\":\"label\",\"type\":\"QString\"}],\"returnType\":\"bool\",\"signature\":\"calibrate(int,double,QString)\"},{\"description\":\"Records a reading and returns the new sample count.\",\"isInvokable\":true,\"name\":\"record\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"value\",\"type\":\"double\"},{\"name\":\"note\",\"type\":\"QString\"},{\"name\":\"valid\",\"type\":\"bool\"}],\"returnType\":\"int\",\"signature\":\"record(int,double,QString,bool)\"},{\"description\":\"Flashes raw firmware bytes and echoes back the stored image.\",\"isInvokable\":true,\"name\":\"firmware\",\"parameters\":[{\"name\":\"image\",\"type\":\"QByteArray\"}],\"returnType\":\"QByteArray\",\"signature\":\"firmware(QByteArray)\"},{\"description\":\"Resolves a batch of channel ids to their labels.\",\"isInvokable\":true,\"name\":\"labels\",\"parameters\":[{\"name\":\"ids\",\"type\":\"QVariantList\"}],\"returnType\":\"QVariantList\",\"signature\":\"labels(QVariantList)\"},{\"description\":\"Computes the mean of a batch of samples.\",\"isInvokable\":true,\"name\":\"average\",\"parameters\":[{\"name\":\"samples\",\"type\":\"QVariantList\"}],\"returnType\":\"double\",\"signature\":\"average(QVariantList)\"},{\"description\":\"Resets a channel; returns a structured success/error result.\",\"isInvokable\":true,\"name\":\"reset\",\"parameters\":[{\"name\":\"id\",\"type\":\"QString\"}],\"returnType\":\"LogosResult\",\"signature\":\"reset(QString)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"description\":\"The module's canonical LIDL interface document.\",\"isInvokable\":true,\"name\":\"lidl\",\"returnType\":\"QString\",\"signature\":\"lidl()\"},{\"description\":\"Fires once the sensor has finished warming up.\",\"name\":\"ready\",\"signature\":\"ready()\",\"type\":\"event\"},{\"description\":\"Fires on each new reading with the channel id and value.\",\"name\":\"reading\",\"parameters\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"value\",\"type\":\"double\"}],\"signature\":\"reading(int,double)\",\"type\":\"event\"},{\"description\":\"Fires when a channel faults.\\nCarries an error code, a message, and whether the fault is fatal.\",\"name\":\"fault\",\"parameters\":[{\"name\":\"code\",\"type\":\"int\"},{\"name\":\"message\",\"type\":\"QString\"},{\"name\":\"fatal\",\"type\":\"bool\"}],\"signature\":\"fault(int,QString,bool)\",\"type\":\"event\"}]".to_string())
 }
 
 #[no_mangle]
@@ -298,9 +374,15 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
     if module_name.is_null() || token.is_null() { return -1; }
     let name = unsafe { CStr::from_ptr(module_name) }.to_string_lossy().into_owned();
     let tok = unsafe { CStr::from_ptr(token) }.to_string_lossy().into_owned();
-    // The runtime handshake: hand the host-issued token to the SDK's
+    // THE OUTBOUND DOOR. Hand the host-issued token to the SDK's
     // protocol stack so this module's *outbound* calls authenticate —
     // the same stack the typed client wrappers invoke through.
+    //
+    // ONE MEANING ONLY, as of protocol 0.8: the module's OWN anchor,
+    // seeded by the Qt glue's onInit. A CALLER's token goes through
+    // logos_module_accept_inbound_token instead. Do not merge them —
+    // one value written through the wrong door made every capability
+    // grant silently bidirectional.
     logos_rust_sdk::save_token(&name, &tok);
     TOKENS.lock().unwrap().push((name, tok));
     0
