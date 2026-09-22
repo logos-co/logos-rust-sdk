@@ -102,20 +102,15 @@ fn rust_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
         (TypeKind::Primitive, "float64") => "f64".into(),
         (TypeKind::Primitive, "bool") => "bool".into(),
         (TypeKind::Primitive, "bstr") => "Vec<u8>".into(),
-        // A record the contract DECLARES is a real struct here too — the author
-        // gets `s: Status`, not a serde_json::Value to pick apart. Other
-        // composites stay Value: retyping THOSE would change existing impls.
+        // A declared record and every collection have the same owned types as
+        // generated record fields. The LIDL contract determines the shape.
         //
         // `recs.contains` is load-bearing, not defensive: only declarations
         // are records. No-return methods have no TypeExpr at all.
         (TypeKind::Named, n) if recs.contains(n) => {
             crate::rustgen::owned_type(ty, recs)
         }
-        (TypeKind::Array, _)
-            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
-        {
-            crate::rustgen::owned_type(ty, recs)
-        }
+        (TypeKind::Array, _) | (TypeKind::Map, _) => crate::rustgen::owned_type(ty, recs),
         _ => "serde_json::Value".into(),
     }
 }
@@ -221,8 +216,8 @@ fn scalar_accessor(ty: &TypeExpr) -> Option<&'static str> {
 }
 
 /// The accessor for one parameter: `Ok(value)` or the C++-matching mismatch
-/// message. Composites stay a pass-through clone (see args::as_value) — typed
-/// validation of [T]/{tstr: T} is the remaining gap against C++.
+/// message. Collections and records are validated against their LIDL shape
+/// before `typed_decode_for` turns them into the generated Rust type.
 fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bool) {
     // `?T` reads through the `as_opt_*` twin of T's accessor: an absent
     // argument and an explicit null are the same empty state, and a present
@@ -238,11 +233,8 @@ fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bo
             ),
             true,
         ),
-        // Composites keep arriving as serde_json::Value (retyping them would
-        // change every existing module's trait signatures), but they are now
-        // VALIDATED against the declared LIDL type first — so a [int] carrying a
-        // string fails here exactly as it does in a C++ provider, with the same
-        // arg0[1] path, instead of reaching the module unchecked.
+        // Validate the declared shape before decoding a collection into its
+        // Rust type. A bad element still reports its LIDL path (arg0[1]).
         None => (
             format!(
                 "logos_rust_sdk::args::as_value_checked(args, {}, &{})",
@@ -254,41 +246,25 @@ fn arg_accessor(ty: &TypeExpr, index: usize, module: &ModuleDecl) -> (String, bo
     }
 }
 
-/// Whether a validated value still has to be lifted into `Option` by hand.
-///
-/// An optional SCALAR arrives already typed (`as_opt_*` returns `Option<T>`)
-/// and an optional RECORD is lifted by its decode, but an optional composite
-/// that stays untyped comes back as a raw `serde_json::Value` whose null IS the
-/// empty state — while the trait signature says `Option<serde_json::Value>`.
-/// Without this step the two disagree and the generated module does not compile.
-fn needs_optional_lift(ty: &TypeExpr, recs: &BTreeSet<String>) -> bool {
-    is_optional(ty)
-        && scalar_accessor(ty.value_type()).is_none()
-        && record_decode_for(ty, recs).is_none()
-}
-
-/// How to turn a validated serde_json::Value into the record struct the impl
-/// signature asks for. None when the parameter is not record-shaped.
-fn record_decode_for(ty: &TypeExpr, recs: &BTreeSet<String>) -> Option<String> {
+/// Decode a validated JSON argument into the generated trait's owned type.
+/// Scalars already come typed from `args::as_*`; `any` remains a JSON value.
+fn typed_decode_for(ty: &TypeExpr, recs: &BTreeSet<String>) -> Option<String> {
     let vty = ty.value_type();
-    let decode = match (&vty.kind, vty.name.as_str()) {
-        (TypeKind::Named, n) if recs.contains(n) => {
-            Some(format!("{}::from_json(&__V__)", pascal(n)))
-        }
-        (TypeKind::Array, _)
-            if vty.elements.len() == 1 && crate::rustgen::is_record(&vty.elements[0], recs) =>
-        {
-            Some(format!(
-                "__V__.as_array().and_then(|__a| __a.iter().map({}::from_json).collect::<Option<Vec<_>>>())",
-                pascal(&vty.elements[0].name)
-            ))
-        }
-        _ => None,
-    }?;
-    // `?Status` is `Option<Status>`: null (which the Ty::Opt check above has
-    // already accepted) is the empty state; anything else must still decode as
-    // the record. The outer Option is the "malformed" channel the caller
-    // reports on, so empty is a successful `Some(None)`.
+    if scalar_accessor(vty).is_some() {
+        return None;
+    }
+    let typed = matches!(&vty.kind, TypeKind::Array | TypeKind::Map)
+        || matches!(&vty.kind, TypeKind::Named if recs.contains(&vty.name));
+    if !typed && !is_optional(ty) {
+        return None;
+    }
+    // The recursive decoder uses `?`, so contain it in an Option-returning
+    // closure. A decode failure becomes the same dispatch error as a malformed
+    // record, rather than silently returning from dispatch_impl.
+    let decode = format!(
+        "(|| Some({}))()",
+        crate::rustgen::dec_expr(vty, "(&__V__)", recs)
+    );
     Some(if is_optional(ty) {
         format!("if __V__.is_null() {{ Some(None) }} else {{ ({}).map(Some) }}", decode)
     } else {
@@ -315,14 +291,7 @@ fn ret_to_json(ty: &TypeExpr, expr: &str, recs: &BTreeSet<String>) -> String {
             expr
         ),
         (TypeKind::Named, n) if recs.contains(n) => format!("{}.to_json()", expr),
-        (TypeKind::Array, _)
-            if ty.elements.len() == 1 && crate::rustgen::is_record(&ty.elements[0], recs) =>
-        {
-            format!(
-                "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
-                expr
-            )
-        }
+        (TypeKind::Array, _) | (TypeKind::Map, _) => crate::rustgen::enc_expr(ty, expr, recs),
         _ => format!("serde_json::Value::from({})", expr),
     }
 }
@@ -352,12 +321,12 @@ fn emit_param_type(ty: &TypeExpr, recs: &BTreeSet<String>) -> String {
     if crate::rustgen::is_record(ty, recs) {
         return format!("&{}", crate::rustgen::owned_type(ty, recs));
     }
-    // `[Record]` borrows as a slice — the emitter never needs to own it.
-    if ty.kind == TypeKind::Array
-        && ty.elements.len() == 1
-        && crate::rustgen::is_record(&ty.elements[0], recs)
-    {
+    // Every array borrows as a slice; maps borrow the generated BTreeMap.
+    if ty.kind == TypeKind::Array && ty.elements.len() == 1 {
         return format!("&[{}]", crate::rustgen::owned_type(&ty.elements[0], recs));
+    }
+    if ty.kind == TypeKind::Map && ty.elements.len() == 2 {
+        return format!("&{}", crate::rustgen::owned_type(ty, recs));
     }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "tstr") => "&str".into(),
@@ -387,14 +356,8 @@ fn emit_param_value(ty: &TypeExpr, name: &str, recs: &BTreeSet<String>) -> Strin
     if crate::rustgen::is_record(ty, recs) {
         return format!("{}.to_json()", name);
     }
-    if ty.kind == TypeKind::Array
-        && ty.elements.len() == 1
-        && crate::rustgen::is_record(&ty.elements[0], recs)
-    {
-        return format!(
-            "serde_json::Value::Array({}.iter().map(|__e| __e.to_json()).collect())",
-            name
-        );
+    if matches!(&ty.kind, TypeKind::Array | TypeKind::Map) {
+        return crate::rustgen::enc_expr(ty, name, recs);
     }
     match (&ty.kind, ty.name.as_str()) {
         (TypeKind::Primitive, "bstr") => format!("logos_rust_sdk::bytes::encode({})", name),
@@ -1249,30 +1212,22 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         let mut idents: Vec<String> = Vec::new();
         for (i, p) in m.params.iter().enumerate() {
             let (accessor, fallible) = arg_accessor(&p.ty, i, module);
-            let record_decode = record_decode_for(&p.ty, &recs);
+            let typed_decode = typed_decode_for(&p.ty, &recs);
             let ident = format!("__logos_a{}", i);
             if fallible {
                 bindings.push_str(&format!(
                     "                let {} = match {} {{ Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", &e)) }};\n",
                     ident, accessor, module.name
                 ));
-                // as_value_checked validated the shape and reported any bad
-                // field by name; this turns the validated value into the struct.
-                if let Some(dec) = &record_decode {
+                // The argument was shape-checked above; convert its validated
+                // JSON representation into the declared Rust type.
+                if let Some(dec) = &typed_decode {
                     bindings.push_str(&format!(
-                        "                let {} = match {} {{ Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", \"arg{}: malformed record\")) }};\n",
+                        "                let {} = match {} {{ Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed(\"{}\", \"arg{}: malformed value\")) }};\n",
                         ident,
                         dec.replace("__V__", &ident),
                         module.name,
                         i
-                    ));
-                } else if needs_optional_lift(&p.ty, &recs) {
-                    // The value was validated as `?T` above, so null here is the
-                    // empty state and nothing else needs checking — just give it
-                    // the shape the trait declares.
-                    bindings.push_str(&format!(
-                        "                let {0} = if {0}.is_null() {{ None }} else {{ Some({0}) }};\n",
-                        ident
                     ));
                 }
             } else {
@@ -2021,7 +1976,7 @@ module info_module {
         assert!(code.contains("fn make_statuses(&mut self) -> Vec<Status>;"), "{}", code);
         // Validated first (field paths), then decoded into the struct.
         assert!(code.contains("Ty::Record(&[(\"port\""), "{}", code);
-        assert!(code.contains("Status::from_json(&__logos_a0)"), "{}", code);
+        assert!(code.contains("Status::from_json((&__logos_a0))"), "{}", code);
         // Returns encode through the record's own to_json.
         assert!(code.contains("__e.to_json()"), "{}", code);
     }
@@ -2134,20 +2089,16 @@ module opt_module {
         );
 
 
-        // An optional composite that stays UNTYPED still has to reach the trait
-        // as the `Option<Value>` the signature declares — `as_value_checked`
-        // hands back the raw value, whose null is the empty state. Emitting the
-        // Option in the signature without this lift does not compile.
+        // A collection optional is decoded into the declared Rust type after
+        // the LIDL shape check, preserving the empty state as None.
         assert!(
-            code.contains("fn tags_of(&mut self, tags: Option<serde_json::Value>) -> bool;"),
+            code.contains("fn tags_of(&mut self, tags: Option<Vec<String>>) -> bool;"),
             "{}",
             code
         );
         assert!(
-            code.contains(
-                "let __logos_a0 = if __logos_a0.is_null() { None } else { Some(__logos_a0) };"
-            ),
-            "an optional untyped composite must be lifted into Option:\n{}",
+            code.contains("if __logos_a0.is_null() { Some(None) } else"),
+            "an optional collection must decode into Option<Vec<_>>:\n{}",
             code
         );
 
@@ -2406,5 +2357,19 @@ module v_module {
                  outbound call made from the impl's constructor would announce nothing: {body}"
             );
         }
+    }
+
+    #[test]
+    fn nested_collections_keep_their_types_and_byte_encoding() {
+        let module = parse("module sample { version \"1.0.0\" \
+            method echo(v: {tstr: [bstr]}) -> {tstr: [bstr]} \
+            method maybe(v: ?[int]) -> bool \
+            event changed(v: {tstr: [bstr]}) }").unwrap();
+        let code = generate_provider(&module, "0.8.0");
+        assert!(code.contains("fn echo(&mut self, v: std::collections::BTreeMap<String, Vec<Vec<u8>>>) -> std::collections::BTreeMap<String, Vec<Vec<u8>>>;"), "{code}");
+        assert!(code.contains("fn maybe(&mut self, v: Option<Vec<i64>>) -> bool;"), "{code}");
+        assert!(code.contains("pub fn emit_changed(v: &std::collections::BTreeMap<String, Vec<Vec<u8>>>)"), "{code}");
+        assert!(code.contains("logos_rust_sdk::bytes::decode_lenient(__e)?"), "{code}");
+        assert!(code.contains("logos_rust_sdk::bytes::encode(&__e[..])"), "{code}");
     }
 }

@@ -12,6 +12,14 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::Mutex;
 
+/// This module's own name, from the LIDL contract.
+///
+/// The ORIGIN of every outbound call this image makes: it is what
+/// capability_module checks against its known-caller roster and the
+/// target's access policy, what the target files the minted token
+/// under, and what a callee's `current_caller()` reports.
+pub const LOGOS_MODULE_NAME: &str = "geometry_module";
+
 #[derive(Debug, Clone, Default)]
 pub struct RustModuleContext {
     pub module_path: String,
@@ -51,6 +59,13 @@ pub fn emit_moved(from: &Point, to: &Point) {
     emit_event("moved", &serde_json::Value::Array(__logos_args));
 }
 
+/// Typed emitter for the `signatures_changed` event.
+pub fn emit_signatures_changed(payloads: &std::collections::BTreeMap<String, Vec<Vec<u8>>>) {
+    let mut __logos_args: Vec<serde_json::Value> = Vec::new();
+    __logos_args.push(serde_json::Value::Object(payloads.iter().map(|(__k, __v)| (__k.clone(), serde_json::Value::Array(__v.iter().map(|__e| logos_rust_sdk::bytes::encode(&__e[..])).collect()))).collect()));
+    emit_event("signatures_changed", &serde_json::Value::Array(__logos_args));
+}
+
 /// `Point` — a record declared by the `geometry_module` contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Point {
@@ -86,18 +101,37 @@ pub trait GeometryModule: 'static {
     /// LogosModuleContext::onContextReady().
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 
+    /// Called when the host is about to unload this module, before the
+    /// implementation is dropped. Return `Synchronous` (the default)
+    /// when teardown finished inline, or `Asynchronous` to keep the
+    /// host waiting until `logos_rust_sdk::unload_finished()` is
+    /// called. The host enforces a grace period either way.
+    fn about_to_unload(&mut self) -> logos_rust_sdk::Shutdown {
+        logos_rust_sdk::Shutdown::Synchronous
+    }
+
     fn translate(&mut self, p: Point, dx: f64, dy: f64) -> Point;
     fn bounds(&mut self, points: Vec<Point>) -> Point;
-    fn attributes(&mut self, tags: serde_json::Value) -> serde_json::Value;
+    fn attributes(&mut self, tags: std::collections::BTreeMap<String, serde_json::Value>) -> std::collections::BTreeMap<String, serde_json::Value>;
+    fn signatures(&mut self, payloads: std::collections::BTreeMap<String, Vec<Vec<u8>>>) -> std::collections::BTreeMap<String, Vec<Vec<u8>>>;
     fn nearest(&mut self, p: Point, limit: Option<u64>) -> Option<Point>;
     fn describe(&mut self, p: Point) -> serde_json::Value;
 }
 
 type DispatchFn = fn(&str, &[serde_json::Value]) -> Option<serde_json::Value>;
 type EnsureFn = fn(bool);
+// Reaches the author's impl from the teardown C export, which is a
+// free function with no `T` -- exactly why `dispatch` is reached
+// this way too.
+type AboutToUnloadFn = fn() -> i32;
 struct Registered {
     dispatch: DispatchFn,
     ensure: EnsureFn,
+    // Read only by the teardown export, which is emitted for
+    // protocol >= 0.5; an older module registers the hook and
+    // never calls it.
+    #[allow(dead_code)]
+    about_to_unload: AboutToUnloadFn,
 }
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
 // A concurrency:"single" module runs entirely on one thread (its
@@ -138,6 +172,17 @@ pub fn install<T: GeometryModule + Default>() {
             imp.on_context_ready(&ctx);
         }
     }
+    fn about_to_unload_impl<T: GeometryModule + Default>() -> i32 {
+        // No instance means nothing was ever constructed, so there is
+        // nothing to tear down: Synchronous, and the host proceeds.
+        let mut guard = INSTANCE.0.lock().unwrap();
+        let Some(any) = guard.as_mut() else { return 0 };
+        let Some(imp) = any.downcast_mut::<T>() else { return 0 };
+        match imp.about_to_unload() {
+            logos_rust_sdk::Shutdown::Asynchronous => 1,
+            logos_rust_sdk::Shutdown::Synchronous => 0,
+        }
+    }
     fn dispatch_impl<T: GeometryModule + Default>(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
         let mut guard = INSTANCE.0.lock().unwrap();
         if guard.is_none() {
@@ -147,8 +192,9 @@ pub fn install<T: GeometryModule + Default>() {
         match method {
             "translate" => {
                 if args.len() < 3 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 3, args.len())); }
+                if args.len() > 3 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 3, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
-                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a0 = match (|| Some(Point::from_json((&__logos_a0))?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
                 let __logos_a1 = match logos_rust_sdk::args::as_f64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
                 let __logos_a2 = match logos_rust_sdk::args::as_f64(args, 2) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
                 let result = imp.translate(__logos_a0, __logos_a1, __logos_a2);
@@ -156,38 +202,67 @@ pub fn install<T: GeometryModule + Default>() {
             }
             "bounds" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)]))) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
-                let __logos_a0 = match __logos_a0.as_array().and_then(|__a| __a.iter().map(Point::from_json).collect::<Option<Vec<_>>>()) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a0 = match (|| Some((&__logos_a0).as_array()?.iter().map(|__e| Some(Point::from_json(__e)?)).collect::<Option<Vec<_>>>()?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
                 let result = imp.bounds(__logos_a0);
                 Some(result.to_json())
             }
             "attributes" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Map(&logos_rust_sdk::args::Ty::Any)) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match (|| Some((&__logos_a0).as_object()?.iter().map(|(__k, __v)| Some((__k.clone(), __v.clone()))).collect::<Option<std::collections::BTreeMap<_, _>>>()?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
                 let result = imp.attributes(__logos_a0);
-                Some(serde_json::Value::from(result))
+                Some(serde_json::Value::Object(result.iter().map(|(__k, __v)| (__k.clone(), serde_json::json!(__v))).collect()))
+            }
+            "signatures" => {
+                if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Map(&logos_rust_sdk::args::Ty::Arr(&logos_rust_sdk::args::Ty::Bstr))) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
+                let __logos_a0 = match (|| Some((&__logos_a0).as_object()?.iter().map(|(__k, __v)| Some((__k.clone(), __v.as_array()?.iter().map(|__e| Some(logos_rust_sdk::bytes::decode_lenient(__e)?)).collect::<Option<Vec<_>>>()?))).collect::<Option<std::collections::BTreeMap<_, _>>>()?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
+                let result = imp.signatures(__logos_a0);
+                Some(serde_json::Value::Object(result.iter().map(|(__k, __v)| (__k.clone(), serde_json::Value::Array(__v.iter().map(|__e| logos_rust_sdk::bytes::encode(&__e[..])).collect()))).collect()))
             }
             "nearest" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                if args.len() > 2 { return Some(logos_rust_sdk::args::invalid_args_max("geometry_module", 2, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
-                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a0 = match (|| Some(Point::from_json((&__logos_a0))?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
                 let __logos_a1 = match logos_rust_sdk::args::as_opt_u64(args, 1) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
                 let result = imp.nearest(__logos_a0, __logos_a1);
                 Some(match result { Some(__o) => __o.to_json(), None => serde_json::Value::Null })
             }
             "describe" => {
                 if args.len() < 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
+                if args.len() > 1 { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 1, args.len())); }
                 let __logos_a0 = match logos_rust_sdk::args::as_value_checked(args, 0, &logos_rust_sdk::args::Ty::Record(&[("x", &logos_rust_sdk::args::Ty::Float64), ("y", &logos_rust_sdk::args::Ty::Float64)])) { Ok(v) => v, Err(e) => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", &e)) };
-                let __logos_a0 = match Point::from_json(&__logos_a0) { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed record")) };
+                let __logos_a0 = match (|| Some(Point::from_json((&__logos_a0))?))() { Some(v) => v, None => return Some(logos_rust_sdk::args::dispatch_failed("geometry_module", "arg0: malformed value")) };
                 let result = imp.describe(__logos_a0);
                 Some(serde_json::Value::from(result))
             }
+            "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 0, args.len())); }
+                                     let result = "geometry_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 0, args.len())); }
+                                     let result = "1.0.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("geometry_module", 0, args.len())); }
+                                     let result = "module geometry_module {\n  version \"1.0.0\"\n  description \"Composite types: records, arrays-of-records, maps, and optionals\"\n  depends []\n\n  type Point {\n    x: float64\n    y: float64\n  }\n\n  method translate(p: Point, dx: float64, dy: float64) -> Point description \"Translates a point by an offset.\"\n  method bounds(points: [Point]) -> Point description \"Returns the bounding corner of a set of points.\"\n  method attributes(tags: {tstr: any}) -> {tstr: any} description \"Echoes a string-keyed map of arbitrary values.\"\n  method signatures(payloads: {tstr: [bstr]}) -> {tstr: [bstr]} description \"Echoes named groups of byte strings.\"\n  method nearest(p: Point, limit: ? uint) -> ? Point description \"Finds the nearest point within an optional limit; may return nothing.\"\n  method describe(p: Point) -> any description \"Returns an arbitrary JSON description of a point.\"\n\n  event moved(from: Point, to: Point) description \"Fires when a point moves, carrying both record values.\"\n  event signatures_changed(payloads: {tstr: [bstr]}) description \"Fires when signature groups change.\"\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
             _ => None,
         }
     }
     *REGISTERED.lock().unwrap() = Some(Registered {
         dispatch: dispatch_impl::<T>,
         ensure: ensure_impl::<T>,
+        about_to_unload: about_to_unload_impl::<T>,
     });
 }
 
@@ -196,6 +271,18 @@ pub fn install<T: GeometryModule + Default>() {
 /// point: set_context / set_emit_callback latch on full wiring;
 /// dispatch passes require_emit = false as the no-event-host fallback.
 fn ensure_ready(require_emit: bool) {
+    // FIRST, and before the author's install hook can construct
+    // anything: tell the SDK the name this image announces when it
+    // calls out. Every generated path that reaches author code runs
+    // through here -- install/T::default, on_context_ready, dispatch,
+    // and (transitively) about_to_unload, which answers 0 unless
+    // install already ran -- so the origin is set before the first
+    // outbound client exists. Without a name the SDK announces
+    // nothing and the capability handshake fails closed; with the
+    // wrong one ("core") it authorized as the host. The SDK also
+    // keys its client cache by origin, so even a client built before
+    // this ran cannot be reused after it. Idempotent: a OnceLock set.
+    logos_rust_sdk::set_module_origin(LOGOS_MODULE_NAME);
     if REGISTERED.lock().unwrap().is_none() {
         unsafe { __logos_install_hook::logos_module_install() };
     }
@@ -252,7 +339,7 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
 
 #[no_mangle]
 pub extern "C" fn logos_module_get_methods() -> *mut c_char {
-    to_c_string("[{\"isInvokable\":true,\"name\":\"translate\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"},{\"name\":\"dx\",\"type\":\"double\"},{\"name\":\"dy\",\"type\":\"double\"}],\"returnType\":\"QVariant\",\"signature\":\"translate(QVariant,double,double)\"},{\"isInvokable\":true,\"name\":\"bounds\",\"parameters\":[{\"name\":\"points\",\"type\":\"QVariantList\"}],\"returnType\":\"QVariant\",\"signature\":\"bounds(QVariantList)\"},{\"isInvokable\":true,\"name\":\"attributes\",\"parameters\":[{\"name\":\"tags\",\"type\":\"QVariantMap\"}],\"returnType\":\"QVariantMap\",\"signature\":\"attributes(QVariantMap)\"},{\"isInvokable\":true,\"name\":\"nearest\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"},{\"name\":\"limit\",\"type\":\"QVariant\"}],\"returnType\":\"QVariant\",\"signature\":\"nearest(QVariant,QVariant)\"},{\"isInvokable\":true,\"name\":\"describe\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"}],\"returnType\":\"QVariant\",\"signature\":\"describe(QVariant)\"},{\"name\":\"moved\",\"parameters\":[{\"name\":\"from\",\"type\":\"QVariant\"},{\"name\":\"to\",\"type\":\"QVariant\"}],\"signature\":\"moved(QVariant,QVariant)\",\"type\":\"event\"}]".to_string())
+    to_c_string("[{\"description\":\"Translates a point by an offset.\",\"isInvokable\":true,\"name\":\"translate\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"},{\"name\":\"dx\",\"type\":\"double\"},{\"name\":\"dy\",\"type\":\"double\"}],\"returnType\":\"QVariant\",\"signature\":\"translate(QVariant,double,double)\"},{\"description\":\"Returns the bounding corner of a set of points.\",\"isInvokable\":true,\"name\":\"bounds\",\"parameters\":[{\"name\":\"points\",\"type\":\"QVariantList\"}],\"returnType\":\"QVariant\",\"signature\":\"bounds(QVariantList)\"},{\"description\":\"Echoes a string-keyed map of arbitrary values.\",\"isInvokable\":true,\"name\":\"attributes\",\"parameters\":[{\"name\":\"tags\",\"type\":\"QVariantMap\"}],\"returnType\":\"QVariantMap\",\"signature\":\"attributes(QVariantMap)\"},{\"description\":\"Echoes named groups of byte strings.\",\"isInvokable\":true,\"name\":\"signatures\",\"parameters\":[{\"name\":\"payloads\",\"type\":\"QVariantMap\"}],\"returnType\":\"QVariantMap\",\"signature\":\"signatures(QVariantMap)\"},{\"description\":\"Finds the nearest point within an optional limit; may return nothing.\",\"isInvokable\":true,\"name\":\"nearest\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"},{\"name\":\"limit\",\"type\":\"QVariant\"}],\"returnType\":\"QVariant\",\"signature\":\"nearest(QVariant,QVariant)\"},{\"description\":\"Returns an arbitrary JSON description of a point.\",\"isInvokable\":true,\"name\":\"describe\",\"parameters\":[{\"name\":\"p\",\"type\":\"QVariant\"}],\"returnType\":\"QVariant\",\"signature\":\"describe(QVariant)\"},{\"description\":\"The module's name, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"name\",\"returnType\":\"QString\",\"signature\":\"name()\"},{\"description\":\"The module's version, as declared in its metadata.\",\"isInvokable\":true,\"name\":\"version\",\"returnType\":\"QString\",\"signature\":\"version()\"},{\"description\":\"The module's canonical LIDL interface document.\",\"isInvokable\":true,\"name\":\"lidl\",\"returnType\":\"QString\",\"signature\":\"lidl()\"},{\"description\":\"Fires when a point moves, carrying both record values.\",\"name\":\"moved\",\"parameters\":[{\"name\":\"from\",\"type\":\"QVariant\"},{\"name\":\"to\",\"type\":\"QVariant\"}],\"signature\":\"moved(QVariant,QVariant)\",\"type\":\"event\"},{\"description\":\"Fires when signature groups change.\",\"name\":\"signatures_changed\",\"parameters\":[{\"name\":\"payloads\",\"type\":\"QVariantMap\"}],\"signature\":\"signatures_changed(QVariantMap)\",\"type\":\"event\"}]".to_string())
 }
 
 #[no_mangle]
@@ -285,9 +372,15 @@ pub extern "C" fn logos_module_accept_token(module_name: *const c_char, token: *
     if module_name.is_null() || token.is_null() { return -1; }
     let name = unsafe { CStr::from_ptr(module_name) }.to_string_lossy().into_owned();
     let tok = unsafe { CStr::from_ptr(token) }.to_string_lossy().into_owned();
-    // The runtime handshake: hand the host-issued token to the SDK's
+    // THE OUTBOUND DOOR. Hand the host-issued token to the SDK's
     // protocol stack so this module's *outbound* calls authenticate —
     // the same stack the typed client wrappers invoke through.
+    //
+    // ONE MEANING ONLY, as of protocol 0.8: the module's OWN anchor,
+    // seeded by the Qt glue's onInit. A CALLER's token goes through
+    // logos_module_accept_inbound_token instead. Do not merge them —
+    // one value written through the wrong door made every capability
+    // grant silently bidirectional.
     logos_rust_sdk::save_token(&name, &tok);
     TOKENS.lock().unwrap().push((name, tok));
     0

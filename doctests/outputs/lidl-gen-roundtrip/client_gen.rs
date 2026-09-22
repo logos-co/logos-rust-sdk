@@ -2,7 +2,7 @@
 //
 // Typed caller + event subscribers over logos_rust_sdk's lp_* consumer.
 
-use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy};
+use logos_rust_sdk::{EventData, EventSubscription, LogosError, LogosModuleSDK, PluginProxy, RestartPolicy, SubStatus};
 
 pub struct SensorModuleClient {
     proxy: PluginProxy,
@@ -408,10 +408,10 @@ impl SensorModuleClient {
     }
 
     /// Resolves a batch of channel ids to their labels.
-    pub fn labels(&self, ids: &serde_json::Value) -> Result<serde_json::Value, LogosError> {
-        let args = serde_json::Value::Array(vec![ids.clone()]);
+    pub fn labels(&self, ids: &[u64]) -> Result<Vec<String>, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(ids.iter().map(|__e| serde_json::json!(__e)).collect())]);
         let value = self.proxy.call_json("labels", &args)?;
-        Ok(value)
+        (|| Some((&value).as_array()?.iter().map(|__e| Some(__e.as_str()?.to_string())).collect::<Option<Vec<_>>>()?))().ok_or_else(|| logos_rust_sdk::LogosError::JsonError("result does not match the declared collection type".to_string()))
     }
 
     /// [`Self::labels`] with a per-call timeout: THIS call gives up after
@@ -428,10 +428,10 @@ impl SensorModuleClient {
     /// Rust has neither overloading nor default arguments, so the
     /// parameter would break every existing call site. STOPGAP — a later
     /// breaking release folds this back into the single entry point.
-    pub fn labels_with_timeout(&self, ids: &serde_json::Value, timeout: std::time::Duration) -> Result<serde_json::Value, LogosError> {
-        let args = serde_json::Value::Array(vec![ids.clone()]);
+    pub fn labels_with_timeout(&self, ids: &[u64], timeout: std::time::Duration) -> Result<Vec<String>, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(ids.iter().map(|__e| serde_json::json!(__e)).collect())]);
         let value = self.proxy.call_json_with_timeout("labels", &args, timeout)?;
-        Ok(value)
+        (|| Some((&value).as_array()?.iter().map(|__e| Some(__e.as_str()?.to_string())).collect::<Option<Vec<_>>>()?))().ok_or_else(|| logos_rust_sdk::LogosError::JsonError("result does not match the declared collection type".to_string()))
     }
 
     /// Async twin of [`Self::labels`]: fire the call and receive the typed
@@ -439,13 +439,13 @@ impl SensorModuleClient {
     /// client's `labelsAsync`. The callback runs from the protocol
     /// completion path (the module's Qt event loop), so it fires after
     /// the current method returns, never inline.
-    pub fn labels_async<F>(&self, ids: &serde_json::Value, callback: F)
+    pub fn labels_async<F>(&self, ids: &[u64], callback: F)
     where
-        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+        F: FnOnce(Result<Vec<String>, LogosError>) + Send + 'static,
     {
-        let args = serde_json::Value::Array(vec![ids.clone()]);
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(ids.iter().map(|__e| serde_json::json!(__e)).collect())]);
         self.proxy.call_json_async("labels", &args, move |result| {
-            callback(result.and_then(|value| Ok(value)));
+            callback(result.and_then(|value| (|| Some((&value).as_array()?.iter().map(|__e| Some(__e.as_str()?.to_string())).collect::<Option<Vec<_>>>()?))().ok_or_else(|| logos_rust_sdk::LogosError::JsonError("result does not match the declared collection type".to_string()))));
         });
     }
 
@@ -461,19 +461,19 @@ impl SensorModuleClient {
     /// STOPGAP, like its sync twin: Rust cannot overload
     /// [`Self::labels_async`], so the bounded form needs its own name until a
     /// breaking release makes `timeout` a parameter of the one entry point.
-    pub fn labels_async_with_timeout<F>(&self, ids: &serde_json::Value, timeout: std::time::Duration, callback: F)
+    pub fn labels_async_with_timeout<F>(&self, ids: &[u64], timeout: std::time::Duration, callback: F)
     where
-        F: FnOnce(Result<serde_json::Value, LogosError>) + Send + 'static,
+        F: FnOnce(Result<Vec<String>, LogosError>) + Send + 'static,
     {
-        let args = serde_json::Value::Array(vec![ids.clone()]);
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(ids.iter().map(|__e| serde_json::json!(__e)).collect())]);
         self.proxy.call_json_async_with_timeout("labels", &args, timeout, move |result| {
-            callback(result.and_then(|value| Ok(value)));
+            callback(result.and_then(|value| (|| Some((&value).as_array()?.iter().map(|__e| Some(__e.as_str()?.to_string())).collect::<Option<Vec<_>>>()?))().ok_or_else(|| logos_rust_sdk::LogosError::JsonError("result does not match the declared collection type".to_string()))));
         });
     }
 
     /// Computes the mean of a batch of samples.
-    pub fn average(&self, samples: &serde_json::Value) -> Result<f64, LogosError> {
-        let args = serde_json::Value::Array(vec![samples.clone()]);
+    pub fn average(&self, samples: &[f64]) -> Result<f64, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(samples.iter().map(|__e| serde_json::json!(__e)).collect())]);
         let value = self.proxy.call_json("average", &args)?;
         value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
     }
@@ -492,8 +492,8 @@ impl SensorModuleClient {
     /// Rust has neither overloading nor default arguments, so the
     /// parameter would break every existing call site. STOPGAP — a later
     /// breaking release folds this back into the single entry point.
-    pub fn average_with_timeout(&self, samples: &serde_json::Value, timeout: std::time::Duration) -> Result<f64, LogosError> {
-        let args = serde_json::Value::Array(vec![samples.clone()]);
+    pub fn average_with_timeout(&self, samples: &[f64], timeout: std::time::Duration) -> Result<f64, LogosError> {
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(samples.iter().map(|__e| serde_json::json!(__e)).collect())]);
         let value = self.proxy.call_json_with_timeout("average", &args, timeout)?;
         value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))
     }
@@ -503,11 +503,11 @@ impl SensorModuleClient {
     /// client's `averageAsync`. The callback runs from the protocol
     /// completion path (the module's Qt event loop), so it fires after
     /// the current method returns, never inline.
-    pub fn average_async<F>(&self, samples: &serde_json::Value, callback: F)
+    pub fn average_async<F>(&self, samples: &[f64], callback: F)
     where
         F: FnOnce(Result<f64, LogosError>) + Send + 'static,
     {
-        let args = serde_json::Value::Array(vec![samples.clone()]);
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(samples.iter().map(|__e| serde_json::json!(__e)).collect())]);
         self.proxy.call_json_async("average", &args, move |result| {
             callback(result.and_then(|value| value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))));
         });
@@ -525,11 +525,11 @@ impl SensorModuleClient {
     /// STOPGAP, like its sync twin: Rust cannot overload
     /// [`Self::average_async`], so the bounded form needs its own name until a
     /// breaking release makes `timeout` a parameter of the one entry point.
-    pub fn average_async_with_timeout<F>(&self, samples: &serde_json::Value, timeout: std::time::Duration, callback: F)
+    pub fn average_async_with_timeout<F>(&self, samples: &[f64], timeout: std::time::Duration, callback: F)
     where
         F: FnOnce(Result<f64, LogosError>) + Send + 'static,
     {
-        let args = serde_json::Value::Array(vec![samples.clone()]);
+        let args = serde_json::Value::Array(vec![serde_json::Value::Array(samples.iter().map(|__e| serde_json::json!(__e)).collect())]);
         self.proxy.call_json_async_with_timeout("average", &args, timeout, move |result| {
             callback(result.and_then(|value| value.as_f64().ok_or_else(|| logos_rust_sdk::LogosError::JsonError(format!("expected float64, got {}", value)))));
         });
@@ -599,6 +599,226 @@ impl SensorModuleClient {
         });
     }
 
+    /// The module's name, as declared in its metadata.
+    pub fn name(&self) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json("name", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::name`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::name`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn name_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("name", &args, timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Async twin of [`Self::name`]: fire the call and receive the typed
+    /// result in `callback` once it lands — the Rust analog of the C++
+    /// client's `nameAsync`. The callback runs from the protocol
+    /// completion path (the module's Qt event loop), so it fires after
+    /// the current method returns, never inline.
+    pub fn name_async<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async("name", &args, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// [`Self::name_async`] with a per-call timeout — the async half of
+    /// [`Self::name_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::name_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn name_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("name", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// The module's version, as declared in its metadata.
+    pub fn version(&self) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json("version", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::version`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::version`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn version_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("version", &args, timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Async twin of [`Self::version`]: fire the call and receive the typed
+    /// result in `callback` once it lands — the Rust analog of the C++
+    /// client's `versionAsync`. The callback runs from the protocol
+    /// completion path (the module's Qt event loop), so it fires after
+    /// the current method returns, never inline.
+    pub fn version_async<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async("version", &args, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// [`Self::version_async`] with a per-call timeout — the async half of
+    /// [`Self::version_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::version_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn version_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("version", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// The module's canonical LIDL interface document.
+    pub fn lidl(&self) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json("lidl", &args)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// [`Self::lidl`] with a per-call timeout: THIS call gives up after
+    /// `timeout` instead of waiting for the protocol default (20s).
+    /// The bound is threaded down to the call and stored nowhere, so
+    /// the next call through the same client — with a different
+    /// timeout, or with none — is unaffected.
+    ///
+    /// Fails with `LogosError::InvalidTimeout` if the duration cannot be
+    /// expressed on the protocol ABI (sub-millisecond, or longer than
+    /// ~24.8 days). It is refused, never clamped.
+    ///
+    /// A parallel entry point rather than a parameter on [`Self::lidl`]:
+    /// Rust has neither overloading nor default arguments, so the
+    /// parameter would break every existing call site. STOPGAP — a later
+    /// breaking release folds this back into the single entry point.
+    pub fn lidl_with_timeout(&self, timeout: std::time::Duration) -> Result<String, LogosError> {
+        let args = serde_json::Value::Array(vec![]);
+        let value = self.proxy.call_json_with_timeout("lidl", &args, timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Async twin of [`Self::lidl`]: fire the call and receive the typed
+    /// result in `callback` once it lands — the Rust analog of the C++
+    /// client's `lidlAsync`. The callback runs from the protocol
+    /// completion path (the module's Qt event loop), so it fires after
+    /// the current method returns, never inline.
+    pub fn lidl_async<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async("lidl", &args, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// [`Self::lidl_async`] with a per-call timeout — the async half of
+    /// [`Self::lidl_with_timeout`]. The bound applies to THIS call only;
+    /// nothing is stored on the client.
+    ///
+    /// A duration the protocol ABI cannot express (sub-millisecond, or
+    /// longer than ~24.8 days) is delivered to `callback` as
+    /// `LogosError::InvalidTimeout`, synchronously and with nothing sent,
+    /// which is how every other undispatchable async call is reported.
+    ///
+    /// STOPGAP, like its sync twin: Rust cannot overload
+    /// [`Self::lidl_async`], so the bounded form needs its own name until a
+    /// breaking release makes `timeout` a parameter of the one entry point.
+    pub fn lidl_async_with_timeout<F>(&self, timeout: std::time::Duration, callback: F)
+    where
+        F: FnOnce(Result<String, LogosError>) + Send + 'static,
+    {
+        let args = serde_json::Value::Array(vec![]);
+        self.proxy.call_json_async_with_timeout("lidl", &args, timeout, move |result| {
+            callback(result.and_then(|value| Ok(value.as_str().unwrap_or_default().to_string())));
+        });
+    }
+
+    /// Watch this module's subscription transitions: `Armed` / `Lost` /
+    /// `Held` / `Abandoned`, with the establishment number. `Lost` followed
+    /// by `Armed` at a higher generation is the unrecoverable-gap marker.
+    ///
+    /// Per MODULE, not per event: every subscription here shares the
+    /// provider's single handle, so they are lost and restored together.
+    pub fn on_subscription_status<F>(&mut self, f: F) -> Result<(), LogosError>
+    where
+        F: Fn(SubStatus, u64) + Send + Sync + 'static,
+    {
+        self.proxy.on_subscription_status(f)
+    }
+
+    /// 0 = never armed, 1 = the first establishment, N+1 after each one.
+    pub fn subscription_generation(&mut self) -> u64 {
+        self.proxy.subscription_generation()
+    }
+
+    /// `Manual` means "do not RE-arm after a loss", never "do not arm".
+    pub fn set_restart_policy(&mut self, policy: RestartPolicy) -> Result<(), LogosError> {
+        self.proxy.set_restart_policy(policy)
+    }
+
+    /// Revive held subscriptions. Safe from inside the status callback.
+    pub fn rearm_subscriptions(&mut self) -> bool {
+        self.proxy.rearm_subscriptions()
+    }
+
     /// Fires once the sensor has finished warming up.
     /// Subscribe to the `ready` event. Payload arrives as a JSON array;
     /// decode each received item with [`Self::decode_ready`]. The returned
@@ -632,8 +852,8 @@ impl SensorModuleClient {
         let arr = ev.data.as_array()?;
         if arr.len() < 2 { return None; }
         Some(ReadingEvent {
-            id: arr[0].as_u64()?,
-            value: arr[1].as_f64()?,
+            id: (&arr[0]).as_u64()?,
+            value: (&arr[1]).as_f64()?,
         })
     }
 
@@ -653,9 +873,9 @@ impl SensorModuleClient {
         let arr = ev.data.as_array()?;
         if arr.len() < 3 { return None; }
         Some(FaultEvent {
-            code: arr[0].as_i64()?,
-            message: arr[1].as_str()?.to_string(),
-            fatal: arr[2].as_bool()?,
+            code: (&arr[0]).as_i64()?,
+            message: (&arr[1]).as_str()?.to_string(),
+            fatal: (&arr[2]).as_bool()?,
         })
     }
 }

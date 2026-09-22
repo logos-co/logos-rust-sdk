@@ -20,6 +20,21 @@ You don't add this SDK to a `Cargo.toml` by hand or write a `build.rs`. A Rust m
 
 `logos-module-builder` then supplies this SDK as your crate's `logos-rust-sdk` dependency (matched to the generator it ran, so there is no version skew), runs `logos-lidl-gen` to emit the scaffold (`generated/provider_gen.rs`), compiles the crate to a static archive, and links it into the plugin. Your `flake.nix` and `CMakeLists.txt` end up as small as a C++ module's.
 
+Generated Rust methods now use the collection types declared by LIDL. For
+example, `[int]` is `Vec<i64>` in a provider and `&[i64]` in a client;
+`{tstr: [bstr]}` is `BTreeMap<String, Vec<Vec<u8>>>` in a provider and a
+borrowed map in a client. These shapes also apply to returns and event payloads.
+The generator recursively converts nested bytes using the protocol's tagged
+byte encoding. Rust-first contracts can use `Vec<T>` and
+`BTreeMap<String, T>` with supported element types; `Vec<u8>` remains the
+special byte-string type.
+
+This changes existing generated method signatures. When updating the generator,
+replace `serde_json::Value` collection parameters and returns in Rust module
+implementations with the corresponding `Vec<T>` or `BTreeMap<String, T>`, and
+pass slices or borrowed maps to generated clients. Keep `serde_json::Value` for
+LIDL `any`.
+
 The complete, runnable walkthrough — a Rust provider, a C++ provider, and a Rust consumer wired together — is the executable doc-test [`doctests/cross-language-composition.test.yaml`](doctests/cross-language-composition.test.yaml).
 
 ## Calling other modules

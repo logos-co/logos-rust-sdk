@@ -20,7 +20,8 @@
 //!
 //! Supported types (the std-convertible LIDL subset): `i64`→int, `u64`→uint,
 //! `f64`→float64, `bool`→bool, `String`/`&str`→tstr, `Vec<u8>`/`&[u8]`→bstr,
-//! `serde_json::Value`/`&serde_json::Value`→any,
+//! `serde_json::Value`/`&serde_json::Value`→any, `Vec<T>`→`[T]`,
+//! `BTreeMap<String, T>`→`{tstr: T}`,
 //! `Result<serde_json::Value, String>`→result, `()`→void (returns only),
 //! `Option<T>`→`?T` in a PARAMETER or an EVENT parameter.
 //!
@@ -137,13 +138,7 @@ fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
     let last = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
     match last.as_str() {
         "String" | "i64" | "u64" | "f64" | "bool" => Ok(()),
-        "Vec" => match generic_arg(p).as_ref().and_then(type_name) {
-            Some(n) if n == "u8" => Ok(()),
-            _ => Err("Option<Vec<T>> has no LIDL type unless T is u8 (which is `?bstr`) — a \
-                      typed array comes back from the generator as an untyped \
-                      serde_json::Value, which will not match your signature"
-                .into()),
-        },
+        "Vec" | "BTreeMap" => collection_type_is_fixed_point(ty),
         "Option" => Err("Option<Option<T>> has no LIDL type — `?T` is TWO-state (a value, or \
                          empty) and Rust has exactly one empty inhabitant, so there is nowhere \
                          for a third state to live"
@@ -167,11 +162,40 @@ fn option_value_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
                          discriminant"
             .into()),
         other => Err(format!(
-            "Option<{}> has no LIDL type — only String, i64, u64, f64, bool, Vec<u8> and \
-             serde_json::Value may be \
-             optional",
+            "Option<{}> has no LIDL type — use a supported owned scalar, Vec<T>, \
+             BTreeMap<String, T> or serde_json::Value",
             other
         )),
+    }
+}
+
+/// A collection has to come back from LIDL codegen as the same Rust type the
+/// author wrote. In particular, `Vec<i32>` would become `Vec<i64>` and a
+/// HashMap would become a BTreeMap, so refuse them at the source boundary.
+fn collection_type_is_fixed_point(ty: &syn::Type) -> Result<(), String> {
+    let syn::Type::Path(p) = ty else {
+        return Err("collection elements must use owned supported types".into());
+    };
+    let last = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+    match last.as_str() {
+        "String" | "i64" | "u64" | "f64" | "bool" | "Value" | "u8" => Ok(()),
+        "Vec" => {
+            let inner = generic_arg(p).ok_or("Vec missing type argument")?;
+            collection_type_is_fixed_point(&inner)
+        }
+        "BTreeMap" => {
+            let args = generic_types(p);
+            if args.len() != 2 || type_name(&args[0]).as_deref() != Some("String") {
+                return Err("BTreeMap keys must be String".into());
+            }
+            collection_type_is_fixed_point(&args[1])
+        }
+        "Option" => {
+            let inner = generic_arg(p).ok_or("Option missing type argument")?;
+            option_value_is_fixed_point(&inner)
+        }
+        "i32" | "u32" => Err(format!("{} in a collection becomes a 64-bit integer", last)),
+        other => Err(format!("{} is not a supported collection element", other)),
     }
 }
 
@@ -228,27 +252,26 @@ fn type_to_lidl(ty: &syn::Type, is_return: bool) -> Result<TypeExpr, String> {
                     if type_name(&inner) == Some("u8".into()) {
                         Ok(TypeExpr::primitive("bstr"))
                     } else {
+                        collection_type_is_fixed_point(&inner)?;
                         let elem = type_to_lidl(&inner, false)?;
-                        // Without this guard, adding the Option arm below would
-                        // silently WIDEN Vec<Option<T>> from a clean frontend
-                        // error into `[?T]` — which comes back from the provider
-                        // backend as an untyped serde_json::Value, so the
-                        // published contract would be one the author's own impl
-                        // cannot satisfy.
-                        if elem.is_optional() {
-                            return Err(
-                                "Vec<Option<T>> has no LIDL type: `[?T]` comes back from the \
-                                 generator as an untyped serde_json::Value, which will not \
-                                 match your signature"
-                                    .into(),
-                            );
-                        }
                         Ok(TypeExpr {
                             kind: TypeKind::Array,
                             name: String::new(),
                             elements: vec![elem],
                         })
                     }
+                }
+                "BTreeMap" => {
+                    let args = generic_types(p);
+                    if args.len() != 2 || type_name(&args[0]).as_deref() != Some("String") {
+                        return Err("BTreeMap keys must be String".into());
+                    }
+                    collection_type_is_fixed_point(&args[1])?;
+                    Ok(TypeExpr {
+                        kind: TypeKind::Map,
+                        name: String::new(),
+                        elements: vec![TypeExpr::primitive("tstr"), type_to_lidl(&args[1], false)?],
+                    })
                 }
                 // `Option<T>` is `?T` — the Rust-first half of optionality, the
                 // mirror of the C++ header parser's `std::optional<T>`.
@@ -280,15 +303,18 @@ fn type_name(ty: &syn::Type) -> Option<String> {
 }
 
 fn generic_arg(p: &syn::TypePath) -> Option<syn::Type> {
-    let seg = p.path.segments.last()?;
+    generic_types(p).into_iter().next()
+}
+
+fn generic_types(p: &syn::TypePath) -> Vec<syn::Type> {
+    let Some(seg) = p.path.segments.last() else { return Vec::new() };
     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-        for a in &args.args {
-            if let syn::GenericArgument::Type(t) = a {
-                return Some(t.clone());
-            }
-        }
+        return args.args.iter().filter_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        }).collect();
     }
-    None
+    Vec::new()
 }
 
 fn quote_type(ty: &syn::Type) -> String {
@@ -521,15 +547,15 @@ pub trait OptModuleEvents {
         // is an unexplained type mismatch inside generated code.
         let cases: &[(&str, &str)] = &[
             ("Option<Option<i64>>", "TWO-state"),
-            ("Option<Vec<i64>>", "unless T is u8"),
             ("Option<&str>", "OWNED"),
             ("Option<i32>", "64-bit"),
             ("Option<u32>", "64-bit"),
             ("Option<()>", "?void"),
             ("Option<Result<serde_json::Value, String>>", "discriminant"),
-            ("Option<std::collections::HashMap<String,String>>", "only String"),
-            ("Option<MyStruct>", "only String"),
-            ("Vec<Option<String>>", "Vec<Option<T>>"),
+            ("Option<std::collections::HashMap<String,String>>", "supported owned"),
+            ("Option<MyStruct>", "supported owned"),
+            ("Vec<i32>", "64-bit"),
+            ("std::collections::BTreeMap<i64, String>", "keys must be String"),
         ];
         for (spelling, needle) in cases {
             let src = format!("pub trait X {{ fn f(&mut self, p: {}) -> bool; }}", spelling);
@@ -543,6 +569,28 @@ pub trait OptModuleEvents {
                 err
             );
         }
+    }
+
+    #[test]
+    fn typed_collections_survive_rust_to_lidl_to_provider() {
+        let src = r#"
+pub trait Collections {
+    fn echo(&mut self, rows: Vec<std::collections::BTreeMap<String, Vec<u8>>>)
+        -> Vec<std::collections::BTreeMap<String, Vec<u8>>>;
+    fn maybe(&mut self, values: Option<Vec<i64>>) -> bool;
+    fn nested(&mut self, values: Vec<Option<String>>) -> bool;
+}
+"#;
+        let module = extract_from_rust(src, "Collections", None, "1.0.0").unwrap();
+        let lidl = crate::serialize(&module);
+        assert!(lidl.contains("rows: [{tstr: bstr}]"), "{}", lidl);
+        assert!(lidl.contains("values: ? [int]"), "{}", lidl);
+        assert!(lidl.contains("values: [? tstr]"), "{}", lidl);
+        let reparsed = crate::parse(&lidl).unwrap();
+        let generated = crate::generate_provider(&reparsed, "0.3.0");
+        assert!(generated.contains("rows: Vec<std::collections::BTreeMap<String, Vec<u8>>>") , "{}", generated);
+        assert!(generated.contains("values: Option<Vec<i64>>"), "{}", generated);
+        assert!(generated.contains("values: Vec<Option<String>>"), "{}", generated);
     }
 
     #[test]

@@ -257,10 +257,10 @@ sections:
     text: |
       Beyond the round-trippable core above, LIDL also has **composite** types:
       named record types (`type`), maps (`{K: V}`), and optionals (`?T`), plus the
-      untyped escape hatch `any`. A declared record becomes a real struct and `?T`
-      becomes `Option<T>`; a map, or an array of anything but a record, crosses as
-      untyped JSON and is carried as `serde_json::Value` (a `--from-rust`
-      extraction recovers the std-friendly subset shown earlier). Here is a
+      untyped escape hatch `any`. A declared record becomes a real struct, `?T`
+      becomes `Option<T>`, and collections become `Vec<T>` or
+      `BTreeMap<String, T>` recursively. Only `any` stays `serde_json::Value`.
+      Here is a
       contract that uses all of them, taken straight to a provider scaffold.
     steps:
       - title: "geometry_module.lidl"
@@ -280,10 +280,12 @@ sections:
               method translate(p: Point, dx: float64, dy: float64) -> Point description "Translates a point by an offset."
               method bounds(points: [Point]) -> Point description "Returns the bounding corner of a set of points."
               method attributes(tags: {tstr: any}) -> {tstr: any} description "Echoes a string-keyed map of arbitrary values."
+              method signatures(payloads: {tstr: [bstr]}) -> {tstr: [bstr]} description "Echoes named groups of byte strings."
               method nearest(p: Point, limit: ?uint) -> ?Point description "Finds the nearest point within an optional limit; may return nothing."
               method describe(p: Point) -> any description "Returns an arbitrary JSON description of a point."
 
               event moved(from: Point, to: Point) description "Fires when a point moves, carrying both record values."
+              event signatures_changed(payloads: {tstr: [bstr]}) description "Fires when signature groups change."
             }
       - title: "Generate the provider scaffold"
         run: "./result/bin/logos-lidl-gen geometry_module.lidl --provider -o geometry_gen.rs"
@@ -296,9 +298,11 @@ sections:
         text: |
           A declared record (`Point`) is a real struct, and an optional (`?uint`,
           `?Point`) is an `Option` — Rust's one way to spell "no value", which is
-          why `?T` has exactly two states and never three. Maps stay
-          `serde_json::Value`, the untyped carrier for the JSON that crosses the
-          process boundary, and plain scalars like `dx: f64` stay typed.
+          why `?T` has exactly two states and never three. The map becomes
+          `BTreeMap<String, serde_json::Value>` because its element is `any`;
+          plain scalars like `dx: f64` stay typed. The nested `signatures`
+          map is `BTreeMap<String, Vec<Vec<u8>>>`; each byte string still uses
+          the protocol's tagged byte encoding inside the map and array.
 
           The same mapping reaches the typed event EMITTER: `emit_moved` takes
           `&Point`, not a JSON value the author has to assemble, and encodes it
@@ -312,22 +316,21 @@ sections:
           Decoding is liberal in the other direction — absent and `null` both
           read as empty — but a present value of the wrong type is still an
           error, exactly as it is for a required slot.
-        run: "grep -E 'pub trait GeometryModule|fn translate|fn attributes|fn nearest|pub fn emit_moved' geometry_gen.rs"
+        run: "grep -E 'pub trait GeometryModule|fn translate|fn attributes|fn signatures|fn nearest|pub fn emit_moved|pub fn emit_signatures_changed' geometry_gen.rs"
         code_block: |
-          grep -E 'trait|translate|attributes|nearest|emit_moved' geometry_gen.rs
+          grep -E 'trait|translate|attributes|signatures|nearest|emit_' geometry_gen.rs
         expect_contains:
           - "pub trait GeometryModule"
           # `Point` is a record the contract DECLARES, so the author gets a real
-          # struct rather than a Value to pick apart. This expected
-          # serde_json::Value until records landed; the composites BELOW are the
-          # ones that stay untyped.
+          # struct rather than a Value to pick apart.
           - "fn translate(&mut self, p: Point, dx: f64, dy: f64) -> Point"
           # `?uint` / `?Point` are Option<u64> / Option<Point>. This expected
           # serde_json::Value until optionals landed: no backend read optionality
           # at all, so `?T` and `T` generated the same thing and the contract's
           # "may be nothing" was invisible in Rust.
           - "fn nearest(&mut self, p: Point, limit: Option<u64>) -> Option<Point>"
-          - "fn attributes(&mut self, tags: serde_json::Value) -> serde_json::Value"
+          - "fn attributes(&mut self, tags: std::collections::BTreeMap<String, serde_json::Value>) -> std::collections::BTreeMap<String, serde_json::Value>"
+          - "fn signatures(&mut self, payloads: std::collections::BTreeMap<String, Vec<Vec<u8>>>) -> std::collections::BTreeMap<String, Vec<Vec<u8>>>"
           # The typed EMITTER carries the record too. This expected
           # `&serde_json::Value` until the emitter path learned about records:
           # methods had been typed since records landed, so a contract declaring
@@ -335,3 +338,4 @@ sections:
           # hand-build the JSON object to fire it. Borrowed, because an emitter
           # never needs to own its payload.
           - "pub fn emit_moved(from: &Point, to: &Point)"
+          - "pub fn emit_signatures_changed(payloads: &std::collections::BTreeMap<String, Vec<Vec<u8>>>)"
