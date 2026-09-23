@@ -237,6 +237,28 @@ mod __logos_install_hook {
     }
 }
 
+#[allow(unused_variables)]
+fn identity_answer(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
+    match method {
+            "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
+                                     let result = "sdk_test_provider_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
+                                     let result = "0.1.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_provider_module", 0, args.len())); }
+                                     let result = "module sdk_test_provider_module {\n  version \"0.1.0\"\n  description \"Minimal provider module for logos-rust-sdk integration tests\"\n  depends []\n\n  method add(a: int, b: int) -> int\n  method emit_blob(size: int) -> int\n  method sleep(ms: int) -> int description \"Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`.\"\n\n  event blobReady(seq: int, payload: bstr)\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+        _ => None,
+    }
+}
+
 fn to_c_string(s: String) -> *mut c_char {
     CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
 }
@@ -254,6 +276,9 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
             _ => return std::ptr::null_mut(),
         }
     };
+    if let Some(value) = identity_answer(&method, &args) {
+        return to_c_string(value.to_string());
+    }
     ensure_ready(false);
     // Copy the dispatch fn pointer out and RELEASE the REGISTERED
     // lock BEFORE running the handler. A concurrency:"multi" module's
