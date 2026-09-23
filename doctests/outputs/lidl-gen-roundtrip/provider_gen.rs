@@ -306,6 +306,28 @@ mod __logos_install_hook {
     }
 }
 
+#[allow(unused_variables)]
+fn identity_answer(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
+    match method {
+            "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "sensor_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "2.0.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sensor_module", 0, args.len())); }
+                                     let result = "module sensor_module {\n  version \"2.0.0\"\n  depends []\n\n  method temperature() -> float64 description \"Returns the latest temperature reading in degrees Celsius.\"\n  method enable(on: bool) -> bool description \"Enables or disables the sensor.\\nReturns the new enabled state.\"\n  method rename(id: uint, name: tstr) -> tstr description \"Renames the sensor channel.\"\n  method calibrate(id: uint, offset: float64, label: tstr) -> bool description \"Calibrates a channel with an offset and a human-readable label.\"\n  method record(id: uint, value: float64, note: tstr, valid: bool) -> int description \"Records a reading and returns the new sample count.\"\n  method firmware(image: bstr) -> bstr description \"Flashes raw firmware bytes and echoes back the stored image.\"\n  method labels(ids: [uint]) -> [tstr] description \"Resolves a batch of channel ids to their labels.\"\n  method average(samples: [float64]) -> float64 description \"Computes the mean of a batch of samples.\"\n  method reset(id: tstr) -> result description \"Resets a channel; returns a structured success/error result.\"\n\n  event ready() description \"Fires once the sensor has finished warming up.\"\n  event reading(id: uint, value: float64) description \"Fires on each new reading with the channel id and value.\"\n  event fault(code: int, message: tstr, fatal: bool) description \"Fires when a channel faults.\\nCarries an error code, a message, and whether the fault is fatal.\"\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+        _ => None,
+    }
+}
+
 fn to_c_string(s: String) -> *mut c_char {
     CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
 }
@@ -323,6 +345,9 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
             _ => return std::ptr::null_mut(),
         }
     };
+    if let Some(value) = identity_answer(&method, &args) {
+        return to_c_string(value.to_string());
+    }
     ensure_ready(false);
     // Copy the dispatch fn pointer out and RELEASE the REGISTERED
     // lock BEFORE running the handler. A concurrency:"multi" module's

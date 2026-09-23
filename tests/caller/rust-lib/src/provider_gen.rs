@@ -292,6 +292,28 @@ mod __logos_install_hook {
     }
 }
 
+#[allow(unused_variables)]
+fn identity_answer(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
+    match method {
+            "name" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
+                                     let result = "sdk_test_caller_module".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "version" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
+                                     let result = "0.1.0".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+            "lidl" => {
+                                     if !args.is_empty() { return Some(logos_rust_sdk::args::invalid_args("sdk_test_caller_module", 0, args.len())); }
+                                     let result = "module sdk_test_caller_module {\n  version \"0.1.0\"\n  description \"Minimal caller module for logos-rust-sdk integration tests\"\n  depends [sdk_test_provider_module]\n\n  method call_add(a: int, b: int) -> int\n  method last_blob_size() -> int\n  method last_blob_checksum() -> int\n  method timed_call(sleep_ms: int, timeout_ms: int) -> int description \"Call the provider's sleep(sleep_ms) on the process's ONE provider client, through the generated sleep_with_timeout when timeout_ms > 0 and through plain sleep otherwise. Returns the elapsed milliseconds, negated if the call actually completed.\"\n  method same_client_two_timeouts(sleep_ms: int, timeout_a_ms: int, timeout_b_ms: int, drain_ms: int) -> int description \"Two sleep(sleep_ms) calls back to back on the SAME client, the first bounded at timeout_a_ms and the second at timeout_b_ms, with drain_ms slept between them so the single-dispatch provider is idle again. Read the elapsed times with last_pair_a_ms / last_pair_b_ms.\"\n  method last_pair_a_ms() -> int description \"Elapsed ms of the FIRST call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\"\n  method last_pair_b_ms() -> int description \"Elapsed ms of the SECOND call of the last same_client_two_timeouts, negated if it completed; -1 if not run.\"\n  method provider_client_addr() -> int description \"Address of the process-wide provider client, so a caller can verify that separate measurements really went through the same client object.\"\n  method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description \"Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok.\"\n  method last_async_elapsed_ms() -> int description \"Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight.\"\n  method last_async_ok() -> int description \"1 if the last async call completed, 0 if it failed, -1 while still in flight.\"\n  method refused_timeout_reason(timeout_us: int) -> tstr description \"Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default.\"\n}\n".to_string();
+                                     Some(serde_json::Value::from(result))
+                                 }
+        _ => None,
+    }
+}
+
 fn to_c_string(s: String) -> *mut c_char {
     CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
 }
@@ -309,6 +331,9 @@ pub extern "C" fn logos_module_dispatch(method: *const c_char, args_json: *const
             _ => return std::ptr::null_mut(),
         }
     };
+    if let Some(value) = identity_answer(&method, &args) {
+        return to_c_string(value.to_string());
+    }
     ensure_ready(false);
     // Copy the dispatch fn pointer out and RELEASE the REGISTERED
     // lock BEFORE running the handler. A concurrency:"multi" module's
@@ -887,8 +912,8 @@ pub mod sdk_test_provider_module {
             let arr = ev.data.as_array()?;
             if arr.len() < 2 { return None; }
             Some(BlobReadyEvent {
-                seq: arr[0].as_i64()?,
-                payload: logos_rust_sdk::bytes::decode(&arr[1])?,
+                seq: (&arr[0]).as_i64()?,
+                payload: logos_rust_sdk::bytes::decode_lenient((&arr[1]))?,
             })
         }
     }

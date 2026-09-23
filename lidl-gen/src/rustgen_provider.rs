@@ -1172,30 +1172,33 @@ __ABOUT_TO_UNLOAD_BODY__\n\
     ));
     }
 
+    // A derived method has no trait method to call. name()/version()/lidl()
+    // answer from the module declaration; lidl() answers the canonical LIDL
+    // document consumed by this provider. The arm returns before the ordinary
+    // dispatch path, so it needs its own arity gate -- it does not inherit the
+    // one below. Without it `version("junk")` dropped the argument and answered
+    // the declared literal with status ok: a correct-looking reply to a call
+    // that should have been refused, and worse than answering nothing, because
+    // the caller cannot tell it was talking to the wrong contract. An identity
+    // method declares no parameters, so any argument at all is an overflow.
+    let identity_arm = |m: &MethodDecl| -> Option<String> {
+        if !m.derived {
+            return None;
+        }
+        let literal = builtin_literal(module, interface_document, &m.name)?;
+        Some(format!(
+            "            \"{}\" => {{\n                     \x20               if !args.is_empty() {{ return Some(logos_rust_sdk::args::invalid_args({:?}, 0, args.len())); }}\n                     \x20               let result = {:?}.to_string();\n                     \x20               Some({})\n                     \x20           }}\n",
+            m.name,
+            module.name,
+            literal,
+            method_ret_to_json(m.return_type.as_ref(), "result", &recs)
+        ))
+    };
+
     for m in &module.methods {
-        // A derived method has no trait method to call. name()/version()/lidl()
-        // answer from the module declaration; lidl() answers the canonical
-        // LIDL document consumed by this provider.
-        if m.derived {
-            if let Some(literal) = builtin_literal(module, interface_document, &m.name) {
-                // This arm returns before the ordinary dispatch path, so it
-                // needs its own arity gate -- it does not inherit the one
-                // below. Without it `version("junk")` dropped the argument and
-                // answered the declared literal with status ok: a
-                // correct-looking reply to a call that should have been
-                // refused, and worse than answering nothing, because the
-                // caller cannot tell it was talking to the wrong contract.
-                // An identity method declares no parameters, so any argument
-                // at all is an overflow.
-                out.push_str(&format!(
-                    "            \"{}\" => {{\n                     \x20               if !args.is_empty() {{ return Some(logos_rust_sdk::args::invalid_args({:?}, 0, args.len())); }}\n                     \x20               let result = {:?}.to_string();\n                     \x20               Some({})\n                     \x20           }}\n",
-                    m.name,
-                    module.name,
-                    literal,
-                    method_ret_to_json(m.return_type.as_ref(), "result", &recs)
-                ));
-                continue;
-            }
+        if let Some(arm) = identity_arm(m) {
+            out.push_str(&arm);
+            continue;
         }
         // Only the REQUIRED prefix of the parameter list has to be present. A
         // trailing `?T` may arrive as null or not at all: absent and null are
@@ -1333,6 +1336,20 @@ __ABOUT_TO_UNLOAD_BODY__\n\
          }\n\n",
     );
 
+    // The same arms again, answered before ensure_ready(): a host asks name() before it
+    // has tokens or context, and ensure_ready() constructs the impl and can fire the hook.
+    let identity_arms: String = module.methods.iter().filter_map(identity_arm).collect();
+    out.push_str(&format!(
+        "#[allow(unused_variables)]\n\
+         fn identity_answer(method: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {{\n\
+         \x20   match method {{\n\
+         {}\
+         \x20       _ => None,\n\
+         \x20   }}\n\
+         }}\n\n",
+        identity_arms
+    ));
+
     // -- C ABI exports -----------------------------------------------------------
     let iface = interface_json(module).to_string().replace('\\', "\\\\").replace('"', "\\\"");
     out.push_str(&format!(
@@ -1352,6 +1369,9 @@ __ABOUT_TO_UNLOAD_BODY__\n\
          \x20           _ => return std::ptr::null_mut(),\n\
          \x20       }}\n\
          \x20   }};\n\
+         \x20   if let Some(value) = identity_answer(&method, &args) {{\n\
+         \x20       return to_c_string(value.to_string());\n\
+         \x20   }}\n\
          \x20   ensure_ready(false);\n\
          \x20   // Copy the dispatch fn pointer out and RELEASE the REGISTERED\n\
          \x20   // lock BEFORE running the handler. A concurrency:\"multi\" module's\n\
@@ -2187,6 +2207,29 @@ module v_module {
         assert!(code.contains(r#""version" =>"#), "{code}");
         assert!(code.contains(r#""1.0.0".to_string()"#), "{code}");
         assert!(code.contains(r#""lidl" =>"#), "{code}");
+    }
+
+    // Detector: dispatch ran ensure_ready() before answering name(), so the host's
+    // identity check constructed the impl, and ran on_context_ready, before tokens.
+    #[test]
+    fn identity_is_answered_before_author_code_runs() {
+        let code = generate_provider(&with_identity(SAMPLE), "0.1.0");
+        let dispatch = code
+            .find("pub extern \"C\" fn logos_module_dispatch(")
+            .expect("dispatch export");
+        let body = &code[dispatch..];
+        let answer = body
+            .find("identity_answer(&method, &args)")
+            .expect("dispatch asks identity_answer");
+        let ready = body.find("ensure_ready(false);").expect("ensure_ready");
+        assert!(answer < ready, "{body}");
+        let function = code.find("fn identity_answer(").expect("identity_answer");
+        let answers = &code[function..];
+        let fallthrough = answers.find("_ => None").expect("fallthrough arm");
+        for arm in [r#""name" =>"#, r#""version" =>"#, r#""lidl" =>"#] {
+            let at = answers.find(arm).expect(arm);
+            assert!(at < fallthrough, "{answers}");
+        }
     }
 
     #[test]
