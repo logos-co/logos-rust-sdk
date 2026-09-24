@@ -29,31 +29,26 @@
       url = "github:logos-co/logos-module-builder";
       inputs.logos-protocol.follows = "logos-protocol";
     };
-    # NOT given a logos-protocol follows, and the reason is worth recording
-    # because it looks like an obvious omission.
-    #
-    # logoscore is the HOST that dlopens the fixture modules, and on Linux a
-    # plugin's undefined symbols resolve against the HOST's protocol, not
-    # against whatever the module was linked with — so pointing it here does
-    # fix the "undefined symbol: lp_client_rearm_subscriptions" load failure,
-    # and it was measured doing so.
-    #
-    # But it trades that for a worse one. TokenManager's layout is cross-package
-    # ABI: the host allocates it and modules mutate it. Moving logoscore onto a
-    # protocol its own BUNDLED capability_module was not built against splits
-    # the token store, and every call comes back "rejecting unauthorized call —
-    # auth token not recognized". A symbol error at least names itself.
-    #
-    # The logoscore stack has to move as a unit, which is upstream propagation
-    # (logos-logoscore-cli and logos-module-builder relocking onto the 0.9
-    # revision), not something a follows here can express.
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    # Resolved as tests/flake.nix resolves it, so this check and CI run one
+    # logoscore on the fixtures' protocol. Relock it only as a unit: a bundled
+    # capability_module whose TokenManager layout differs from this protocol's
+    # splits the token store ("auth token not recognized" on every call).
+    logos-logoscore-cli = {
+      url = "github:logos-co/logos-logoscore-cli";
+      inputs.logos-protocol.follows = "logos-protocol";
+      inputs.logos-cpp-sdk.follows = "logos-module-builder/logos-cpp-sdk";
+      inputs.logos-nix.follows = "logos-module-builder/logos-nix";
+      inputs.logos-plugin-qt.follows = "logos-module-builder/logos-plugin-qt";
+      inputs.nix-bundle-logos-module-install.follows = "logos-module-builder/nix-bundle-logos-module-install";
+      # Cuts the logos-test-modules <-> logoscore-cli cycle: 16.6k lock nodes -> 3k.
+      inputs.logos-test-modules.follows = "logos-module-builder/logos-nix";
+    };
     # A DIRECT pin rather than taking module-builder's: that one lags, and
     # checks.module-impl-abi reads this to decide how many module-impl exports
     # must exist. Against a stale protocol the check is structurally incapable
     # of failing — it could not see a missing grant_host_services (0.3) or
-    # teardown pair (0.5). The follows above now points module-builder AT this
-    # pin, so both intents hold at once: one protocol, and a current one.
+    # teardown pair (0.5). The follows above point module-builder and logoscore
+    # AT this pin, so both intents hold at once: one protocol, and a current one.
     logos-protocol = {
       url = "github:logos-co/logos-protocol";
       inputs.logos-nix.follows = "logos-nix";
