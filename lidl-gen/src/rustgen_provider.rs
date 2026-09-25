@@ -829,6 +829,26 @@ fn accept_inbound_token_block(protocol_version: &str) -> String {
         .to_string()
 }
 
+/// The optional `logos_module_set_runtime_delegate`, added at protocol 0.13: a
+/// host that loads this image in-process passes its runtime delegate through it.
+/// Not declared in logos_module_impl.h; without it a module runs in a subprocess.
+fn runtime_delegate_block(protocol_version: &str) -> String {
+    if !protocol_at_least(protocol_version, 0, 13) {
+        return String::new();
+    }
+    // Declared inside the gated block for accept_inbound_token's reason: a
+    // reference from the SDK crate would reach modules built on older protocols.
+    "\n\
+     extern \"C\" {\n\
+     \x20   fn lp_runtime_install_delegate(delegate: *const c_void) -> c_int;\n\
+     }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_set_runtime_delegate(delegate: *const c_void) -> c_int {\n\
+     \x20   unsafe { lp_runtime_install_delegate(delegate) }\n\
+     }\n"
+        .to_string()
+}
+
 fn set_call_caller_block(protocol_version: &str) -> String {
     if !protocol_at_least(protocol_version, 0, 6) {
         return String::new();
@@ -1455,9 +1475,10 @@ __ABOUT_TO_UNLOAD_BODY__\n\
                 rust_first_unload_block(emit_trait, multi)
             ),
             format!(
-                "{}{}",
+                "{}{}{}",
                 set_call_caller_block(protocol_version),
-                accept_inbound_token_block(protocol_version)
+                accept_inbound_token_block(protocol_version),
+                runtime_delegate_block(protocol_version)
             )
         )
     ));
@@ -1739,6 +1760,35 @@ module rust_calc {
             next_major.contains("pub extern \"C\" fn logos_module_accept_inbound_token"),
             "{next_major}"
         );
+    }
+
+    // ── protocol 0.13: the in-process host's runtime delegate ───────────
+    #[test]
+    fn protocol_0_13_emits_the_runtime_delegate_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.13.0");
+        assert!(
+            code.contains("pub extern \"C\" fn logos_module_set_runtime_delegate(delegate: *const c_void) -> c_int"),
+            "{code}"
+        );
+        assert!(code.contains("unsafe { lp_runtime_install_delegate(delegate) }"), "{code}");
+        assert!(
+            code.contains("fn lp_runtime_install_delegate(delegate: *const c_void) -> c_int;"),
+            "{code}"
+        );
+        // MAJOR-aware, like every other gate.
+        let next_major = generate_provider(&m, "1.0.0");
+        assert!(next_major.contains("pub extern \"C\" fn logos_module_set_runtime_delegate"));
+    }
+
+    // Below 0.13 the protocol has no lp_runtime_install_delegate to link.
+    #[test]
+    fn protocol_0_12_emits_no_runtime_delegate_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.12.0");
+        assert!(!code.contains("logos_module_set_runtime_delegate"), "{code}");
+        assert!(!code.contains("lp_runtime_install_delegate"), "{code}");
+        assert!(code.contains("pub extern \"C\" fn logos_module_accept_inbound_token"), "{code}");
     }
 
     /// The module-impl exports a scaffold DEFINES, by name. Anchored on the
