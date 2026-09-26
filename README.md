@@ -215,6 +215,42 @@ logos_rust_sdk::set_module_origin("my_tool");   // before the first call
 Set once per process; a second, different name is refused. With none declared the origin is empty,
 which the capability handshake rejects by name — fail closed, never a borrowed identity.
 
+## Embedding a runtime in an app (feature `host`)
+
+An app that is not a module (a desktop or mobile app, a CLI) can run a Logos runtime of its own
+and use the same generated clients. `host::LogosCore::start` spawns liblogos' `logos_runtime`
+and makes the app its **shell**. It also declares the shell as the process's origin, so
+`XClient::new()` needs no setup:
+
+```rust
+use logos_rust_sdk::host::{Config, LogosCore};
+
+let core = LogosCore::start(
+    Config::new("my_app")                        // the shell name; not a runtime module's name
+        .bundled_modules_dir(bundled)            // capability_module, modules_state, peering_*
+        .modules_dir(modules)                    // modules this app runs locally
+        .persistence(data_dir)
+        .peering(serde_json::json!({ "name": "my-laptop" })),
+)?;                                              // blocks until ready: keep it off a UI thread
+let node = blockchain_module::BlockchainModuleClient::new();  // local, or imported from a peer
+let info = node.get_cryptarchia_info()?;
+```
+
+A module the runtime loads from a modules directory and one it imports from a peered runtime
+(`peering_module.setImport`) are reached the same way. `LogosCore` also offers `call`,
+`call_async` and `subscribe` by name, plus `load_module`, `unload_module`, `list_modules` and
+`module_stats` over `core_service`.
+
+**Linking.** Set `LOGOS_HOST_LIB_DIR` to liblogos' `lib` output (`lib.hostBuildSupport`). It
+links `liblogos_core` and the `liblogos_protocol_plain` that liblogos itself uses. Link exactly
+that one protocol image: a second copy keeps its own token store, and every call from it fails.
+The libraries are `@rpath`-named, so give the app an rpath or bundle them beside it.
+
+**Generating the clients.** `lib.mkClients { system; lidls = { name = <module>.lidl; }; }` runs
+`logos-lidl-gen` over published contracts (a module's `packages.<sys>.lidl`). It emits one
+`<name>.rs` per contract plus a `mod.rs`. Commit the output, and check it with
+`lib.clientsUpToDate { system; lidls; committed = ./src/clients; }`.
+
 ## Supporting types
 
 The handful of SDK types that surface directly in module code:
