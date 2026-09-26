@@ -361,9 +361,61 @@ pub enum LogosCaller {
     /// An isolated per-plugin identity derived from a parent module. Specified
     /// and parsed; nothing emits it yet.
     Derived { parent: String, leaf: String },
-    /// An operator-issued named token. Specified and parsed; nothing emits it
-    /// yet (it needs the transport's TokenValidator widened from bool).
+    /// An operator-issued named token: logosctl through core_service, or a
+    /// remote operator's session.
     Operator { name: String },
+    /// A consumer on another runtime, vouched for by that runtime over a
+    /// tls_tcp session: `peer` is its runtime id, `name` the consumer it
+    /// named. Never [`LogosCaller::is_module`]: "wallet_ui" on another runtime
+    /// is not the local wallet_ui.
+    Remote { peer: String, name: String },
+}
+
+/// Rule 7: which copy of a repeated key wins differs between parsers, so a
+/// document that repeats one anywhere is Unknown. serde_json keeps the last
+/// copy silently, so the walk below looks for repeats itself.
+fn repeats_a_key(doc: &str) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+    use std::collections::HashSet;
+
+    struct Walk;
+    impl<'de> Visitor<'de> for Walk {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<bool, E> { Ok(false) }
+        fn visit_i64<E>(self, _: i64) -> Result<bool, E> { Ok(false) }
+        fn visit_u64<E>(self, _: u64) -> Result<bool, E> { Ok(false) }
+        fn visit_f64<E>(self, _: f64) -> Result<bool, E> { Ok(false) }
+        fn visit_str<E>(self, _: &str) -> Result<bool, E> { Ok(false) }
+        fn visit_unit<E>(self) -> Result<bool, E> { Ok(false) }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            let mut repeated = false;
+            while let Some(inner) = seq.next_element_seed(Seed)? {
+                repeated |= inner;
+            }
+            Ok(repeated)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut keys = HashSet::new();
+            let mut repeated = false;
+            while let Some(key) = map.next_key::<String>()? {
+                repeated |= !keys.insert(key);
+                repeated |= map.next_value_seed(Seed)?;
+            }
+            Ok(repeated)
+        }
+    }
+    struct Seed;
+    impl<'de> DeserializeSeed<'de> for Seed {
+        type Value = bool;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+            deserializer.deserialize_any(Walk)
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(doc);
+    Seed.deserialize(&mut deserializer).unwrap_or(false)
 }
 
 impl LogosCaller {
@@ -388,6 +440,9 @@ impl LogosCaller {
         let Some(kind) = object.get("kind").and_then(serde_json::Value::as_str) else {
             return Self::Unknown;
         };
+        if repeats_a_key(doc) {
+            return Self::Unknown;
+        }
 
         // Rule 4: a known arm missing a required field is Unknown, not a
         // partial value. An empty string is not a name — Module{name:""} would
@@ -442,6 +497,10 @@ impl LogosCaller {
                 Some(name) => Self::Operator { name },
                 None => Self::Unknown,
             },
+            "remote" => match (required("peer"), required("name")) {
+                (Some(peer), Some(name)) => Self::Remote { peer, name },
+                _ => Self::Unknown,
+            },
             // Rule 2: an UNRECOGNISED arm is Unknown. Never a closest match,
             // never dropped. This is the only safe direction — adding an arm
             // can turn an old reader's is_module(x) from true to false, never
@@ -469,6 +528,11 @@ impl LogosCaller {
         matches!(self, Self::Derived { parent: p, leaf: l } if p == parent && l == leaf)
     }
 
+    /// Whether the caller is a consumer on another runtime.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote { .. })
+    }
+
     /// A stable, machine-comparable spelling of this caller — for a map key, a
     /// structured log field, or an equality test that must not lose the
     /// instance.
@@ -485,6 +549,7 @@ impl LogosCaller {
             Self::Module { name, instance: Some(instance) } => format!("module:{name}#{instance}"),
             Self::Derived { parent, leaf } => format!("derived:{parent}/{leaf}"),
             Self::Operator { name } => format!("operator:{name}"),
+            Self::Remote { peer, name } => format!("remote:{peer}/{name}"),
         }
     }
 
@@ -501,6 +566,7 @@ impl LogosCaller {
             }
             Self::Derived { parent, leaf } => format!("{leaf}, derived from {parent}"),
             Self::Operator { name } => format!("operator {name}"),
+            Self::Remote { peer, name } => format!("{name} on runtime {peer}"),
         }
     }
 }
@@ -630,6 +696,30 @@ mod caller_tests {
         assert_eq!(
             LogosCaller::from_json(r#"{"kind":"operator","name":"ops-readonly"}"#),
             LogosCaller::Operator { name: "ops-readonly".into() }
+        );
+    }
+
+    #[test]
+    fn the_remote_arm_parses_and_is_never_a_module() {
+        let caller = LogosCaller::from_json(r#"{"kind":"remote","peer":"p-1","name":"wallet_ui"}"#);
+        assert_eq!(caller, LogosCaller::Remote { peer: "p-1".into(), name: "wallet_ui".into() });
+        assert!(caller.is_remote());
+        assert!(!caller.is_module("wallet_ui"));
+        assert_eq!(caller.identity(), "remote:p-1/wallet_ui");
+        assert_eq!(LogosCaller::from_json(r#"{"kind":"remote","name":"x"}"#), LogosCaller::Unknown);
+        assert_eq!(LogosCaller::from_json(r#"{"kind":"remote","peer":"","name":"x"}"#), LogosCaller::Unknown);
+    }
+
+    #[test]
+    fn a_repeated_key_makes_the_document_unknown() {
+        assert_eq!(LogosCaller::from_json(r#"{"kind":"module","name":"a","name":"b"}"#), LogosCaller::Unknown);
+        assert_eq!(
+            LogosCaller::from_json(r#"{"kind":"module","name":"x","extra":{"a":1,"a":2}}"#),
+            LogosCaller::Unknown
+        );
+        assert_eq!(
+            LogosCaller::from_json(r#"{"kind":"module","name":"x","e":[{"a":1},{"a":2}]}"#),
+            LogosCaller::Module { name: "x".into(), instance: None }
         );
     }
 
