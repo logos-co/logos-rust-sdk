@@ -14,8 +14,11 @@ fn main() {
     if let Some(dir) = std::env::var_os("LOGOS_HOST_LIB_DIR") {
         println!("cargo:rustc-link-search=native={}", dir.to_string_lossy());
         // liblogos is @rpath-named; this reaches only this crate's own tests,
-        // an app sets its own rpath (or bundles the libraries beside it).
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.to_string_lossy());
+        // an app sets its own rpath (or bundles the libraries beside it). An
+        // APK's libraries find each other in its own lib directory.
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.to_string_lossy());
+        }
     }
     println!("cargo:rustc-link-lib=dylib=logos_core");
     println!("cargo:rustc-link-lib=dylib=logos_protocol_plain");
