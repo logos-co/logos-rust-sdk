@@ -622,9 +622,8 @@ impl PluginProxy {
     }
 
     /// Call a plugin method asynchronously.
-    /// Returns a channel receiver that will yield the result once available.
-    /// Requires the Qt event loop to be processing (it runs automatically inside
-    /// a loaded Logos module process).
+    /// Returns a channel receiver that will yield the result once available,
+    /// delivered on one of the protocol's own threads.
     ///
     /// Waits the protocol default (20s). To bound this one call, use
     /// [`call_with_timeout`](Self::call_with_timeout).
