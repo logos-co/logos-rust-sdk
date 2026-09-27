@@ -218,6 +218,30 @@
         runtimeLibPath = "${liblogosLib}/lib";
       };
 
+      # The same for an Android app, a cdylib for aarch64-linux-android: the cross
+      # linker and C toolchain cargo and cc-rs need, from logos-nix's Android set
+      # (`androidPkgs`), and liblogos' Android lib output. The caller brings a
+      # Rust toolchain with the target's std.
+      lib.hostBuildSupportAndroid = { liblogosLib, androidPkgs }:
+        let
+          target = "aarch64-linux-android";
+          u = builtins.replaceStrings [ "-" ] [ "_" ] target;
+          cc = androidPkgs.stdenv.cc;
+        in
+        {
+          inherit target;
+          nativeBuildInputs = [ cc ];
+          env = {
+            LOGOS_HOST_LIB_DIR = "${liblogosLib}/lib";
+            CARGO_BUILD_TARGET = target;
+            "CARGO_TARGET_${nixpkgs.lib.toUpper u}_LINKER" = "${cc}/bin/${cc.targetPrefix}cc";
+            "CC_${u}" = "${cc}/bin/${cc.targetPrefix}cc";
+            "CXX_${u}" = "${cc}/bin/${cc.targetPrefix}c++";
+            "AR_${u}" = "${cc.bintools}/bin/${cc.targetPrefix}ar";
+          };
+          runtimeLibPath = "${liblogosLib}/lib";
+        };
+
       # Typed clients for an app, one `<name>.rs` per contract plus a `mod.rs`:
       # `lidls` maps a module name to its .lidl (a module's packages.<sys>.lidl).
       # Commit the output and check it with `clientsUpToDate`; a build.rs cannot

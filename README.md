@@ -244,7 +244,14 @@ A module the runtime loads from a modules directory and one it imports from a pe
 **Linking.** Set `LOGOS_HOST_LIB_DIR` to liblogos' `lib` output (`lib.hostBuildSupport`). It
 links `liblogos_core` and the `liblogos_protocol_plain` that liblogos itself uses. Link exactly
 that one protocol image: a second copy keeps its own token store, and every call from it fails.
-The libraries are `@rpath`-named, so give the app an rpath or bundle them beside it.
+`LogosCore::start` refuses to run while two are loaded, and `host::protocol_images()` lists
+them. The libraries are `@rpath`-named, so give the app an rpath or bundle them beside it.
+
+**Android.** `lib.hostBuildSupportAndroid { liblogosLib; androidPkgs; }` gives a
+`aarch64-linux-android` build its `env` and `nativeBuildInputs`: the cross linker and C
+toolchain from logos-nix's Android set (`logos-nix.lib.mobileTargets.aarch64-android.pkgs`),
+and liblogos' Android `lib` output. Bring a Rust toolchain with that target's std. No rpath is
+set there: an APK's libraries are extracted side by side.
 
 **Generating the clients.** `lib.mkClients { system; lidls = { name = <module>.lidl; }; }` runs
 `logos-lidl-gen` over published contracts (a module's `packages.<sys>.lidl`). It emits one
