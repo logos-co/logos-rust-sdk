@@ -556,6 +556,16 @@ pub fn current_caller_json() -> Option<String> {
         .flatten()
 }
 
+/// Whether the runtime checked this dispatch against a method-list grant:
+/// `"scoped":true` in the caller document, which only the target's runtime writes.
+/// False outside a dispatch, for a `"*"` grant, and for any malformed document.
+pub fn current_caller_scoped() -> bool {
+    current_caller_json()
+        .and_then(|document| serde_json::from_str::<serde_json::Value>(&document).ok())
+        .map(|value| value.get("scoped").and_then(|s| s.as_bool()) == Some(true))
+        .unwrap_or(false)
+}
+
 /// Who is calling the method your handler is running — the ambient accessor a
 /// module author uses.
 ///
@@ -600,6 +610,20 @@ mod caller_tests {
     }
     fn pop() {
         unsafe { set_call_caller(std::ptr::null()) };
+    }
+
+    #[test]
+    fn scoped_is_read_only_from_a_boolean_true_in_a_dispatch() {
+        assert!(!current_caller_scoped(), "outside a dispatch");
+        push(r#"{"kind":"module","name":"signer","scoped":true}"#);
+        assert!(current_caller_scoped());
+        pop();
+        for doc in [r#"{"kind":"module","name":"a"}"#, r#"{"kind":"module","name":"a","scoped":"true"}"#,
+                    r#"{"kind":"module","name":"a","scoped":1}"#, "not json"] {
+            push(doc);
+            assert!(!current_caller_scoped(), "{doc}");
+            pop();
+        }
     }
 
     // ── the document → the type: the normative rules, in the order a reader

@@ -47,7 +47,7 @@ pub use error::LogosError;
 pub use params::{Param, ToParam};
 pub use callback::{CallResult, EventData};
 pub use plugin::{EventSubscription, PluginProxy, RestartPolicy, SubStatus};
-pub use api::{current_caller, current_caller_json, grant_host_services, module_origin,
+pub use api::{current_caller, current_caller_json, current_caller_scoped, grant_host_services, module_origin,
               protocol_abi_major, protocol_version, save_token, set_call_caller,
               set_module_origin, set_unload_done_callback, unload_finished, AboutToUnload,
               LogosCaller, LogosModuleSDK, Shutdown, UnloadDoneCb, UnloadProbe,

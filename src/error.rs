@@ -32,6 +32,25 @@ pub enum LogosError {
     Other(String),
 }
 
+impl LogosError {
+    /// The protocol's error code ("not_authorised", "unauthorized", "timeout", ...)
+    /// when the failure carried the canonical {code, message, origin} object.
+    pub fn code(&self) -> Option<String> {
+        match self {
+            LogosError::PluginCallFailed { message, .. } => serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(String::from)),
+            _ => None,
+        }
+    }
+
+    /// The target's grant does not cover the method. Never retried: a new token
+    /// would carry the same grant.
+    pub fn is_not_authorised(&self) -> bool {
+        self.code().as_deref() == Some("not_authorised")
+    }
+}
+
 impl fmt::Display for LogosError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -84,5 +103,26 @@ impl From<serde_json::Error> for LogosError {
 impl From<std::sync::mpsc::RecvError> for LogosError {
     fn from(_: std::sync::mpsc::RecvError) -> Self {
         LogosError::ChannelClosed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(message: &str) -> LogosError {
+        LogosError::PluginCallFailed { plugin: "t".into(), method: "m".into(), message: message.into() }
+    }
+
+    #[test]
+    fn the_code_comes_from_the_canonical_error_object() {
+        let refused = failed(r#"{"code":"not_authorised","message":"outside the grant","origin":"t"}"#);
+        assert_eq!(refused.code().as_deref(), Some("not_authorised"));
+        assert!(refused.is_not_authorised());
+        assert_eq!(failed(r#"{"code":"unauthorized","message":"","origin":"t"}"#).code().as_deref(),
+                   Some("unauthorized"));
+        assert!(!failed(r#"{"code":"unauthorized"}"#).is_not_authorised());
+        assert_eq!(failed("lp_invoke failed with code -3").code(), None);
+        assert_eq!(LogosError::ChannelClosed.code(), None);
     }
 }
