@@ -15,10 +15,10 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dir.to_string_lossy());
         // liblogos is @rpath-named; this reaches only this crate's own tests,
         // an app sets its own rpath (or bundles the libraries beside it). An
-        // APK's libraries find each other in its own lib directory, and a
-        // Windows program finds its DLLs beside it.
+        // APK's libraries find each other in its own lib directory, a Windows
+        // program finds its DLLs beside it, and an iOS app carries them.
         let os = std::env::var("CARGO_CFG_TARGET_OS");
-        if !matches!(os.as_deref(), Ok("android") | Ok("windows")) {
+        if !matches!(os.as_deref(), Ok("android") | Ok("windows") | Ok("ios")) {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.to_string_lossy());
         }
     }
