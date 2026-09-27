@@ -8,7 +8,8 @@
 //!
 //! liblogos and its `liblogos_protocol_plain` resolve at the final link; set
 //! `LOGOS_HOST_LIB_DIR` to liblogos' `lib` output (see `lib.hostBuildSupport`).
-//! Link that ONE protocol image: a second copy would hold its own tokens.
+//! Link that ONE protocol image: a second copy would hold its own tokens, so
+//! [`LogosCore::start`] refuses to run with two (see [`protocol_images`]).
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -239,6 +240,14 @@ impl LogosCore {
     /// its bundled modules, so keep it off a UI thread. One runtime per process.
     pub fn start(config: Config) -> Result<LogosCore, LogosError> {
         let spawn = config.spawn_json()?;
+        let images = protocol_images();
+        if images.len() > 1 {
+            return Err(LogosError::Other(format!(
+                "{} copies of liblogos_protocol_plain are loaded ({}): the runtime hands the shell's \
+                 credential to the one liblogos links, so link that one only",
+                images.len(), images.join(", ")
+            )));
+        }
         if !crate::api::set_module_origin(&config.shell) {
             return Err(LogosError::Other(format!(
                 "this process already calls modules as '{}'", crate::api::module_origin().unwrap_or("")
@@ -471,9 +480,97 @@ unsafe fn take_string(value: *mut c_char) -> Option<String> {
     out
 }
 
+/// Every loaded copy of `liblogos_protocol_plain`, by canonical path. The
+/// runtime adopts the shell's credential into the copy liblogos links; a client
+/// calling through any other copy holds no token and is refused.
+pub fn protocol_images() -> Vec<String> {
+    let mut found: Vec<String> = loaded_images()
+        .into_iter()
+        .filter(|path| {
+            Path::new(path).file_name().and_then(|n| n.to_str())
+                .map_or(false, |n| n.starts_with("liblogos_protocol_plain."))
+        })
+        .map(|path| std::fs::canonicalize(&path).map(|p| p.display().to_string()).unwrap_or(path))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn loaded_images() -> Vec<String> {
+    // The leading fields of <link.h>'s dl_phdr_info; only the name is read.
+    #[repr(C)]
+    struct PhdrInfo {
+        addr: usize,
+        name: *const c_char,
+    }
+    extern "C" {
+        fn dl_iterate_phdr(
+            callback: extern "C" fn(*mut PhdrInfo, usize, *mut c_void) -> c_int,
+            data: *mut c_void,
+        ) -> c_int;
+    }
+    extern "C" fn collect(info: *mut PhdrInfo, _: usize, data: *mut c_void) -> c_int {
+        let names = unsafe { &mut *(data as *mut Vec<String>) };
+        let name = unsafe { (*info).name };
+        if !name.is_null() {
+            names.push(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned());
+        }
+        0
+    }
+    let mut names = Vec::new();
+    unsafe { dl_iterate_phdr(collect, &mut names as *mut Vec<String> as *mut c_void) };
+    names
+}
+
+#[cfg(target_vendor = "apple")]
+fn loaded_images() -> Vec<String> {
+    extern "C" {
+        fn _dyld_image_count() -> u32;
+        fn _dyld_get_image_name(index: u32) -> *const c_char;
+    }
+    (0..unsafe { _dyld_image_count() })
+        .filter_map(|i| {
+            let name = unsafe { _dyld_get_image_name(i) };
+            (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+// Elsewhere (Windows) the check is not made.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn loaded_images() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn a_second_protocol_image_is_refused_before_anything_starts() {
+        extern "C" {
+            fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
+        }
+        let loaded = protocol_images();
+        assert_eq!(loaded.len(), 1, "the test links one image: {loaded:?}");
+        let original = Path::new(&loaded[0]);
+        let dir = std::env::temp_dir().join(format!("logos-second-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join(original.file_name().unwrap());
+        std::fs::copy(original, &copy).unwrap();
+        let path = CString::new(copy.to_str().unwrap()).unwrap();
+        const RTLD_NOW: c_int = 2;
+        assert!(!unsafe { dlopen(path.as_ptr(), RTLD_NOW) }.is_null(), "dlopen {copy:?}");
+        assert_eq!(protocol_images().len(), 2);
+        match LogosCore::start(Config::new("gate_test")) {
+            Err(LogosError::Other(message)) => assert!(message.contains("2 copies"), "{message}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("started with two protocol images"),
+        }
+    }
 
     #[test]
     fn shell_names_exclude_the_runtimes_own() {
