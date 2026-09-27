@@ -41,6 +41,7 @@ type EventCb = extern "C" fn(event: *const c_char, data: *const c_char, user_dat
 // Mirror of logos-liblogos src/logos_core/logos_core.h (the runtime-process part).
 extern "C" {
     fn logos_runtime_spawn(config_json: *const c_char, out_error: *mut *mut c_char) -> *mut RawRuntime;
+    fn logos_runtime_embed(config_json: *const c_char, out_error: *mut *mut c_char) -> *mut RawRuntime;
     fn logos_runtime_binding(runtime: *mut RawRuntime) -> *mut RawConsumer;
     fn logos_runtime_process_module(runtime: *mut RawRuntime, module_path: *const c_char) -> *mut c_char;
     fn logos_runtime_on_exit(runtime: *mut RawRuntime, cb: ExitCb, user_data: *mut c_void);
@@ -103,6 +104,8 @@ pub struct Config {
     pub module_transports: Option<Value>,
     pub access_policy: Option<Value>,
     pub placement_policy: Option<Value>,
+    /// Run the runtime in this process instead of spawning it; see [`Config::embedded`].
+    pub embedded: bool,
     pub runtime_path: Option<PathBuf>,
     pub host_plain_path: Option<PathBuf>,
     pub host_remote_path: Option<PathBuf>,
@@ -113,7 +116,13 @@ pub struct Config {
 
 impl Config {
     pub fn new(shell: impl Into<String>) -> Self {
-        Config { shell: shell.into(), ..Config::default() }
+        let config = Config { shell: shell.into(), ..Config::default() };
+        // iOS lets an app spawn nothing: the runtime and every module run in it.
+        #[cfg(target_os = "ios")]
+        let config = config.embedded(true).placement_policy(serde_json::json!({
+            "single_process": true, "local_endpoints": false
+        }));
+        config
     }
     pub fn modules_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.modules_dirs.push(dir.into());
@@ -136,6 +145,14 @@ impl Config {
     /// runtime's process, peering's modules and each import's facade included.
     pub fn placement_policy(mut self, policy: Value) -> Self {
         self.placement_policy = Some(policy);
+        self
+    }
+    /// Runs the runtime in this process (`logos_runtime_embed`), where no process
+    /// may be spawned. Once per process: [`LogosCore::stop`] cannot be followed by
+    /// another start. Pair it with `{"single_process": true}`, and add
+    /// `"local_endpoints": false` to bind no local socket.
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
         self
     }
     pub fn runtime_path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -219,6 +236,7 @@ struct Inner {
     binding: *mut RawConsumer,
     shell: String,
     exit: *const Mutex<ExitState>,
+    embedded: bool,
 }
 
 // The binding's calls are thread-safe (each is an lp_client call underneath).
@@ -259,10 +277,19 @@ impl LogosCore {
                 "this process already calls modules as '{}'", crate::api::module_origin().unwrap_or("")
             )));
         }
+        if cfg!(target_os = "ios") && !config.embedded {
+            return Err(LogosError::Other("an iOS app runs its runtime in itself: Config::embedded(true)".into()));
+        }
         config.export_environment();
         let line = CString::new(spawn.to_string())?;
         let mut error: *mut c_char = std::ptr::null_mut();
-        let runtime = unsafe { logos_runtime_spawn(line.as_ptr(), &mut error) };
+        let runtime = unsafe {
+            if config.embedded {
+                logos_runtime_embed(line.as_ptr(), &mut error)
+            } else {
+                logos_runtime_spawn(line.as_ptr(), &mut error)
+            }
+        };
         if runtime.is_null() {
             let why = unsafe { take_string(error) }.unwrap_or_else(|| "the runtime did not start".into());
             return Err(LogosError::Other(why));
@@ -270,11 +297,16 @@ impl LogosCore {
         let binding = unsafe { logos_runtime_binding(runtime) };
         let exit = Arc::into_raw(Arc::new(Mutex::new(ExitState::default())));
         unsafe { logos_runtime_on_exit(runtime, exit_trampoline, exit as *mut c_void) };
-        Ok(LogosCore { inner: Arc::new(Inner { runtime, binding, shell: config.shell, exit }) })
+        Ok(LogosCore { inner: Arc::new(Inner { runtime, binding, shell: config.shell, exit, embedded: config.embedded }) })
     }
 
     pub fn shell_name(&self) -> &str {
         &self.inner.shell
+    }
+
+    /// Whether the runtime runs in this process ([`Config::embedded`]).
+    pub fn is_embedded(&self) -> bool {
+        self.inner.embedded
     }
 
     /// Calls `handler` once if the runtime exits before [`LogosCore::stop`].
@@ -639,6 +671,13 @@ mod tests {
             "peering_config": {"name": "phone"},
             "placement_policy": {"single_process": true}
         }));
+    }
+
+    #[test]
+    fn embedding_is_how_it_starts_not_part_of_the_line() {
+        let config = Config::new("core_demo").embedded(true);
+        assert!(config.embedded);
+        assert!(config.spawn_json().unwrap().get("embedded").is_none());
     }
 
     #[test]
