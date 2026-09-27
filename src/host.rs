@@ -132,6 +132,12 @@ impl Config {
         self.peering = Some(config);
         self
     }
+    /// Where modules run: `{"single_process": true}` keeps them all in the
+    /// runtime's process, peering's modules and each import's facade included.
+    pub fn placement_policy(mut self, policy: Value) -> Self {
+        self.placement_policy = Some(policy);
+        self
+    }
     pub fn runtime_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.runtime_path = Some(path.into());
         self
@@ -587,14 +593,16 @@ mod tests {
             .modules_dir("/m")
             .bundled_modules_dir("/b")
             .persistence("/p")
-            .peering(json!({"name": "phone"}));
+            .peering(json!({"name": "phone"}))
+            .placement_policy(json!({"single_process": true}));
         let line = config.spawn_json().unwrap();
         assert_eq!(line, json!({
             "shell": "core_demo",
             "modules_dirs": ["/m"],
             "bundled_modules_dirs": ["/b"],
             "persistence_base_path": "/p",
-            "peering_config": {"name": "phone"}
+            "peering_config": {"name": "phone"},
+            "placement_policy": {"single_process": true}
         }));
     }
 
