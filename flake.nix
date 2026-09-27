@@ -25,8 +25,9 @@
     # two-level, so each image reaches the protocol it was linked against and
     # the mismatch stays invisible. Linux resolves against the flat global
     # namespace, gets the host's older protocol, and refuses to load.
+    # The peering stack (protocol 0.14, logos-protocol#99); back to master as it merges.
     logos-module-builder = {
-      url = "github:logos-co/logos-module-builder";
+      url = "github:logos-co/logos-module-builder/feat/peering";
       inputs.logos-protocol.follows = "logos-protocol";
     };
     # Resolved as tests/flake.nix resolves it, so this check and CI run one
@@ -34,7 +35,7 @@
     # capability_module whose TokenManager layout differs from this protocol's
     # splits the token store ("auth token not recognized" on every call).
     logos-logoscore-cli = {
-      url = "github:logos-co/logos-logoscore-cli";
+      url = "github:logos-co/logos-logoscore-cli/feat/peering";
       inputs.logos-protocol.follows = "logos-protocol";
       inputs.logos-cpp-sdk.follows = "logos-module-builder/logos-cpp-sdk";
       inputs.logos-nix.follows = "logos-module-builder/logos-nix";
@@ -50,7 +51,7 @@
     # teardown pair (0.5). The follows above point module-builder and logoscore
     # AT this pin, so both intents hold at once: one protocol, and a current one.
     logos-protocol = {
-      url = "github:logos-co/logos-protocol";
+      url = "github:logos-co/logos-protocol/feat/peering";
       inputs.logos-nix.follows = "logos-nix";
     };
   };

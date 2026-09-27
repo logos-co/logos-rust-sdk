@@ -360,16 +360,13 @@ grep -aq "ignoring leftover fromModuleName=" "$log" \
   && fail "the announced module name disagreed with the token-bound caller identity"
 echo '  OK  capability_module admitted "sdk_test_caller_module" (known-caller roster carries it)'
 
-# (c) the key the TARGET was told to file the token under (capability_module's
-#     process, describing the push it made into the provider).
-#     Same rewording as (b): "Successfully informed X about token for Y" was
-#     split into the delivery line and its result. The delivery line is the
-#     better witness of the two — it names both modules in their ROLES, so a
-#     swap of caller and target cannot satisfy it.
-grep -aq 'delivering token for "sdk_test_caller_module" via the handshake surface of "sdk_test_provider_module"' "$log" \
+# (c) the key the TARGET filed the token under, read off the provider's own log:
+#     the runtime's in-process capability_module pushes pairs without a log line
+#     of its own. The receipt names both modules in their ROLES.
+grep -aq '\[sdk_test_provider_module\] .*Saving inbound token for caller: "sdk_test_caller_module"' "$log" \
   || fail "the minted token was not pushed to the provider under the caller's own name"
-grep -aq 'informModuleToken completed with result: true' "$log" \
-  || fail "the token push to the provider did not report success"
+grep -aq '\[sdk_test_caller_module\] .*Found token for module: "sdk_test_provider_module"' "$log" \
+  || fail "the caller never held the token for the provider"
 echo '  OK  the provider was told to file the token under "sdk_test_caller_module"'
 
 # (d) the negative half, and the one that would have caught this: no module in
