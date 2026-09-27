@@ -242,6 +242,36 @@
           runtimeLibPath = "${liblogosLib}/lib";
         };
 
+      # The same for a Windows app (x86_64-pc-windows-gnu), from logos-nix's mingw
+      # set (`windowsPkgs`, e.g. `logos-nix.lib.mkWindowsPkgs { buildSystem = ...; }`):
+      # what logos-module-builder's rustCrossEnv gives a Rust module. The caller
+      # brings a toolchain, built on the build system, with the target's std.
+      lib.hostBuildSupportWindows = { liblogosLib, windowsPkgs }:
+        let
+          target = "x86_64-pc-windows-gnu";
+          u = builtins.replaceStrings [ "-" ] [ "_" ] target;
+          U = nixpkgs.lib.toUpper u;
+          cc = windowsPkgs.stdenv.cc;
+          # nixpkgs builds mingw-w64 against mcfgthread; std links -l:libpthread.a.
+          pthreads = windowsPkgs.windows.pthreads;
+        in
+        {
+          inherit target;
+          nativeBuildInputs = [ cc ];
+          env = {
+            LOGOS_HOST_LIB_DIR = "${liblogosLib}/lib";
+            CARGO_BUILD_TARGET = target;
+            "CARGO_TARGET_${U}_LINKER" = "${cc}/bin/${cc.targetPrefix}cc";
+            "CARGO_TARGET_${U}_RUSTFLAGS" = "-L native=${pthreads}/lib";
+            "CC_${u}" = "${cc}/bin/${cc.targetPrefix}cc";
+            "CXX_${u}" = "${cc}/bin/${cc.targetPrefix}c++";
+            "AR_${u}" = "${cc.bintools}/bin/${cc.targetPrefix}ar";
+            "CFLAGS_${u}" = "-I${pthreads}/include";
+            "CXXFLAGS_${u}" = "-I${pthreads}/include";
+          };
+          runtimeLibPath = "${liblogosLib}/lib";
+        };
+
       # Typed clients for an app, one `<name>.rs` per contract plus a `mod.rs`:
       # `lidls` maps a module name to its .lidl (a module's packages.<sys>.lidl).
       # Commit the output and check it with `clientsUpToDate`; a build.rs cannot

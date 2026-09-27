@@ -494,7 +494,7 @@ pub fn protocol_images() -> Vec<String> {
         .into_iter()
         .filter(|path| {
             Path::new(path).file_name().and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("liblogos_protocol_plain."))
+                .map_or(false, |n| n.to_ascii_lowercase().starts_with("liblogos_protocol_plain."))
         })
         .map(|path| std::fs::canonicalize(&path).map(|p| p.display().to_string()).unwrap_or(path))
         .collect();
@@ -544,8 +544,43 @@ fn loaded_images() -> Vec<String> {
         .collect()
 }
 
-// Elsewhere (Windows) the check is not made.
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(windows)]
+fn loaded_images() -> Vec<String> {
+    use std::os::windows::ffi::OsStringExt;
+    type Handle = *mut c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> Handle;
+        fn K32EnumProcessModules(process: Handle, modules: *mut Handle, bytes: u32, needed: *mut u32) -> i32;
+        fn GetModuleFileNameW(module: Handle, name: *mut u16, size: u32) -> u32;
+    }
+    let process = unsafe { GetCurrentProcess() };
+    let mut modules: Vec<Handle> = vec![std::ptr::null_mut(); 256];
+    loop {
+        let (size, mut needed) = (std::mem::size_of::<Handle>(), 0u32);
+        let bytes = (modules.len() * size) as u32;
+        if unsafe { K32EnumProcessModules(process, modules.as_mut_ptr(), bytes, &mut needed) } == 0 {
+            return Vec::new();
+        }
+        let count = needed as usize / size;
+        if count <= modules.len() {
+            modules.truncate(count);
+            break;
+        }
+        modules.resize(count, std::ptr::null_mut());
+    }
+    modules
+        .into_iter()
+        .filter_map(|module| {
+            let mut name = vec![0u16; 1024];
+            let len = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+            (len > 0).then(|| std::ffi::OsString::from_wide(&name[..len]).to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+// Elsewhere the check is not made.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
 fn loaded_images() -> Vec<String> {
     Vec::new()
 }
