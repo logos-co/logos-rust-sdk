@@ -37027,11 +37027,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788367777,
-        "narHash": "sha256-80DDvYUPLNSB914movtntx30Dy4lqf54ViSWTH6KhMo=",
+        "lastModified": 1790889490,
+        "narHash": "sha256-vS8fkumEYmKwGwg4l6X8C8bPH1o1ddF/rq1RCr6GFgA=",
         "owner": "logos-co",
         "repo": "logos-protocol",
-        "rev": "3d132f4bc8f1d73078a41682dc68221ff5b516e9",
+        "rev": "4fc6973d6d10aa6ddf9a409f0a9d08eb582f46fc",
         "type": "github"
       },
       "original": {
