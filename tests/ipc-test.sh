@@ -334,7 +334,8 @@ echo '  OK  the caller announced origin "sdk_test_caller_module"'
 #
 #     A minted token IS the admission: requestModule fails closed and returns
 #     empty on every identity it cannot place.
-grep -aq 'requestModule result for "sdk_test_provider_module" : "[0-9a-f-][0-9a-f-]*"' "$log" \
+#     logos-protocol#106 logs whether a token arrived instead of its value.
+grep -aqE 'requestModule result for "sdk_test_provider_module" (: "[0-9a-f-]+"|token received: true)' "$log" \
   || fail "capability_module minted no token for the caller — the handshake did not complete"
 #     A negative assertion is only worth its line if the string it looks for
 #     still exists — otherwise it passes forever. "rejecting request from
