@@ -35,6 +35,13 @@ jobs:
           nix build '.#checks.x86_64-linux.module-impl-abi' \
             --print-build-logs
 
+      # The only thing that runs src/*.rs's tests: lidl-gen's doCheck is
+      # scoped to `-p logos-lidl-gen`.
+      - name: Run the SDK crate's unit tests
+        run: |
+          nix build '.#checks.x86_64-linux.sdk-unit-tests' \
+            --print-build-logs
+
       - name: Run IPC integration test
         run: |
           nix build 'path:./tests#checks.x86_64-linux.ipc-test' \

@@ -234,13 +234,9 @@
             bash ${./tests/ipc-test.sh}
           '';
 
-          # The SDK crate's own unit tests — and, before this, nothing ran
-          # them. The lidl-gen package's doCheck is scoped to
-          # `-p logos-lidl-gen`, and ci.yml runs only the IPC integration
-          # test, so every assertion in src/*.rs (the bytes codec, the arg
-          # validator, the timeout rules, and now the caller parser and its
-          # per-thread stack) was ungated: `cargo test` had to be run by hand
-          # to learn anything about them.
+          # The SDK crate's own unit tests (src/*.rs), built by name in
+          # ci.yml. lidl-gen's doCheck is scoped to `-p logos-lidl-gen`, so
+          # nothing else runs them.
           #
           # The install phase is written out rather than left to the cargo
           # install hook: this crate is an rlib with the lp_* symbols
