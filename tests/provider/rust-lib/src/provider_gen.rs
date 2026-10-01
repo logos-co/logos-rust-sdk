@@ -189,7 +189,7 @@ pub fn install<T: SdkTestProviderModule + Default>() {
                                      let result = "module sdk_test_provider_module {\n  version \"0.1.0\"\n  description \"Minimal provider module for logos-rust-sdk integration tests\"\n  depends []\n\n  method add(a: int, b: int) -> int\n  method emit_blob(size: int) -> int\n  method sleep(ms: int) -> int description \"Block for `ms` milliseconds, then echo `ms` back. The fixture a per-call timeout is measured against: a caller that outlives its timeout must come back at the timeout, not at `ms`.\"\n\n  event blobReady(seq: int, payload: bstr)\n}\n".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
-            _ => None,
+            _ => Some(logos_rust_sdk::args::unknown_method("sdk_test_provider_module", method)),
         }
     }
     *REGISTERED.lock().unwrap() = Some(Registered {

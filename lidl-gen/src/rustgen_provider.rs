@@ -1288,9 +1288,14 @@ __ABOUT_TO_UNLOAD_BODY__\n\
         ));
     }
 
+    // Refused, not None: logos_module_dispatch turns None into NULL, which the
+    // Qt glue answers as an empty reply that a caller cannot tell from null.
+    out.push_str(&format!(
+        "            _ => Some(logos_rust_sdk::args::unknown_method({:?}, method)),\n",
+        module.name
+    ));
     out.push_str(
-        "            _ => None,\n\
-         \x20       }\n\
+        "        }\n\
          \x20   }\n\
          \x20   *REGISTERED.lock().unwrap() = Some(Registered {\n\
          \x20       dispatch: dispatch_impl::<T>,\n\
@@ -2292,6 +2297,22 @@ module v_module {
             code
         );
         assert!(!code.contains("args.len() < 0"), "dead lower gate:\n{}", code);
+    }
+
+    #[test]
+    fn unknown_method_is_refused_in_both_concurrency_modes() {
+        // None became a NULL reply, which a typed caller read as a default with an ok error.
+        let m = parse("module z { method ping() -> tstr }").expect("parse");
+        for multi in [false, true] {
+            let code = generate_provider_with(&m, "0.1.0", true, multi);
+            let dispatch = code.find("fn dispatch_impl<").expect("dispatch_impl");
+            let body = &code[dispatch..];
+            let refusal = body
+                .find("_ => Some(logos_rust_sdk::args::unknown_method(\"z\", method)),")
+                .unwrap_or_else(|| panic!("multi={multi}: no unknown_method fallthrough:\n{code}"));
+            let ping = body.find("\"ping\" =>").expect("ping arm");
+            assert!(ping < refusal, "multi={multi}: refusal precedes an arm:\n{code}");
+        }
     }
 
     #[test]

@@ -100,6 +100,13 @@ echo "call result: $result"
 printf '%s' "$result" | grep -qE '"result"[[:space:]]*:[[:space:]]*8[[:space:]]*[,}]' \
   || fail "expected sdk_test_caller_module.call_add(5,3) == 8: $result"
 
+# ───────────────────────────── 1b. an unknown method NAME fails, module to module
+# The provider answered a bare null, so the caller's call SUCCEEDED with `null`.
+reply=$(call_json sdk_test_caller_module unknown_method_reply)
+echo "unknown_method_reply: $reply"
+printf '%s' "$reply" | grep -q "unknown method 'no_such_method'" \
+  || fail "a call to a method the provider lacks did not fail with unknown_method: $reply"
+
 # ──────────────────────────────────────────────── 2. binary event round trip
 # The caller subscribed to the provider's blobReady(seq, payload: bstr) event in
 # on_context_ready; ask the provider to emit a 4096-byte deterministic blob,
@@ -385,6 +392,7 @@ echo "  OK  $handshakes capability handshake(s) actually happened"
 
 {
   echo "IPC test passed: sdk_test_provider_module.add(5,3) returned 8 via IPC"
+  echo "Unknown method passed: the provider refused no_such_method and the caller's call failed"
   echo "Binary event passed: blobReady payload received as 4096 bytes, checksum 8354754"
   echo "Per-call timeout passed:"
   echo "  sync  sleep 6000ms under an 800ms timeout failed after ${sync_bounded}ms"
