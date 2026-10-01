@@ -13,5 +13,6 @@ module sdk_test_caller_module {
   method start_timed_call_async(sleep_ms: int, timeout_ms: int) -> int description "Same as timed_call, through the generated ASYNC wrapper (sleep_async_with_timeout / sleep_async) on the same shared client. Returns immediately; read the outcome with last_async_elapsed_ms / last_async_ok."
   method last_async_elapsed_ms() -> int description "Milliseconds the last start_timed_call_async took to reach its callback, or -1 while still in flight."
   method last_async_ok() -> int description "1 if the last async call completed, 0 if it failed, -1 while still in flight."
+  method unknown_method_reply() -> tstr description "Call a method the provider does not have and report what came back: the error's text, or `ok: <value>` if the call succeeded."
   method refused_timeout_reason(timeout_us: int) -> tstr description "Ask for a bounded call with a timeout of timeout_us MICROseconds and report why it was refused. Empty means it was accepted — which on this ABI would mean a sub-millisecond bound silently became the 20s default."
 }

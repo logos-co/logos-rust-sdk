@@ -256,7 +256,7 @@ pub fn install<T: GeometryModule + Default>() {
                                      let result = "module geometry_module {\n  version \"1.0.0\"\n  description \"Composite types: records, arrays-of-records, maps, and optionals\"\n  depends []\n\n  type Point {\n    x: float64\n    y: float64\n  }\n\n  method translate(p: Point, dx: float64, dy: float64) -> Point description \"Translates a point by an offset.\"\n  method bounds(points: [Point]) -> Point description \"Returns the bounding corner of a set of points.\"\n  method attributes(tags: {tstr: any}) -> {tstr: any} description \"Echoes a string-keyed map of arbitrary values.\"\n  method signatures(payloads: {tstr: [bstr]}) -> {tstr: [bstr]} description \"Echoes named groups of byte strings.\"\n  method nearest(p: Point, limit: ? uint) -> ? Point description \"Finds the nearest point within an optional limit; may return nothing.\"\n  method describe(p: Point) -> any description \"Returns an arbitrary JSON description of a point.\"\n\n  event moved(from: Point, to: Point) description \"Fires when a point moves, carrying both record values.\"\n  event signatures_changed(payloads: {tstr: [bstr]}) description \"Fires when signature groups change.\"\n}\n".to_string();
                                      Some(serde_json::Value::from(result))
                                  }
-            _ => None,
+            _ => Some(logos_rust_sdk::args::unknown_method("geometry_module", method)),
         }
     }
     *REGISTERED.lock().unwrap() = Some(Registered {

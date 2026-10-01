@@ -15,11 +15,9 @@
 //! languages changed together, so neither starts rejecting inputs the other
 //! still accepts.
 //!
-//! Unknown method names deliberately keep the NULL reply. The Qt glue maps NULL
-//! to an empty QVariant, and a caller that optimistically calls an optional
-//! lifecycle hook and reads "no value" as "not implemented" would misread a
-//! structured error as a real return value. `logos_module_get_methods` is the
-//! supported way to ask what exists.
+//! An unknown method NAME reports `unknown_method` — see [`unknown_method`]. It
+//! used to be a NULL reply, which the Qt glue turns into an empty QVariant, so a
+//! typed caller read the return type's default with an ok error.
 
 use serde_json::Value;
 
@@ -269,6 +267,16 @@ pub fn invalid_args_max(origin: &str, max: usize, got: usize) -> Value {
     })
 }
 
+/// No method by that name. Same object as the C++ generated dispatch, replacing
+/// a NULL reply that a caller could not tell from a method returning null.
+pub fn unknown_method(origin: &str, method: &str) -> Value {
+    serde_json::json!({
+        "code": "unknown_method",
+        "message": format!("unknown method '{}'", method),
+        "origin": origin,
+    })
+}
+
 /// The canonical structured error a failed dispatch returns, matching the object
 /// C++ generated glue emits.
 pub fn dispatch_failed(origin: &str, message: &str) -> Value {
@@ -292,12 +300,9 @@ pub fn dispatch_failed(origin: &str, message: &str) -> Value {
 /// * `invalid_args` — wrong argument COUNT; see [`invalid_args`]. This crate has
 ///   EMITTED it since arity checking landed, and nothing detected it — an arity
 ///   error read back to a typed consumer as a successful call returning a map.
-/// * `unknown_method` — nothing emits this yet, listed on purpose. An unknown
-///   method is currently answered with a bare null, indistinguishable from a
-///   legitimate null return, and closing that needs a provider-contract change
-///   across the SDKs. Widening a detector is backwards-compatible on its own;
-///   a new provider code shipped against narrow detectors would arrive at
-///   consumers as DATA — the same silent-success bug, freshly minted.
+/// * `unknown_method` — no method by that NAME; see [`unknown_method`]. Listed
+///   before any provider emitted it, so a provider that starts answering it
+///   never reaches a consumer whose detector reads it as DATA.
 pub const REJECTION_CODES: [&str; 3] = ["dispatch_failed", "invalid_args", "unknown_method"];
 
 /// The inverse of [`dispatch_failed`]: recognise the canonical rejection object
@@ -524,6 +529,15 @@ mod tests {
         assert_eq!(e["code"], json!("invalid_args"));
         assert_eq!(e["message"], json!("expected 4 arguments, got 2"));
         assert_eq!(e["origin"], json!("my_module"));
+    }
+
+    #[test]
+    fn unknown_method_shape_matches_cpp() {
+        let e = unknown_method("my_module", "add");
+        assert_eq!(e["code"], json!("unknown_method"));
+        assert_eq!(e["message"], json!("unknown method 'add'"));
+        assert_eq!(e["origin"], json!("my_module"));
+        assert_eq!(as_dispatch_rejection(&e), Some("unknown method 'add'"));
     }
 
     #[test]

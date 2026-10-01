@@ -222,6 +222,16 @@ impl SdkTestCallerModule for CallerImpl {
     /// and refused where it was supplied, not on some later call. Returns the
     /// error's Display text (empty if the call was accepted, which is itself
     /// the failure the harness looks for).
+    /// An unknown NAME must fail the call. The provider used to answer a bare
+    /// null, so this reported `ok: null`.
+    fn unknown_method_reply(&mut self) -> String {
+        let provider = LogosModuleSDK::new().plugin("sdk_test_provider_module");
+        match provider.call_json("no_such_method", &serde_json::json!([])) {
+            Err(e) => e.to_string(),
+            Ok(v) => format!("ok: {}", v),
+        }
+    }
+
     fn refused_timeout_reason(&mut self, timeout_us: i64) -> String {
         match provider().sleep_with_timeout(0, Duration::from_micros(timeout_us.max(0) as u64)) {
             Err(logos_rust_sdk::LogosError::InvalidTimeout { reason, .. }) => reason,
