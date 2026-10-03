@@ -2,11 +2,12 @@
   description = "Integration tests for logos-rust-sdk — builds a minimal provider+caller module pair and verifies IPC via logoscore";
 
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder";
+    # The peering stack, as the root flake; back to master as it merges.
+    logos-module-builder.url = "github:logos-co/logos-module-builder/feat/peering";
     # CI overrides this with --override-input logos-rust-sdk path:.
     # Keeping a real GitHub URL here lets the lock file record a valid narHash.
-    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
+    logos-rust-sdk.url = "github:logos-co/logos-rust-sdk/feat/peering";
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/peering";
     # ONE logos-protocol in the closure, not two. The modules are COMPILED
     # against logos-module-builder's (the header path below reads it straight
     # out of that input) and LOADED against the runtime this input builds. Left
