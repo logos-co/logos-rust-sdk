@@ -41,6 +41,8 @@ mod params;
 mod callback;
 mod plugin;
 mod api;
+#[cfg(feature = "host")]
+pub mod host;
 
 // Re-export public API
 pub use error::LogosError;
