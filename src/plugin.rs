@@ -536,8 +536,8 @@ struct AsyncCallState {
 /// lp result trampoline for [`PluginProxy::call_json_async`]: reclaim the
 /// boxed state, turn `(ok, json)` into a typed `Result<Value, _>` (the raw
 /// JSON value on success; a `PluginCallFailed` carrying the canonical error
-/// object's message on failure — the async analog of `call_json`'s sync error
-/// path), and hand it to the one-shot callback.
+/// object on failure, as `call_json`'s sync error path does, so
+/// [`LogosError::code`] reads it), and hand it to the one-shot callback.
 extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *mut c_void) {
     if user_data.is_null() {
         return;
@@ -564,11 +564,7 @@ extern "C" fn async_call_trampoline(ok: c_int, json: *const c_char, user_data: *
             None => Ok(value),
         }
     } else {
-        let message = serde_json::from_str::<serde_json::Value>(&raw)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .unwrap_or(raw);
-        Err(LogosError::PluginCallFailed { plugin, method, message })
+        Err(LogosError::PluginCallFailed { plugin, method, message: raw })
     };
 
     callback(result);

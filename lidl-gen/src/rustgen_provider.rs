@@ -849,6 +849,27 @@ fn runtime_delegate_block(protocol_version: &str) -> String {
         .to_string()
 }
 
+/// The optional `logos_module_set_configuration`, at protocol 0.13: the host's
+/// configuration document, stored before the context and read into
+/// `RustModuleContext.configuration`. Calls no lp_*; refuses bad JSON and late delivery.
+fn configuration_block(protocol_version: &str) -> String {
+    if !protocol_at_least(protocol_version, 0, 13) {
+        return String::new();
+    }
+    "\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn logos_module_set_configuration(configuration_json: *const c_char) -> c_int {\n\
+     \x20   if configuration_json.is_null() { return -1; }\n\
+     \x20   let text = unsafe { CStr::from_ptr(configuration_json) }.to_string_lossy().into_owned();\n\
+     \x20   if serde_json::from_str::<serde_json::Value>(&text).is_err() { return -1; }\n\
+     \x20   let context = CONTEXT.lock().unwrap();\n\
+     \x20   if context.is_some() { return -1; }\n\
+     \x20   *CONFIGURATION.lock().unwrap() = text;\n\
+     \x20   0\n\
+     }\n"
+        .to_string()
+}
+
 fn set_call_caller_block(protocol_version: &str) -> String {
     if !protocol_at_least(protocol_version, 0, 6) {
         return String::new();
@@ -987,8 +1008,11 @@ pub fn generate_provider_with_document(
          \x20   pub module_path: String,\n\
          \x20   pub instance_id: String,\n\
          \x20   pub instance_persistence_path: String,\n\
+         \x20   /// The host's configuration document (JSON text), empty when none. Never authority.\n\
+         \x20   pub configuration: String,\n\
          }\n\n\
-         static CONTEXT: Mutex<Option<RustModuleContext>> = Mutex::new(None);\n\n\
+         static CONTEXT: Mutex<Option<RustModuleContext>> = Mutex::new(None);\n\
+         static CONFIGURATION: Mutex<String> = Mutex::new(String::new());\n\n\
          /// The module identity/context stamped by the host (None before\n\
          /// set_context — mirrors LogosModuleContext::isContextReady()).\n\
          pub fn context() -> Option<RustModuleContext> {\n\
@@ -1425,11 +1449,15 @@ __ABOUT_TO_UNLOAD_BODY__\n\
          \x20   fn s(p: *const c_char) -> String {{\n\
          \x20       if p.is_null() {{ String::new() }} else {{ unsafe {{ CStr::from_ptr(p) }}.to_string_lossy().into_owned() }}\n\
          \x20   }}\n\
-         \x20   *CONTEXT.lock().unwrap() = Some(RustModuleContext {{\n\
+         \x20   // CONTEXT, then CONFIGURATION: the order the configuration export takes them.\n\
+         \x20   let mut context = CONTEXT.lock().unwrap();\n\
+         \x20   *context = Some(RustModuleContext {{\n\
          \x20       module_path: s(module_path),\n\
          \x20       instance_id: s(instance_id),\n\
          \x20       instance_persistence_path: s(instance_persistence_path),\n\
+         \x20       configuration: CONFIGURATION.lock().unwrap().clone(),\n\
          \x20   }});\n\
+         \x20   drop(context);\n\
          \x20   ensure_ready(true);\n\
          }}\n\n\
          #[no_mangle]\n\
@@ -1483,7 +1511,11 @@ __ABOUT_TO_UNLOAD_BODY__\n\
                 "{}{}{}",
                 set_call_caller_block(protocol_version),
                 accept_inbound_token_block(protocol_version),
-                runtime_delegate_block(protocol_version)
+                format!(
+                    "{}{}",
+                    runtime_delegate_block(protocol_version),
+                    configuration_block(protocol_version)
+                )
             )
         )
     ));
@@ -1784,6 +1816,23 @@ module rust_calc {
         // MAJOR-aware, like every other gate.
         let next_major = generate_provider(&m, "1.0.0");
         assert!(next_major.contains("pub extern \"C\" fn logos_module_set_runtime_delegate"));
+    }
+
+    // The host's configuration reaches the context before on_context_ready: stored
+    // by the optional export, refused late, and copied into the context literal.
+    #[test]
+    fn protocol_0_13_emits_the_configuration_export() {
+        let m = parse(SAMPLE).unwrap();
+        let code = generate_provider(&m, "0.13.0");
+        assert!(
+            code.contains("pub extern \"C\" fn logos_module_set_configuration(configuration_json: *const c_char) -> c_int"),
+            "{code}"
+        );
+        assert!(code.contains("if context.is_some() { return -1; }"), "{code}");
+        assert!(code.contains("configuration: CONFIGURATION.lock().unwrap().clone(),"), "{code}");
+        assert!(code.contains("pub configuration: String,"), "{code}");
+        assert!(!generate_provider(&m, "0.12.0").contains("logos_module_set_configuration"));
+        assert!(generate_provider(&m, "1.0.0").contains("fn logos_module_set_configuration"));
     }
 
     // Below 0.13 the protocol has no lp_runtime_install_delegate to link.
