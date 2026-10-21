@@ -2,7 +2,7 @@
 
 This doc-test builds **three Logos modules — two providers (one Rust, one
 C++) and one Rust consumer that ties them together** — and drives them
-end-to-end through a headless `logoscore` daemon. It is the feature tour for
+end-to-end through a headless `logosctl` daemon. It is the feature tour for
 [`logos-rust-sdk`](https://github.com/logos-co/logos-rust-sdk): everything a
 Rust module needs to consume other modules, in one place.
 
@@ -46,7 +46,7 @@ and compiles the crate itself, exactly as it runs the C++ generator. The
 author writes only the trait impl and the install hook; the module's
 `flake.nix` and `CMakeLists.txt` are as small as a C++ module's.
 
-**What you'll build:** Three composed modules — a Rust provider, a C++ provider, and a Rust consumer — wired through typed generated bindings, showcasing module context, sync/async calls, event subscription, and concrete + interface dependencies, all driven through a logoscore daemon.
+**What you'll build:** Three composed modules — a Rust provider, a C++ provider, and a Rust consumer — wired through typed generated bindings, showcasing module context, sync/async calls, event subscription, and concrete + interface dependencies, all driven through a logosctl daemon.
 
 **What you'll learn:**
 
@@ -74,30 +74,25 @@ Verify: `nix flake --help >/dev/null 2>&1 && echo "Flakes enabled"`
 
 ## Step 1: Build the tools
 
-Two tools drive the tour: `logoscore` (the headless module runtime) and
-`lgpm` (the local package installer). Note what is *not* here: there is no
+One tool drives the tour: `logosctl`, the headless module runtime, which
+also installs the packages. Note what is *not* here: there is no
 separate code-generator build — the module builder runs the Rust and C++
 generators itself.
 
-> `logoscore`, `logos-module-builder`, and `logos-rust-sdk` are pinned to
-> known-good merged-master commits so the tour is reproducible. Bump them
-> to newer masters (or a release tag) as the stack advances.
+> `logos-module-builder` and `logos-rust-sdk` are pinned to known-good
+> merged-master commits so the tour is reproducible; `logosctl` is built
+> from the CLI's master. Bump the pins to newer masters (or a release tag)
+> as the stack advances.
 
-### 1.1 Build logoscore
+### 1.1 Build logosctl
 
 ```bash
-nix build 'github:logos-co/logos-logoscore-cli/11be0e5afad9c96c42048a8780e8b4ca10729e24' --out-link ./logos
+nix build 'github:logos-co/logos-logoscore-cli#ctl' --out-link ./logos
 ```
 
 This brings in the whole module-runtime stack plus the bundled
 `capability_module` (required for the auth handshake when loading
 modules in daemon mode).
-
-### 1.2 Build lgpm
-
-```bash
-nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
-```
 
 ---
 
@@ -723,28 +718,23 @@ nix build .#lgx -o orch-lgx --override-input rust_calc_module path:$PWD/../rust-
 
 ## Step 5: Install and run the trio
 
-Install all three packages plus the bundled `capability_module`, start the
-daemon, load the modules, and exercise every feature.
+Start the daemon, install all three packages into its session, load the
+modules, and exercise every feature.
 
-### 5.1 Install the modules
+### 5.1 Start the daemon
+
+The session directory, `./session`, holds the daemon's config, its
+installed modules and their data. `--detach` returns once the daemon
+accepts commands.
 
 ```bash
-mkdir -p modules
-cp -RL ./logos/modules/. ./modules/
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file rust-calc/calc-lgx/*.lgx
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file cpp-greeter/greeter-lgx/*.lgx
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file rust-orchestrator/orch-lgx/*.lgx
-
+logosctl daemon start --detach
 ```
 
-### 5.2 Start the daemon
+### 5.2 Install the modules
 
 ```bash
-logoscore -D -m ./modules > logs.txt &
-```
-
-```bash
-sleep 3
+logosctl install rust-calc/calc-lgx/*.lgx cpp-greeter/greeter-lgx/*.lgx rust-orchestrator/orch-lgx/*.lgx -y
 ```
 
 ### 5.3 Load the modules
@@ -755,11 +745,11 @@ decoupled from the orchestrator's dependency list — so load it
 explicitly first.
 
 ```bash
-logoscore load-module cpp_greeter_module
+logosctl module load cpp_greeter_module
 ```
 
 ```bash
-logoscore load-module rust_orchestrator_module
+logosctl module load rust_orchestrator_module
 ```
 
 `rust_calc_module` shows up in `dependencies_loaded` — the host resolved and loaded the concrete dependency automatically.
@@ -771,7 +761,7 @@ logoscore load-module rust_orchestrator_module
 per-instance persistence directory (a writable, instance-scoped path):
 
 ```bash
-logoscore call rust_orchestrator_module whereami
+logosctl call rust_orchestrator_module whereami
 ```
 
 ### 5.5 Sync typed call to the concrete dependency
@@ -780,7 +770,7 @@ logoscore call rust_orchestrator_module whereami
 synchronous cross-module call. No string-keyed dispatch:
 
 ```bash
-logoscore call rust_orchestrator_module tally 5 3
+logosctl call rust_orchestrator_module tally 5 3
 ```
 
 ### 5.6 The typed event arrived
@@ -790,7 +780,7 @@ subscribed to that event in `on_context_ready` and stored the value;
 `last_computed` reads it back:
 
 ```bash
-logoscore call rust_orchestrator_module last_computed
+logosctl call rust_orchestrator_module last_computed
 ```
 
 ### 5.7 Async typed call
@@ -800,7 +790,7 @@ the typed result is delivered on the event loop after the method
 returns:
 
 ```bash
-logoscore call rust_orchestrator_module tally_async 10 20
+logosctl call rust_orchestrator_module tally_async 10 20
 ```
 
 ```bash
@@ -812,7 +802,7 @@ sleep 1
 `last_async` reads the value the async callback stored once the event loop delivered it:
 
 ```bash
-logoscore call rust_orchestrator_module last_async
+logosctl call rust_orchestrator_module last_async
 ```
 
 ### 5.9 The async add emitted an event too
@@ -820,7 +810,7 @@ logoscore call rust_orchestrator_module last_async
 The async `add(10, 20)` also emitted `computed(30)`, so the subscription value has advanced:
 
 ```bash
-logoscore call rust_orchestrator_module last_computed
+logosctl call rust_orchestrator_module last_computed
 ```
 
 ### 5.10 Interface dependency: Rust → C++
@@ -831,13 +821,13 @@ The consumer never built against the C++ module; it only named it in
 `bind`:
 
 ```bash
-logoscore call rust_orchestrator_module hello World
+logosctl call rust_orchestrator_module hello World
 ```
 
 ### 5.11 Stop the daemon
 
 ```bash
-logoscore stop
+logosctl daemon stop
 ```
 
 ```bash
@@ -845,18 +835,18 @@ sleep 2
 ```
 
 ```bash
-logoscore status
+logosctl daemon status
 ```
 
 ### 5.12 What the daemon itself said
 
 Every step above reads the daemon through the CLI, which can only
-report what the RPC returned. `logs.txt` is the other half: a daemon
+report what the RPC returned. The daemon log is the other half: a daemon
 that dies mid-call leaves its reason there and nowhere else. Dumped
 unconditionally, because the run where you want it is the run that
 failed (under `--continue-on-fail`; a stop-at-first-failure run ends
 before this step, and the file is still on disk).
 
 ```bash
-tail -40 logs.txt
+tail -40 ~/.logosctl/logs/daemon.log
 ```

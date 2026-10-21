@@ -4,7 +4,7 @@ name: Doc-Tests
 # `doctest` CLI:
 #   - cross-language-composition: builds three modules — a Rust provider, a C++
 #     provider, and a Rust consumer — on the builder-driven cdylib path (no
-#     build.rs), then drives the consumer through a logoscore daemon to exercise
+#     build.rs), then drives the consumer through a logosctl daemon to exercise
 #     the whole Rust-SDK surface: module context, sync + async typed calls,
 #     event subscription, and concrete + interface dependencies.
 #

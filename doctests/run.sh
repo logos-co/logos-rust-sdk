@@ -6,8 +6,8 @@
 #   cross-language-composition.test.yaml — writes three modules from scratch on
 #       the builder-driven cdylib path (no build.rs): a Rust provider, a C++
 #       provider, and a Rust consumer that ties them together. Builds each into
-#       an .lgx, installs them with lgpm, and drives the consumer through a
-#       headless logoscore daemon to exercise the whole Rust-SDK surface — module
+#       an .lgx, installs them into a logosctl session, and drives the consumer
+#       through a headless logosctl daemon to exercise the whole Rust-SDK surface — module
 #       context, sync + async typed calls, event subscription, and concrete +
 #       interface dependencies.
 #
@@ -53,7 +53,7 @@ OUTPUT_DIR="./outputs"
 
 # ── Pick a filesystem that can actually host the build ───────────────────────
 # The spec writes a module from scratch, `git init && git add`s it, builds it
-# into a loadable .so, and dlopen()s it through a logoscore daemon. That demands
+# into a loadable .so, and dlopen()s it through a logosctl daemon. That demands
 # a filesystem that BOTH (a) lets git create loose objects and (b) is not mounted
 # noexec. Some sandboxes break one or the other: a `fakeowner` bind mount (Docker
 # Desktop / OrbStack, as used for /workspace) rejects git's read-only (0444)
@@ -135,7 +135,7 @@ if [ "${BUILD_DIR}" != "${OUTPUT_DIR}" ]; then
 fi
 
 # Each spec gets ITS OWN subdirectory: the specs write module sources, git
-# repos, modules/ install dirs and a default-config logoscore daemon state —
+# repos, and a logosctl session (installed modules, daemon state) —
 # sharing one dir makes the second spec trip over the first one's leftovers.
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
@@ -157,33 +157,31 @@ done
 # `doctest clean`'s defaults cover .git/, modules/, *.so/*.dylib, flake.lock, and
 # the out-links named lm/logos/pm/result*. Several of this spec's leftovers fall
 # outside those defaults, so add them explicitly:
-#   --also lgpm          the lgpm out-link (default knows `pm`, not `lgpm`)
 #   --also calc-lgx      the rust_calc_module .lgx out-link
 #   --also greeter-lgx   the cpp_greeter_module .lgx out-link
 #   --also orch-lgx      the rust_orchestrator_module .lgx out-link
 #   --also worker-lgx    the slow_worker_module .lgx out-link
 #   --also driver-lgx    the fanout_driver_module .lgx out-link
-#   --also logs.txt      the daemon log (default glob is *.log, not logs.txt)
 #   --also logos-rust-sdk-src
 #                        the staged SDK source out-link (a symlink into the nix
 #                        store; the specs .gitignore it, but clean should not
 #                        leave a dangling link in the committed tree)
-#   --also .logoscore    the per-spec daemon config/state dir
+#   --also session       the per-spec logosctl session (config, modules, logs)
+#   --also home          the daemon's HOME (its storage node's data)
 # Module dirs are copied out of the read-only nix store, so they land read-only
 # (r-x); restore write permission first or `clean` can't delete inside them.
 chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
 
 echo "==> Cleaning build artifacts from ${BUILD_DIR}/ (keeps generated source + .md)"
 "${DOCTEST[@]}" clean "${BUILD_DIR}" \
-  --also lgpm \
   --also calc-lgx \
   --also greeter-lgx \
   --also orch-lgx \
   --also worker-lgx \
   --also driver-lgx \
-  --also logs.txt \
   --also logos-rust-sdk-src \
-  --also .logoscore \
+  --also session \
+  --also home \
   --verbose
 
 # If we staged the build off-tree, copy the cleaned result back into ./outputs.
