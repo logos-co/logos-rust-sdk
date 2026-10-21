@@ -16,7 +16,7 @@ intro: |
   `Send + Sync`, so any mutated state must use interior mutability).
 
   This doc-test builds two Rust modules and proves the behavior end-to-end
-  through a headless `logoscore` daemon:
+  through a headless `logosctl` daemon:
 
   | Module | `concurrency` | Role |
   |---|---|---|
@@ -32,7 +32,7 @@ intro: |
   > a coordinator hands several jobs to a worker that processes them in parallel,
   > instead of one-at-a-time.
 
-what_you_build: "Two composed Rust modules — a concurrency:\"multi\" worker and an ordinary single-threaded driver — showing that a single module can drive concurrent work in a multi module, validated through a logoscore daemon."
+what_you_build: "Two composed Rust modules — a concurrency:\"multi\" worker and an ordinary single-threaded driver — showing that a single module can drive concurrent work in a multi module, validated through a logosctl daemon."
 
 what_you_learn:
   - "What `concurrency: \"multi\"` does and when to reach for it"
@@ -56,19 +56,16 @@ sections:
   - title: "Build the tools"
     step: true
     text: |
-      `logoscore` (the headless module runtime) and `lgpm` (the local package
-      installer) drive the tour. There is no separate code-generator build — the
+      `logosctl`, the headless module runtime that also installs packages, drives
+      the tour. There is no separate code-generator build — the
       module builder runs the Rust generator itself.
     steps:
-      - title: "Build logoscore"
-        run: "nix build 'github:logos-co/logos-logoscore-cli' --override-input logos-protocol 'github:logos-co/logos-protocol{release}' --override-input logos-liblogos/logos-protocol 'github:logos-co/logos-protocol{release}' --out-link ./logos"
+      - title: "Build logosctl"
+        run: "nix build 'github:logos-co/logos-logoscore-cli#ctl' --override-input logos-protocol 'github:logos-co/logos-protocol{release}' --override-input logos-liblogos/logos-protocol 'github:logos-co/logos-protocol{release}' --out-link ./logos"
         code_block: |
-          nix build 'github:logos-co/logos-logoscore-cli' --out-link ./logos
-        check_file: "logos/bin/logoscore"
+          nix build 'github:logos-co/logos-logoscore-cli#ctl' --out-link ./logos
+        check_file: "logos/bin/logosctl"
         post_text: "This brings in the module-runtime stack plus the bundled `capability_module` (needed for the auth handshake when loading modules in daemon mode). The daemon resolves a `multi` module's deferred reply on the caller's behalf, so it must be built against logos-protocol ≥ 0.2 — the `--override-input` here pins it to the protocol under test (once 0.2 lands in the published runtime, the plain `nix build` shown above suffices)."
-      - title: "Build lgpm"
-        run: "nix build 'github:logos-co/logos-package-manager#cli' -o lgpm"
-        check_file: "lgpm/bin/lgpm"
 
   - title: "Module 1 — the concurrent worker (`slow_worker_module`)"
     step: true
@@ -540,24 +537,30 @@ sections:
   - title: "Run it: the single driver overlaps the multi worker"
     step: true
     text: |
-      Install both modules, start the daemon, load them, and prove the overlap.
+      Start the daemon, install both modules into its session, load them, and
+      prove the overlap.
     steps:
-      - title: "Install the modules"
-        run: |
-          mkdir -p modules
-          cp -RL ./logos/modules/. ./modules/
-          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file slow-worker/worker-lgx/*.lgx
-          ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file fanout-driver/driver-lgx/*.lgx
-        expect_contains:
-          - "Installed to:"
       - title: "Start the daemon"
-        run: "sh -c './logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
-        code_block: "logoscore -D -m ./modules > logs.txt &"
-      - run: "sleep 6"
+        text: |
+          The session directory, `./session`, holds the daemon's config, its
+          installed modules and their data. `--detach` returns once the daemon
+          accepts commands.
+        # The bundled package downloader starts a storage node in $HOME; keep it
+        # out of the real one.
+        run: "mkdir -p home && HOME=\"$PWD/home\" ./logos/bin/logosctl --config-dir ./session daemon start --detach"
+        code_block: "logosctl daemon start --detach"
+        expect_contains:
+          - "Daemon started"
+      - title: "Install the modules"
+        run: "./logos/bin/logosctl --config-dir ./session install slow-worker/worker-lgx/*.lgx fanout-driver/driver-lgx/*.lgx -y"
+        code_block: "logosctl install slow-worker/worker-lgx/*.lgx fanout-driver/driver-lgx/*.lgx -y"
+        expect_contains:
+          - '"status":"ok"'
+
       - title: "Load the modules"
         text: "The driver's concrete dependency (`slow_worker_module`) is auto-loaded with it."
-        run: "./logos/bin/logoscore load-module fanout_driver_module"
-        code_block: "logoscore load-module fanout_driver_module"
+        run: "./logos/bin/logosctl --config-dir ./session module load fanout_driver_module"
+        code_block: "logosctl module load fanout_driver_module"
         expect_contains:
           - "fanout_driver_module"
           - "slow_worker_module"
@@ -567,8 +570,8 @@ sections:
           waiting between them, and returns immediately (`2`). Two calls are
           enough to distinguish concurrent dispatch from serialization without
           assuming a larger worker pool:
-        run: "./logos/bin/logoscore call fanout_driver_module fan_out 2 500"
-        code_block: "logoscore call fanout_driver_module fan_out 2 500"
+        run: "./logos/bin/logosctl --config-dir ./session call fanout_driver_module fan_out 2 500"
+        code_block: "logosctl call fanout_driver_module fan_out 2 500"
         expect_contains:
           - '"result":2'
       - title: "The worker ran them concurrently (peak == 2)"
@@ -580,25 +583,25 @@ sections:
           checks dispatch concurrency without relying on an arbitrary sleep. We
           read it through the driver so its generated client awaits the multi
           worker's deferred reply and returns the real number:
-        run: "./logos/bin/logoscore call fanout_driver_module peak"
-        code_block: "logoscore call fanout_driver_module peak"
+        run: "./logos/bin/logosctl --config-dir ./session call fanout_driver_module peak"
+        code_block: "logosctl call fanout_driver_module peak"
         expect_contains:
           - '"result":2'
       - title: "Stop the daemon"
-        run: "./logos/bin/logoscore stop"
-        code_block: "logoscore stop"
+        run: "./logos/bin/logosctl --config-dir ./session daemon stop"
+        code_block: "logosctl daemon stop"
       - run: "sleep 2"
-      - run: "./logos/bin/logoscore status || true"
-        code_block: "logoscore status"
+      - run: "./logos/bin/logosctl --config-dir ./session daemon status || true"
+        code_block: "logosctl daemon status"
         expect_contains:
           - '"status":"not_running"'
       - title: "What the daemon itself said"
         text: |
           Every step above reads the daemon through the CLI, which can only
-          report what the RPC returned. `logs.txt` is the other half: a daemon
+          report what the RPC returned. The daemon log is the other half: a daemon
           that dies mid-call leaves its reason there and nowhere else. Dumped
           unconditionally, because the run where you want it is the run that
           failed (under `--continue-on-fail`; a stop-at-first-failure run ends
           before this step, and the file is still on disk).
-        run: "tail -40 logs.txt || true"
-        code_block: "tail -40 logs.txt"
+        run: "tail -40 session/logs/daemon.log || true"
+        code_block: "tail -40 ~/.logosctl/logs/daemon.log"
